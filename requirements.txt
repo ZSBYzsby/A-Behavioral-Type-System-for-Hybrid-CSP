@@ -1,0 +1,4 @@
+# The source checkout only needs Z3 for its Python-side checks.  KeYmaera X is
+# an optional external Java tool and is configured separately; it is not a pip
+# dependency.
+z3-solver>=4.12,<5

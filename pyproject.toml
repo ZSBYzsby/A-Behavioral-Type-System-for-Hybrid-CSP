@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hcsp-typechecker"
+version = "0.1.0"
+description = "Behavioral type checker for HCSP based on the paper's Table 2"
+requires-python = ">=3.10"
+dependencies = ["z3-solver>=4.12,<5"]
+
+[tool.setuptools.packages.find]
+include = ["hcsp_typechecker*"]

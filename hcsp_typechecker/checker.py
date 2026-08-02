@@ -1,0 +1,2868 @@
+"""项目自有 HCSP 语言的行为类型推导器。
+
+核心数据流如下：
+
+``TypingJudgment -> ConclusionJudgment -> RuleExpansion(premises, conclude)
+-> 递归求解 ChildJudgmentPremise + 收集 FormulaPremise 到 Pool
+-> 由 conclude 组合候选类型 -> 统一判定 Pool -> 汇总三值 CheckReport``。
+
+这里的 ``Pool`` 只是“已经具体化的证明义务队列”，不是未知谓词综合器。整个
+推导严格分成以下两个阶段：
+
+1. 规则展开阶段确定性地生成子 judgment、候选行为类型、符号状态和逻辑公式。
+   特别地，T-Assign 在赋值前状态中计算右值，并用“旧路径条件 + 更新后的
+   symbols”表示惰性最强后置状态；它不会留下一个未知 ``phi'`` 等待搜索。
+2. 证明阶段统一判定第一阶段产生的具体 state/FOL/dL 公式。公式已经确定只表示
+   “证明目标已知”，不表示目标必然为真；Z3 或 KeYmaera X 仍须返回判定结果。
+
+因此，去掉延迟队列并让每条规则立即调用证明器不会改变理论上的可推导关系，
+但会混合类型构造与外部证明。当前实现保留 Pool，是为了完整生成推导树后再统一
+调度证明器、保留全部失败/未知证据，并清楚区分“类型生成成功”和“证明通过”。
+
+这不是把 Python 的递归调用直接当作论文推导树。每条 ``rule_t_*`` 规则只分析
+横线下方的结论 judgment，并显式返回横线上方的 premises；统一求解器按顺序
+展开子 judgment，把公式 premise 放入公共 Pool，最后调用规则的 ``conclude``
+函数组合子结论。配置、系统、顺序进程和事件反应分别有自己的 judgment 类，
+因此其结果层次也不会混淆。
+
+检查器只接受 :mod:`hcsp_typechecker.hcsp_process_ast` 中定义的节点，并使用明确的
+``isinstance`` 分派。外部对象不会因拥有同名字段而被隐式解释为 HCSP。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from enum import Enum
+from math import inf
+from typing import Any, Callable, Mapping, Sequence
+
+from .expressions import Literal
+from .dl import (
+    DLFormula,
+    DLTranslationError,
+    UntranslatedDLFormula,
+    domain_formula,
+    boundary_formula,
+    safety_formula,
+)
+from .hcsp_process_ast import (
+    Assert,
+    Assign,
+    Channel,
+    EmptyEvent,
+    EventChoice,
+    EventReaction,
+    HCSP,
+    If,
+    InputChannel,
+    InternalChoice,
+    Mu,
+    ODE,
+    OutputChannel,
+    Parallel,
+    Process,
+    Sequence as SequenceHP,
+    Skip,
+    Var,
+)
+from .logic import (
+    ExprResult,
+    ExpressionError,
+    ExpressionTranslator,
+    Z3ProofEngine,
+    conjunction,
+    implies,
+    lvalue_name,
+    negation,
+    simplify,
+    z3,
+)
+from .keymaerax import KeYmaeraXBackend, KeYmaeraXConfig
+from .hcsp_type_ast import (
+    AngelicType,
+    BottomType,
+    CommunicationTimeoutType,
+    ConfigurationType,
+    EndType,
+    ExternalChoiceType,
+    InputType,
+    InternalChoiceType,
+    MuType,
+    OutputType,
+    ParallelType,
+    ProcessType,
+    PureDelayType,
+    TimedExternalChoiceType,
+    TypeVar,
+    make_external_choice,
+    make_timed_type,
+    types_equivalent,
+)
+from .model import (
+    BasicType,
+    ChannelType,
+    CheckReport,
+    Configuration,
+    DLChecker,
+    DLCheckResult,
+    Diagnostic,
+    InferenceStep,
+    ProofObligation,
+    TypingJudgment,
+    Verdict,
+    is_subtype,
+    normalize_channel_type,
+    normalize_type,
+)
+
+
+@dataclass
+class _RecBinding:
+    """源过程变量与新鲜行为类型变量之间的递归绑定。"""
+
+    source_name: str
+    type_var: TypeVar
+    invariant: Any
+
+
+@dataclass
+class _Context:
+    """一次控制流分支上的可变推导上下文。
+
+    ``path`` 是当前符号状态必须满足的条件，``symbols`` 把程序变量映射到其
+    当前 Z3 项，``rec_env`` 保存作用域内递归变量。分支规则必须 clone 上下文，
+    以免一个分支的赋值泄漏到另一个分支。
+    """
+
+    gamma: dict[str, BasicType]
+    theta: dict[str, ChannelType]
+    path: Any
+    symbols: dict[str, Any]
+    rec_env: dict[str, _RecBinding] = field(default_factory=dict)
+    location: str = ""
+
+    def clone(self, *, location: str | None = None) -> "_Context":
+        """复制分支局部状态；只共享只读使用的通道环境。"""
+        return _Context(
+            gamma=dict(self.gamma),
+            theta=self.theta,
+            path=self.path,
+            symbols=dict(self.symbols),
+            rec_env=dict(self.rec_env),
+            location=self.location if location is None else location,
+        )
+
+
+@dataclass(frozen=True)
+class _LazyAssignmentPostState:
+    """T-Assign 为后继 judgment 确定性构造的惰性最强后置状态。
+
+    经典最强后置条件会显式引入旧值并形成存在量词。本项目保存等价而更紧凑的
+    符号执行表示：``path`` 仍约束赋值前符号，``post_context.symbols[target]``
+    则改为在赋值前符号上求值的右值项。后继公式读取 ``target`` 时会自动完成
+    Table 2 中的 ``{e/x}`` 替换。
+
+    本对象是规则展开阶段已经算出的状态变换见证，不是未知谓词，也不是需要
+    证明器求解的公式 premise；因此它绝不能进入 Proof Pool。
+    """
+
+    target: str
+    previous_term: Any
+    assigned_term: Any
+    pre_path: Any
+    post_context: _Context
+
+
+@dataclass(frozen=True)
+class _ODEDLTerms:
+    """一条 ODE 在入口符号快照下生成 dL 公式所需的 Z3 中间项。
+
+    ``precondition`` 额外包含新鲜连续变量与赋值后当前值之间的等式，以及
+    当前 ODE 局部时钟的初始化等式 ``t=0``。``equations`` 则在用户方程后附加
+    该时钟的 ``t'=1``；``clock`` 保存同一个 Z3 Real 项，供用户 ODE 公式、
+    有限安全性和准确边界公式共同引用。``domain`` 保留论文中的原始 ``B``，
+    ``domain_definedness`` 单独保存向量场和 B 的有定义条件，防止边界公式把
+    “B 无定义”误当成合法的 ``not B``。这样时钟既真正属于这一个 ODE，又不会
+    进入用户 Gamma。
+    """
+
+    precondition: Any
+    equations: tuple[tuple[Any, Any], ...]
+    domain: Any
+    domain_definedness: Any
+    safety: Any
+    duration: Any | None
+    clock: Any
+
+
+class _ODEPostAssumption(str, Enum):
+    """Table 2 在三种 ODE 后继 judgment 中允许使用的路径事实。"""
+
+    DOMAIN_AND_SAFETY = "domain-and-safety"
+    SAFETY = "safety"
+    NOT_DOMAIN_AND_SAFETY = "not-domain-and-safety"
+
+
+@dataclass(frozen=True)
+class _PendingProof:
+    """公式池中一条尚未交给证明器的 Table 2 前提。
+
+    Pool 只接收已经具体化的公式，不负责搜索 T-Assign 的未知 ``phi'``。
+    普通 FOL 和 dL 只需保存 ``obligation``；T-sigma 的状态满足关系还需要
+    冻结规则生成时的具体状态和符号表。``automatically_true`` 只用于 safety
+    或 domain 语法上恒真的 dL 批注，仍然等到 Pool 阶段统一写入判定结果。
+    """
+
+    obligation: ProofObligation
+    state: Mapping[str, Any] | None = None
+    symbols: Mapping[str, Any] | None = None
+    automatically_true: bool = False
+
+
+# --------------------------------------------------------------------------
+# 显式推导树中“横线下方”的四类结论 judgment。它们只保存应用规则所需的
+# 输入，不执行任何推导；相应 ``rule_t_*`` 方法负责把它们展开成 premises。
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _ConfigurationJudgment:
+    """判断一个具体状态与系统组成的配置 ``<sigma, S>`` 的类型。"""
+
+    state: Mapping[str, Any]
+    system: Any
+    context: _Context
+
+
+@dataclass(frozen=True)
+class _SystemJudgment:
+    """判断系统层 ``S ::= P | S || S'`` 的配置类型。"""
+
+    system: Any
+    context: _Context
+
+
+@dataclass(frozen=True)
+class _ProcessJudgment:
+    """判断顺序进程节点及其 terminal continuation 的过程类型。"""
+
+    nodes: tuple[Process, ...]
+    context: _Context
+    terminal: ProcessType
+
+
+@dataclass(frozen=True)
+class _EventJudgment:
+    """判断 ODE 通信中断反应 ``E`` 所产生的 angelic type。"""
+
+    reaction: EventReaction
+    tail: tuple[Process, ...]
+    context: _Context
+    terminal: ProcessType
+
+
+_ChildJudgment = (
+    _ConfigurationJudgment
+    | _SystemJudgment
+    | _ProcessJudgment
+    | _EventJudgment
+)
+
+
+# --------------------------------------------------------------------------
+# 显式推导树中“横线上方”的两类 premise，以及一次规则展开的完整结果。
+# FormulaPremise 在第一阶段只进入 Pool；ChildJudgmentPremise 由统一求解器递归
+# 展开。``conclude`` 只接收子 judgment 的结果，公式 premise 没有类型结果。
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _FormulaPremise:
+    """一条等待第二阶段统一判定的 state、FOL 或 dL 逻辑前提。"""
+
+    pending: _PendingProof
+
+
+@dataclass(frozen=True)
+class _ChildJudgmentPremise:
+    """一条必须递归构造候选类型的子 judgment 前提。"""
+
+    judgment: _ChildJudgment
+
+
+_Premise = _FormulaPremise | _ChildJudgmentPremise
+
+
+@dataclass(frozen=True)
+class _RuleExpansion:
+    """某条 Table 2 规则的 premises 与由子结论组合父结论的方法。
+
+    ``assignment_post_state`` 只可能由 T-Assign 提供。它记录规则展开时已经
+    确定的惰性最强后置状态，供后继 judgment 和审计轨迹使用；它不是公式
+    premise，统一求解器不会把它放入 Proof Pool。
+    """
+
+    rule: str
+    premises: tuple[_Premise, ...]
+    conclude: Callable[[tuple[Any, ...]], Any]
+    assignment_post_state: _LazyAssignmentPostState | None = None
+
+
+@dataclass(frozen=True)
+class _InferenceFailure:
+    r"""表示某个进程片段无法按 Table 2 构造行为类型。
+
+    这是检查器内部的控制状态，不继承 ``BehavioralType``，也不会进入正式的
+    type AST。这样论文中的 ``BottomType``/``\bot`` 就不会再与实现错误、非法
+    输入或缺失环境声明混为一谈。
+    """
+
+
+# 所有递归类型规则都返回正式行为类型或内部失败标记。失败标记使用单例，便于
+# 组合规则用身份判断直接向外传播，而不构造含有伪造 ``BottomType`` 的父节点。
+_INFERENCE_FAILURE = _InferenceFailure()
+_ProcessInferenceResult = ProcessType | _InferenceFailure
+_ConfigurationInferenceResult = ConfigurationType | _InferenceFailure
+
+
+class TypeChecker:
+    """按论文 Table 2 构造并验证 HCSP 行为类型。
+
+    实例可重复调用 ``check``；每次调用都会清空上次报告。ODE 的 safety/delay
+    直接来自 AST 中唯一的 ``ODEAnnotation``，动态逻辑义务可委托
+    ``dl_checker`` 外部后端。非项目 AST 会产生结构诊断，不参与兼容性推断。
+    """
+
+    def __init__(
+        self,
+        *,
+        dl_checker: DLChecker | None = None,
+        keymaerax_config: KeYmaeraXConfig | None = None,
+        z3_timeout_ms: int = 5_000,
+    ):
+        """配置 KeYmaera X/自定义 dL 后端和每个 Z3 义务的超时。
+
+        ``dl_checker`` 是测试或特殊部署使用的注入点；未提供时自动建立
+        KeYmaera X 适配器，并从 ``KEYMAERAX_JAR``、``KEYMAERAX_JAVA`` 等
+        环境变量探测工具。二者不能同时指定，避免同一义务的信任来源含糊。
+        """
+        if dl_checker is not None and keymaerax_config is not None:
+            raise ValueError(
+                "Specify either dl_checker or keymaerax_config, not both"
+            )
+        self.dl_checker: DLChecker = (
+            dl_checker
+            if dl_checker is not None
+            else KeYmaeraXBackend(keymaerax_config)
+        )
+        self.proof_engine = Z3ProofEngine(z3_timeout_ms)
+        self.proof_pool: list[_PendingProof] = []
+        self.obligations: list[ProofObligation] = []
+        self.diagnostics: list[Diagnostic] = []
+        self.steps: list[InferenceStep] = []
+        self._fresh_counter = 0
+        self._type_var_counter = 0
+
+    def check(self, judgment: TypingJudgment) -> CheckReport:
+        """执行一次完整判断并返回含全部证据的三值报告。
+
+        该入口不抛出普通建模/类型错误，而是尽量转换为 ``Diagnostic(FALSE)``，
+        便于一次审计看到多个问题。外部证明无法判定则保留 ``UNKNOWN``。
+        """
+        # TypeChecker 实例可复用，但报告和新鲜名计数必须按检查请求隔离。
+        self.proof_pool = []
+        self.obligations = []
+        self.diagnostics = []
+        self.steps = []
+        self._fresh_counter = 0
+        self._type_var_counter = 0
+
+        # 在进入规则前集中规范化 Gamma/Theta，避免每条规则接受不同输入别名。
+        try:
+            gamma = {
+                str(name): normalize_type(value, subject="Gamma entry")
+                for name, value in judgment.gamma.items()
+            }
+            theta = {
+                self._channel_name(name): normalize_channel_type(value)
+                for name, value in judgment.theta.items()
+            }
+        except (TypeError, ValueError) as exc:
+            self._diagnose(Verdict.FALSE, f"Invalid typing environment: {exc}", "environment")
+            return self._report(None, ())
+
+        environment_step = self._start_step(
+            "environment",
+            "judgment",
+            "规范化类型环境 Gamma 与 Theta",
+            gamma=gamma,
+            theta=theta,
+            path=judgment.path_condition,
+        )
+        self._finish_step(
+            environment_step,
+            "环境规范化成功",
+            "后续规则统一使用这里展示的基础类型和通道 refinement type。",
+        )
+
+        if not judgment.configurations:
+            self._diagnose(Verdict.FALSE, "A judgment needs at least one configuration", "T-||")
+            return self._report(None, ())
+
+        # 即使只有一个配置也经 T-|| 入口处理，以保持 Gamma 分区和 T-sigma 一致。
+        parallel_expansion = self.rule_t_parallel(
+            judgment.configurations,
+            gamma,
+            theta,
+            judgment.path_condition,
+        )
+        raw_component_types = self._solve_rule_expansion(parallel_expansion)
+        # 内部失败状态绝不暴露为行为类型；公开报告用 None 保留失败分量的位置。
+        component_types: tuple[ConfigurationType | None, ...] = tuple(
+            None if isinstance(item, _InferenceFailure) else item
+            for item in raw_component_types
+        )
+        successful_components = tuple(
+            item for item in component_types if item is not None
+        )
+        inferred: ConfigurationType | None
+        if not component_types or len(successful_components) != len(component_types):
+            inferred = None
+        elif len(successful_components) == 1:
+            inferred = successful_components[0]
+        else:
+            inferred = ParallelType(successful_components)
+
+        # expected_types 是独立的结果断言，不参与推导，防止“按答案反推类型”。
+        if judgment.expected_types is not None:
+            if len(judgment.expected_types) != len(component_types):
+                self._diagnose(
+                    Verdict.FALSE,
+                    "Expected type list length does not match the number of configurations",
+                    "type-equality",
+                )
+            else:
+                for index, (actual, expected) in enumerate(
+                    zip(component_types, judgment.expected_types), start=1
+                ):
+                    # 该分量的具体失败原因已经由产生失败标记的规则记录；这里不能
+                    # 再拿 None 与正式类型做“类型不等”比较，也不能伪造 bottom。
+                    if actual is None:
+                        continue
+                    if not types_equivalent(actual, expected):
+                        self._diagnose(
+                            Verdict.FALSE,
+                            f"Configuration {index} inferred {actual}, expected {expected}",
+                            "type-equality",
+                            f"K{index}",
+                        )
+
+        # PPT 所述的第二阶段：只有全部可达类型规则都已经展开、候选类型已经
+        # 构造完成后，才统一化简并判定公式池中的 state/FOL/dL 前提。
+        self._discharge_proof_pool()
+        return self._report(inferred, component_types)
+
+    # ------------------------------------------------------------------
+    # Configuration and parallel rules
+    # ------------------------------------------------------------------
+    def rule_t_parallel(
+        self,
+        configurations: Sequence[Configuration],
+        gamma: Mapping[str, BasicType],
+        theta: Mapping[str, ChannelType],
+        default_path: Any,
+    ) -> _RuleExpansion:
+        """[T-||] 把顶层判断展开为各配置的显式子 judgment。
+
+        多配置判断若未显式给出局部 ``gamma``，会依据各进程/初始状态出现的
+        变量投影全局环境；任意两个分量拥有同名状态变量都会被拒绝。通道环境
+        ``Theta`` 则按论文规则共享。
+        """
+
+        parallel_step = self._start_step(
+            "T-||",
+            "judgment",
+            f"检查 {len(configurations)} 个配置并建立状态变量分区",
+            gamma=gamma,
+            theta=theta,
+            path=default_path,
+        )
+
+        component_gammas: list[dict[str, BasicType]] = []
+        valid_component_gammas: list[bool] = []
+        used_domains: list[set[str]] = []
+        # 第一遍只计算每个配置的局部变量域，随后才能进行两两不相交检查。
+        for index, configuration in enumerate(configurations, start=1):
+            if configuration.gamma is not None:
+                try:
+                    component_gamma = {
+                        str(name): normalize_type(
+                            value,
+                            subject="Gamma entry",
+                        )
+                        for name, value in configuration.gamma.items()
+                    }
+                    gamma_is_valid = True
+                except (TypeError, ValueError) as exc:
+                    self._diagnose(
+                        Verdict.FALSE,
+                        f"Invalid Gamma for configuration {index}: {exc}",
+                        "T-||",
+                        f"K{index}",
+                    )
+                    component_gamma = {}
+                    gamma_is_valid = False
+            elif len(configurations) == 1:
+                # 单配置无需分区，保留完整 Gamma 也允许路径条件使用辅助变量。
+                component_gamma = dict(gamma)
+                gamma_is_valid = True
+            else:
+                variables = self._process_vars(configuration.process) | set(configuration.state)
+                component_gamma = {
+                    name: value_type for name, value_type in gamma.items() if name in variables
+                }
+                missing = (
+                    variables
+                    - set(component_gamma)
+                    - self._input_bound_vars(configuration.process)
+                )
+                for name in sorted(missing):
+                    self._diagnose(
+                        Verdict.FALSE,
+                        f"Variable {name!r} is used but not declared in Gamma",
+                        "T-||",
+                        f"K{index}",
+                    )
+                gamma_is_valid = True
+            component_gammas.append(component_gamma)
+            valid_component_gammas.append(gamma_is_valid)
+            used_domains.append(set(component_gamma))
+
+        # 论文要求并行分量的状态空间互不相交；共享通信通过 Theta 表达。
+        for left in range(len(used_domains)):
+            for right in range(left + 1, len(used_domains)):
+                overlap = used_domains[left] & used_domains[right]
+                if overlap:
+                    self._diagnose(
+                        Verdict.FALSE,
+                        "Parallel components share state variables: "
+                        + ", ".join(sorted(overlap)),
+                        "T-||",
+                        f"K{left + 1}|K{right + 1}",
+                    )
+
+        # 第二遍只构造子 judgment，不在规则函数内部递归求解。无效 Gamma 的
+        # 分量不会产生伪造子判断，conclude 会在原位置恢复内部失败标记。
+        premises: list[_Premise] = []
+        for index, (configuration, component_gamma, gamma_is_valid) in enumerate(
+            zip(configurations, component_gammas, valid_component_gammas), start=1
+        ):
+            if not gamma_is_valid:
+                continue
+            location = configuration.name or f"K{index}"
+            context = self._initial_context(
+                component_gamma,
+                dict(theta),
+                default_path
+                if configuration.path_condition is None
+                else configuration.path_condition,
+                location,
+            )
+            premises.append(
+                _ChildJudgmentPremise(
+                    _ConfigurationJudgment(
+                        state=dict(configuration.state),
+                        system=configuration.process,
+                        context=context,
+                    )
+                )
+            )
+
+        validity = tuple(valid_component_gammas)
+
+        def conclude(children: tuple[Any, ...]) -> list[_ConfigurationInferenceResult]:
+            """把有效配置子结论放回原分量位置并完成顶层 T-|| 轨迹。"""
+
+            child_iterator = iter(children)
+            types: list[_ConfigurationInferenceResult] = [
+                next(child_iterator) if valid else _INFERENCE_FAILURE
+                for valid in validity
+            ]
+            readable_types = ", ".join(
+                "(failed)" if isinstance(item, _InferenceFailure) else str(item)
+                for item in types
+            )
+            self._finish_step(
+                parallel_step,
+                f"分量类型 = [{readable_types}]",
+                self._premise_summary(expansion)
+                + " 显式子 judgments 已求解；各配置共享 Theta，状态 Gamma 分区互不相交。",
+            )
+            return types
+
+        expansion = _RuleExpansion("T-||", tuple(premises), conclude)
+        return expansion
+
+    def rule_t_sigma(
+        self,
+        judgment: _ConfigurationJudgment,
+    ) -> _RuleExpansion:
+        """[T-sigma] 展开为状态满足公式 premise 和系统类型子 judgment。"""
+
+        context = judgment.context
+        state_premise = self._state_premise(
+            "T-sigma",
+            f"Initial state of {context.location} satisfies its path condition",
+            context.path,
+            judgment.state,
+            context.symbols,
+        )
+        system_premise = _ChildJudgmentPremise(
+            _SystemJudgment(judgment.system, context)
+        )
+        return _RuleExpansion(
+            "T-sigma",
+            (state_premise, system_premise),
+            lambda children: children[0],
+        )
+
+    # ------------------------------------------------------------------
+    # Structural process rules
+    # ------------------------------------------------------------------
+    def _solve_rule_expansion(self, expansion: _RuleExpansion) -> Any:
+        """统一求解一条规则显式返回的所有 premises。
+
+        公式 premise 仅按生成顺序进入公共 Pool；子 judgment premise 递归交给
+        唯一分派器求解。规则的 ``conclude`` 只看到子 judgment 的结果，因此
+        不可能误把“公式尚未证明”当成某种行为类型。
+        """
+
+        child_results: list[Any] = []
+        for premise in expansion.premises:
+            if isinstance(premise, _FormulaPremise):
+                self.proof_pool.append(premise.pending)
+            elif isinstance(premise, _ChildJudgmentPremise):
+                child_results.append(
+                    self._solve_child_judgment(premise.judgment)
+                )
+            else:  # pragma: no cover - _Premise 是封闭的内部联合类型
+                raise TypeError(
+                    f"Unsupported premise in {expansion.rule}: "
+                    f"{type(premise).__name__}"
+                )
+        return expansion.conclude(tuple(child_results))
+
+    def _solve_child_judgment(self, judgment: _ChildJudgment) -> Any:
+        """按 judgment 类别分派；这是推导树递归求解的唯一入口。"""
+
+        if isinstance(judgment, _ConfigurationJudgment):
+            return self._solve_configuration_judgment(judgment)
+        if isinstance(judgment, _SystemJudgment):
+            return self._solve_system_judgment(judgment)
+        if isinstance(judgment, _ProcessJudgment):
+            return self._solve_process_judgment(judgment)
+        if isinstance(judgment, _EventJudgment):
+            return self._solve_event_judgment(judgment)
+        raise TypeError(f"Unsupported child judgment: {type(judgment).__name__}")
+
+    def _solve_configuration_judgment(
+        self,
+        judgment: _ConfigurationJudgment,
+    ) -> _ConfigurationInferenceResult:
+        """求解 ``<sigma,S>``；[T-sigma] 本身只负责产生 premises。"""
+
+        context = judgment.context
+        step = self._start_step(
+            "T-sigma",
+            context.location,
+            f"检查初始状态 sigma = {dict(judgment.state)!r}",
+            context=context,
+        )
+        expansion = self.rule_t_sigma(judgment)
+        result = self._solve_rule_expansion(expansion)
+        result_text = (
+            "推导失败，未构造正式配置类型"
+            if isinstance(result, _InferenceFailure)
+            else f"状态前提已入 Pool；候选类型 = {result}"
+        )
+        self._finish_step(
+            step,
+            result_text,
+            self._premise_summary(expansion),
+        )
+        return result
+
+    def _solve_system_judgment(
+        self,
+        judgment: _SystemJudgment,
+    ) -> _ConfigurationInferenceResult:
+        """按 ``S ::= P | S || S'`` 求解显式系统 judgment。"""
+
+        system = judgment.system
+        context = judgment.context
+        if isinstance(system, Process):
+            return self._solve_process_judgment(
+                _ProcessJudgment(
+                    tuple(self._as_nodes(system)),
+                    context,
+                    EndType(),
+                )
+            )
+        if isinstance(system, Parallel):
+            return self._solve_parallel_system_judgment(judgment)
+        self._diagnose(
+            Verdict.FALSE,
+            "Configuration process is not an HCSP Process or Parallel system: "
+            f"{system.__class__.__name__}",
+            "structural",
+            context.location,
+        )
+        return _INFERENCE_FAILURE
+
+    def _solve_process_judgment(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _ProcessInferenceResult:
+        """展开并求解一个顺序进程 judgment。"""
+
+        nodes = judgment.nodes
+        context = judgment.context
+        if not nodes:
+            end_step = self._start_step(
+                "T-End",
+                context.location,
+                "顺序后继为空，使用终止类型 0",
+                context=context,
+            )
+            expansion = self.rule_t_end(judgment)
+            result = self._solve_rule_expansion(expansion)
+            self._finish_step(
+                end_step,
+                f"候选类型 = {result}",
+                self._premise_summary(expansion),
+            )
+            return result
+
+        head = nodes[0]
+        # Table 2 严格区分终端 ``skip`` 的 T-End 与中间 ``skip # P`` 的
+        # T-Skip。空 nodes 则是 ch!/assert/assign 等前缀剥离后隐含的终端 skip。
+        terminal_skip = isinstance(head, Skip) and len(nodes) == 1
+        rule = "T-End" if terminal_skip else self._rule_name(head)
+        rule_step = self._start_step(
+            rule,
+            context.location,
+            self._describe_process_node(head),
+            context=context,
+        )
+
+        # 严格 isinstance 分派是本项目语言的唯一节点识别机制。
+        if isinstance(head, Skip):
+            expansion = (
+                self.rule_t_end(judgment)
+                if terminal_skip
+                else self.rule_t_skip(judgment)
+            )
+        elif isinstance(head, Assert):
+            expansion = self.rule_t_assert(judgment)
+        elif isinstance(head, Assign):
+            expansion = self.rule_t_assign(judgment)
+        elif isinstance(head, InputChannel):
+            expansion = self.rule_t_in(judgment)
+        elif isinstance(head, OutputChannel):
+            expansion = self.rule_t_out(judgment)
+        elif isinstance(head, If):
+            expansion = self.rule_t_if(judgment)
+        elif isinstance(head, InternalChoice):
+            expansion = self.rule_t_internal_choice(judgment)
+        elif isinstance(head, ODE):
+            expansion = self.rule_t_ode(judgment)
+        elif isinstance(head, Mu):
+            expansion = self.rule_t_mu(judgment)
+        elif isinstance(head, Var):
+            expansion = self.rule_t_x(judgment)
+        else:
+            self._diagnose(
+                Verdict.FALSE,
+                "Process is not a node from hcsp_typechecker.hcsp_process_ast: "
+                f"{head.__class__.__name__}",
+                "structural",
+                context.location,
+            )
+            expansion = _RuleExpansion(
+                "structural",
+                (),
+                lambda _children: _INFERENCE_FAILURE,
+            )
+
+        result = self._solve_rule_expansion(expansion)
+
+        if isinstance(result, _InferenceFailure):
+            result_text = "推导失败，未构造正式行为类型"
+        else:
+            result_text = f"候选类型 = {result}"
+        self._finish_step(
+            rule_step,
+            result_text,
+            self._premise_summary(expansion)
+            + " "
+            + self._rule_explanation(rule),
+        )
+        return result
+
+    def rule_t_end(self, judgment: _ProcessJudgment) -> _RuleExpansion:
+        """[T-End] 直接把终端 ``skip``（含隐式终端）推导为 ``0``。
+
+        显式 ``Skip`` 必须是当前节点序列的最后一项；空节点序列表示通信、赋值、
+        断言等前缀省略书写的终端 ``skip``。含后继的 ``skip # P`` 只能由
+        :meth:`rule_t_skip` 处理。
+        """
+
+        return _RuleExpansion(
+            "T-End",
+            (),
+            lambda _children: judgment.terminal,
+        )
+
+    def rule_t_skip(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """[T-Skip] 唯一 premise 是同一上下文中的顺序后继 judgment。"""
+
+        premise = self._process_premise(
+            judgment.nodes[1:],
+            judgment.context,
+            judgment.terminal,
+        )
+        return _RuleExpansion("T-Skip", (premise,), lambda children: children[0])
+
+    def rule_t_assert(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """[T-Assert] 生成 ``phi => B``，并在原路径条件下继续。
+
+        Assert 是验证点而非 Assume，因此成功后不会把 ``B`` 加入后继路径。
+        """
+
+        node = judgment.nodes[0]
+        context = judgment.context
+        premises: list[_Premise] = []
+        try:
+            condition = self._translator(context).boolean_result(node.condition)
+            premises.append(
+                self._fol_premise(
+                    "T-Assert",
+                    f"Assertion holds at {context.location}",
+                    implies(context.path, self._defined_term(condition)),
+                )
+            )
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-Assert", context.location)
+        premises.append(
+            self._process_premise(
+                judgment.nodes[1:],
+                context,
+                judgment.terminal,
+            )
+        )
+        return _RuleExpansion(
+            "T-Assert",
+            tuple(premises),
+            lambda children: children[0],
+        )
+
+    def rule_t_assign(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """[T-Assign] 按新版 Table 2 的替换前提更新符号状态。
+
+        新规则写作 ``phi -> phi'{e/x}``。本方法先在赋值前状态中计算右值，再由
+        ``_lazy_assignment_post_state`` 确定性地产生后继状态。后继对 ``x`` 的
+        每次读取都会自动形成相同的 ``{e/x}`` 替换；Proof Pool 只接收右值
+        有定义性等已经具体化的公式，不搜索或综合未知谓词 ``phi'``。
+        """
+
+        node = judgment.nodes[0]
+        context = judgment.context
+        next_context = context.clone()
+        post_state: _LazyAssignmentPostState | None = None
+        premises: list[_Premise] = []
+        try:
+            target = lvalue_name(node.target)
+            if target not in context.gamma:
+                raise ExpressionError(f"Assignment target {target!r} is not declared in Gamma")
+            # 右值必须完全在赋值前状态中求值；尤其 x := x + 1 的右侧 x 不能
+            # 被误读成赋值后的 x。
+            result = self._translator(context).translate(node.expression)
+            definedness = self._definedness_premise(
+                "T-Assign",
+                f"Right-hand side assigned to {target!r} is defined",
+                context,
+                result,
+            )
+            if definedness is not None:
+                premises.append(definedness)
+            expected = context.gamma[target]
+            if not is_subtype(result.value_type, expected):
+                self._diagnose(
+                    Verdict.FALSE,
+                    f"Assignment to {target!r} expects {expected}, got {result.value_type}",
+                    "T-Assign",
+                    context.location,
+                )
+            else:
+                # phi' 在这里由赋值语义唯一确定；不把未知谓词留给 Pool。
+                post_state = self._lazy_assignment_post_state(
+                    context,
+                    target,
+                    result.term,
+                )
+                next_context = post_state.post_context
+                # Table 2 把 ``phi => phi'{e/x}`` 明确列为逻辑 premise。惰性
+                # 后状态以旧 path 和新 symbols 表示 phi'，将它沿本次赋值拉回
+                # 赋值前状态后正好得到原 path。因此这里仍登记一条具体、按构造
+                # 成立的公式证据；Pool 只证明该公式，不综合未知 phi'。
+                premises.append(
+                    self._fol_premise(
+                        "T-Assign-post",
+                        (
+                            "Table 2 postcondition premise phi => phi'{e/x}; "
+                            "phi' is the generated lazy strongest post-state"
+                        ),
+                        implies(context.path, post_state.pre_path),
+                    )
+                )
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-Assign", context.location)
+        premises.append(
+            self._process_premise(
+                judgment.nodes[1:],
+                next_context,
+                judgment.terminal,
+            )
+        )
+        return _RuleExpansion(
+            "T-Assign",
+            tuple(premises),
+            lambda children: children[0],
+            assignment_post_state=post_state,
+        )
+
+    def rule_t_if(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """[T-If] 检查论文中的二元 ``if B then P else P'``。
+
+        then 分支使用 ``phi ∧ B``，else 分支使用 ``phi ∧ ¬B``；两个分支分别
+        克隆符号上下文，避免一个分支的赋值影响另一个分支。
+        """
+
+        node = judgment.nodes[0]
+        tail = judgment.nodes[1:]
+        context = judgment.context
+        then_context = context.clone(location=f"{context.location}.then")
+        else_context = context.clone(location=f"{context.location}.else")
+        try:
+            guard_result = self._translator(context).boolean_result(node.condition)
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-If", context.location)
+            return _RuleExpansion(
+                "T-If",
+                (),
+                lambda _children: _INFERENCE_FAILURE,
+            )
+
+        then_context.path = conjunction(context.path, guard_result.term)
+        else_context.path = conjunction(context.path, negation(guard_result.term))
+        premises: list[_Premise] = []
+        definedness = self._definedness_premise(
+            "T-If",
+            "The branch guard is defined before either branch is selected",
+            context,
+            guard_result,
+        )
+        if definedness is not None:
+            premises.append(definedness)
+        premises.extend((
+            self._process_premise(
+                tuple(self._as_nodes(node.then_branch)) + tail,
+                then_context,
+                judgment.terminal,
+            ),
+            self._process_premise(
+                tuple(self._as_nodes(node.else_branch)) + tail,
+                else_context,
+                judgment.terminal,
+            ),
+        ))
+
+        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
+            """把 then/else 两个子类型组合成内部选择类型。"""
+
+            then_type, else_type = children
+            if isinstance(then_type, _InferenceFailure) or isinstance(
+                else_type,
+                _InferenceFailure,
+            ):
+                return _INFERENCE_FAILURE
+            return InternalChoiceType((then_type, else_type))
+
+        return _RuleExpansion("T-If", tuple(premises), conclude)
+
+    def rule_t_in(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """[T-In] 逐槽扩展 ``Gamma``，并把联合精化加入 ``phi``。
+
+        每个接收值使用独立新鲜符号，不能沿用输入前变量的旧符号值。若 xi
+        未声明，T-In 将其加入局部环境；若已经声明，则逐槽检查类型兼容并
+        覆盖当前值。最后同时执行 ``phi{x1/eta1,...,xn/etan}``。
+        """
+
+        node = judgment.nodes[0]
+        context = judgment.context
+        channel = node.channel.name
+        channel_type = context.theta.get(channel)
+        if channel_type is None:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Input channel {channel!r} is not declared in Theta",
+                "T-In",
+                context.location,
+            )
+            return _RuleExpansion("T-In", (), lambda _children: _INFERENCE_FAILURE)
+
+        if len(node.targets) != channel_type.arity:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Input on {channel!r} expects {channel_type.arity} payload "
+                f"slots, got {len(node.targets)} targets",
+                "T-In",
+                context.location,
+            )
+            return _RuleExpansion("T-In", (), lambda _children: _INFERENCE_FAILURE)
+
+        # 输入建立一个带新接收值的顺序后继上下文；兄弟分支仍保留原上下文。
+        next_context = context.clone()
+        try:
+            self._fresh_counter += 1
+            received_terms: list[Any] = []
+            domain_constraints: list[Any] = []
+            for index, (variable, value_type) in enumerate(
+                zip(node.targets, channel_type.value_types),
+                start=1,
+            ):
+                name = lvalue_name(variable)
+                existing = next_context.gamma.get(name)
+                if existing is not None and not (
+                    is_subtype(existing, value_type)
+                    or is_subtype(value_type, existing)
+                ):
+                    self._diagnose(
+                        Verdict.FALSE,
+                        f"Input target {index} {name!r} has type {existing}, "
+                        f"channel slot carries {value_type}",
+                        "T-In",
+                        context.location,
+                    )
+                next_context.gamma[name] = value_type
+
+            translator = self._translator(next_context)
+            for variable, value_type in zip(
+                node.targets,
+                channel_type.value_types,
+            ):
+                name = lvalue_name(variable)
+                # 同一通信动作共享计数后缀，但变量名不同，所得符号仍两两独立。
+                received = translator.fresh_symbol(
+                    name,
+                    value_type,
+                    f"__input{self._fresh_counter}",
+                )
+                next_context.symbols[name] = received
+                received_terms.append(received)
+                domain_constraints.extend(
+                    self._type_domain_constraints(value_type, received)
+                )
+            refinement = translator.refinement_result(
+                channel_type,
+                received_terms,
+            )
+            next_context.path = conjunction(
+                context.path,
+                self._defined_term(refinement),
+                *domain_constraints,
+            )
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-In", context.location)
+            return _RuleExpansion("T-In", (), lambda _children: _INFERENCE_FAILURE)
+
+        premise = self._process_premise(
+            judgment.nodes[1:],
+            next_context,
+            judgment.terminal,
+        )
+
+        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
+            """在已求得的 continuation 外层添加输入通信前缀。"""
+
+            continuation = children[0]
+            if isinstance(continuation, _InferenceFailure):
+                return _INFERENCE_FAILURE
+            return InputType(channel, continuation)
+
+        return _RuleExpansion("T-In", (premise,), conclude)
+
+    def rule_t_out(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """[T-Out] 逐槽检查类型并证明联合 refinement 的实例。
+
+        输入规则可以假设通道精化；输出规则必须证明自己满足精化，这一方向
+        差异是通信安全性的关键。多槽替换一次完成：
+        ``phi => refinement[e1/eta1,...,en/etan]``。
+        """
+
+        node = judgment.nodes[0]
+        context = judgment.context
+        channel = node.channel.name
+        channel_type = context.theta.get(channel)
+        if channel_type is None:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Output channel {channel!r} is not declared in Theta",
+                "T-Out",
+                context.location,
+            )
+            return _RuleExpansion("T-Out", (), lambda _children: _INFERENCE_FAILURE)
+
+        if len(node.payloads) != channel_type.arity:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Output on {channel!r} expects {channel_type.arity} payload "
+                f"slots, got {len(node.payloads)} expressions",
+                "T-Out",
+                context.location,
+            )
+            return _RuleExpansion("T-Out", (), lambda _children: _INFERENCE_FAILURE)
+
+        premises: list[_Premise] = []
+        try:
+            translator = self._translator(context)
+            results = tuple(
+                translator.translate(payload)
+                for payload in node.payloads
+            )
+            for index, (result, expected) in enumerate(
+                zip(results, channel_type.value_types),
+                start=1,
+            ):
+                if not is_subtype(result.value_type, expected):
+                    self._diagnose(
+                        Verdict.FALSE,
+                        f"Output on {channel!r} slot {index} expects {expected}, "
+                        f"got {result.value_type}",
+                        "T-Out",
+                        context.location,
+                    )
+            refinement = translator.refinement_result(
+                channel_type,
+                tuple(result.term for result in results),
+            )
+            well_defined = tuple(
+                condition
+                for result in results
+                for condition in result.definedness
+            ) + refinement.definedness
+            premises.append(
+                self._fol_premise(
+                    "T-Out",
+                    f"Payloads sent on {channel!r} satisfy their joint refinement",
+                    implies(
+                        context.path,
+                        conjunction(*well_defined, refinement.term),
+                    ),
+                )
+            )
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-Out", context.location)
+            return _RuleExpansion("T-Out", (), lambda _children: _INFERENCE_FAILURE)
+
+        premises.append(
+            self._process_premise(
+                judgment.nodes[1:],
+                context,
+                judgment.terminal,
+            )
+        )
+
+        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
+            """在已求得的 continuation 外层添加输出通信前缀。"""
+
+            continuation = children[0]
+            if isinstance(continuation, _InferenceFailure):
+                return _INFERENCE_FAILURE
+            return OutputType(channel, continuation)
+
+        return _RuleExpansion("T-Out", tuple(premises), conclude)
+
+    def rule_t_internal_choice(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """[T-sqcup] 独立检查论文二元内部选择的左右分支。"""
+
+        node = judgment.nodes[0]
+        tail = judgment.nodes[1:]
+        context = judgment.context
+        left_context = context.clone(location=f"{context.location}.choice.left")
+        right_context = context.clone(location=f"{context.location}.choice.right")
+        premises = (
+            self._process_premise(
+                tuple(self._as_nodes(node.left)) + tail,
+                left_context,
+                judgment.terminal,
+            ),
+            self._process_premise(
+                tuple(self._as_nodes(node.right)) + tail,
+                right_context,
+                judgment.terminal,
+            ),
+        )
+
+        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
+            """把左右两个子类型组合成内部非确定选择类型。"""
+
+            left_type, right_type = children
+            if isinstance(left_type, _InferenceFailure) or isinstance(
+                right_type,
+                _InferenceFailure,
+            ):
+                return _INFERENCE_FAILURE
+            return InternalChoiceType((left_type, right_type))
+
+        return _RuleExpansion("T-sqcup", premises, conclude)
+
+    def rule_t_external_choice(
+        self,
+        judgment: _EventJudgment,
+    ) -> _RuleExpansion:
+        """[T-&] 把事件反应展开为当前通信分支与剩余反应两个子 judgment。
+
+        ``EventChoice`` 的构造器已经保证每个分支由输入或输出守卫。论文语法
+        没有要求通道名前缀唯一，因此重复前缀仍按不同分支保留。
+        """
+
+        node = judgment.reaction
+        context = judgment.context
+        if isinstance(node, EmptyEvent):
+            return _RuleExpansion(
+                "T-&",
+                (),
+                lambda _children: EndType(),
+            )
+        if not isinstance(node, EventChoice):
+            raise TypeError(
+                "Event reaction must be EmptyEvent or EventChoice, got "
+                f"{type(node).__name__}"
+            )
+
+        branch_context = context.clone(location=f"{context.location}.external")
+        alternative_context = context.clone(
+            location=f"{context.location}.alternative"
+        )
+        premises = (
+            self._process_premise(
+                (node.communication,)
+                + tuple(self._as_nodes(node.continuation))
+                + judgment.tail,
+                branch_context,
+                judgment.terminal,
+            ),
+            _ChildJudgmentPremise(
+                _EventJudgment(
+                    node.alternative,
+                    judgment.tail,
+                    alternative_context,
+                    judgment.terminal,
+                )
+            ),
+        )
+
+        def conclude(children: tuple[Any, ...]) -> AngelicType | _InferenceFailure:
+            """把当前通信分支与递归得到的剩余分支合成 angelic type。"""
+
+            branch_type, alternative_type = children
+            if isinstance(branch_type, _InferenceFailure) or isinstance(
+                alternative_type,
+                _InferenceFailure,
+            ):
+                return _INFERENCE_FAILURE
+            if not isinstance(branch_type, (InputType, OutputType)):
+                self._diagnose(
+                    Verdict.FALSE,
+                    f"External branch did not infer a communication prefix: {branch_type}",
+                    "T-&",
+                    branch_context.location,
+                )
+                return _INFERENCE_FAILURE
+            if isinstance(alternative_type, EndType):
+                return branch_type
+            if isinstance(alternative_type, (InputType, OutputType)):
+                return make_external_choice((branch_type, alternative_type))
+            if isinstance(alternative_type, ExternalChoiceType):
+                return make_external_choice(
+                    (branch_type, *alternative_type.branches)
+                )
+            raise TypeError(
+                "External choice recursion produced an unsupported angelic type: "
+                f"{type(alternative_type).__name__}"
+            )
+
+        return _RuleExpansion("T-&", premises, conclude)
+
+    def _solve_event_judgment(
+        self,
+        judgment: _EventJudgment,
+    ) -> AngelicType | _InferenceFailure:
+        """求解一个显式事件反应 judgment，并记录其 premises 与结果。"""
+
+        node = judgment.reaction
+        context = judgment.context
+        event_step = self._start_step(
+            "T-&",
+            context.location,
+            (
+                "empty event reaction"
+                if isinstance(node, EmptyEvent)
+                else "事件分支 "
+                + self._describe_process_node(node.communication)
+                + " -> P"
+                if isinstance(node, EventChoice)
+                else repr(node)
+            ),
+            context=context,
+        )
+        expansion = self.rule_t_external_choice(judgment)
+        result = self._solve_rule_expansion(expansion)
+        if isinstance(result, _InferenceFailure):
+            result_text = "推导失败，事件反应没有正式 angelic type"
+        elif isinstance(node, EmptyEvent):
+            result_text = f"事件选择递归结束 = {result}"
+        else:
+            result_text = f"事件选择类型 = {result}"
+        self._finish_step(
+            event_step,
+            result_text,
+            self._premise_summary(expansion),
+        )
+        return result
+
+    # ------------------------------------------------------------------
+    # ODE rules and externally discharged dL obligations
+    # ------------------------------------------------------------------
+    def rule_t_ode(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """实现带 ``safety``/``delay`` 批注的连续演化类型规则。
+
+        原始 ODE 语法仍由 ``eqs``、``constraint`` 和 ``interrupts`` 构成；
+        Section 4.3 的两个额外输入只从 ``node.annotation`` 读取。延迟 ``d``
+        与推导出的 ``A/T`` 由 ``make_timed_type`` 规范成 PureDelay、通信超时或
+        有限定时外部选择。``d=infinity`` 没有超时迁移，其 fallback 固定为空行为
+        ``bottom`` 并按论文缩写化为 ``A``。安全公式用于生成 dL 证明义务；若为
+        ``true``，该义务在本地判真，明确表示它不增加额外安全限制。
+
+        外层确有顺序后继时使用论文的带 fallback 规则；没有后继时使用纯通信
+        中断规则。这样无需旧版 ``mode`` 标志，类型结构直接由 HCSP 顺序结构
+        与论文批注共同决定。
+
+        ``node.local_clock`` 由 ODE 构造器自动建立，不要求用户放入 Gamma 或
+        初始状态。ODE 方程右端、演化域和 safety 中的 ``t`` 在局部作用域内
+        绑定到这个时钟。生成 dL 前提时，它被实体化为本 ODE 独占的新鲜 Real：
+        入口自动加入 ``t=0``，连续方程自动加入 ``t'=1``；离开 ODE 后即被丢弃。
+        """
+
+        node = judgment.nodes[0]
+        tail = judgment.nodes[1:]
+        context = judgment.context
+        annotation = node.annotation
+        equations = node.eqs
+        evolved: list[str] = []
+        translator = self._translator(context)
+        # 这里只为表达式静态检查创建一个临时局部 Real。正式 dL 义务稍后由
+        # _ode_dl_terms 创建自己的时钟快照；两者都通过 local_symbols 让源名
+        # t 遮蔽同名的普通 Gamma 变量，而不修改持久上下文。
+        self._fresh_counter += 1
+        ode_scope_clock = (
+            None
+            if z3 is None
+            else z3.Real(f"@hcsp_ode_scope_clock_{self._fresh_counter}")
+        )
+        ode_local_symbols = (
+            {}
+            if ode_scope_clock is None
+            else {node.local_clock.name: ode_scope_clock}
+        )
+        derivative_definedness: list[Any] = []
+        # 每个演化变量只能出现一次，并且必须在 Gamma 中精确声明为 Real。
+        for variable, derivative in equations:
+            name = str(variable)
+            if name in evolved:
+                self._diagnose(
+                    Verdict.FALSE,
+                    f"Duplicate ODE variable {name!r}",
+                    "T-ODE",
+                    context.location,
+                )
+                continue
+            evolved.append(name)
+            if name not in context.gamma:
+                self._diagnose(
+                    Verdict.FALSE,
+                    f"ODE variable {name!r} is not declared in Gamma",
+                    "T-ODE",
+                    context.location,
+                )
+            elif context.gamma[name] != BasicType.REAL:
+                self._diagnose(
+                    Verdict.FALSE,
+                    f"ODE variable {name!r} must have type Real, got {context.gamma[name]}",
+                    "T-ODE",
+                    context.location,
+                )
+            try:
+                derivative_result = translator.translate(
+                    derivative,
+                    local_symbols=ode_local_symbols,
+                )
+                self._require_numeric_type(
+                    derivative_result.value_type,
+                    f"derivative of {name}",
+                    context,
+                )
+                derivative_definedness.extend(
+                    derivative_result.definedness
+                )
+            except ExpressionError as exc:
+                self._diagnose(Verdict.FALSE, str(exc), "T-ODE", context.location)
+
+        try:
+            domain_result = translator.boolean_result(
+                node.constraint,
+                local_symbols=ode_local_symbols,
+            )
+            safety_result = translator.boolean_result(
+                annotation.safety,
+                local_symbols=ode_local_symbols,
+            )
+            # 偏函数侧条件属于连续系统的可演化区域：向量场、演化域或 safety
+            # 在某状态无定义时，该状态不能被当作一个合法的已验证 ODE 状态。
+            domain = conjunction(
+                *derivative_definedness,
+                *domain_result.definedness,
+                domain_result.term,
+            )
+            safety = conjunction(
+                *derivative_definedness,
+                *safety_result.definedness,
+                safety_result.term,
+            )
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-ODE", context.location)
+            return _RuleExpansion("T-ODE", (), lambda _children: _INFERENCE_FAILURE)
+
+        # ODEAnnotation 已在 AST 构造边界保证 d 是非负有理数或正无穷。
+        # 正无穷稍后走“永不超时”分支，不生成自然结束 fallback。
+        duration_annotation = annotation.delay
+        if isinstance(duration_annotation, Literal):
+            # ODEAnnotation 已把有限 d 规范成 Literal(Fraction(...))；类型 AST
+            # 只保存数值本身，不把表达式 AST 混入行为类型层。
+            duration: Any = duration_annotation.value
+        else:
+            # ODEAnnotation 的另一个合法结果只能是正无穷 math.inf。
+            duration = duration_annotation
+        infinite_duration = isinstance(duration, float) and duration == inf
+
+        # 为 dL 模态建立独立入口快照。它不改变 HCSP AST，也不改变离开 ODE
+        # 后的符号状态；仅用于把当前赋值替换后的状态正确嵌入连续演化公式。
+        try:
+            dl_terms = self._ode_dl_terms(node, context, evolved)
+            dl_term_error: str | None = None
+        except (ExpressionError, DLTranslationError) as exc:
+            dl_terms = None
+            dl_term_error = str(exc)
+
+        # 始终登记安全批注的处理结果；true 会自动通过而不调用外部证明器。
+        if self._is_true(safety):
+            safety_problem: DLFormula | UntranslatedDLFormula = DLFormula(
+                "true",
+                (),
+                (),
+                "safety",
+            )
+        elif dl_terms is None:
+            safety_problem = UntranslatedDLFormula(
+                "safety",
+                dl_term_error or "failed to prepare ODE symbolic terms",
+            )
+        else:
+            safety_problem = self._make_dl_formula(
+                "safety",
+                safety_formula,
+                precondition=dl_terms.precondition,
+                equations=dl_terms.equations,
+                domain=dl_terms.domain,
+                safety=dl_terms.safety,
+                duration=dl_terms.duration,
+                clock=dl_terms.clock,
+                infinite_duration=infinite_duration,
+            )
+        premises: list[_Premise] = [
+            self._dl_premise(
+                "T-ODE-safety",
+                "The ODE preserves its annotated safety property until delay d",
+                safety_problem,
+                automatically_true=self._is_true(safety),
+            )
+        ]
+
+        # 没有顺序后继时采用只含通信中断的规则；无限 delay 即使写有 tail，
+        # 自然超时也永远不会发生。Table 2 在这两种情况下要求证明 B 是无约束
+        # 动力系统 {F} 的不变量，即 ``pre -> [{F}]B``；若把 B 同时写进程序域，
+        # ``[{F & B}]B`` 会退化成不能检验边界保持性的恒真式。
+        if not tail or infinite_duration:
+            if self._is_true(domain):
+                domain_problem: DLFormula | UntranslatedDLFormula = DLFormula(
+                    "true",
+                    (),
+                    (),
+                    "domain",
+                )
+            elif dl_terms is None:
+                domain_problem = UntranslatedDLFormula(
+                    "domain",
+                    dl_term_error or "failed to prepare ODE symbolic terms",
+                )
+            else:
+                domain_problem = self._make_dl_formula(
+                    "domain",
+                    domain_formula,
+                    precondition=dl_terms.precondition,
+                    equations=dl_terms.equations,
+                    domain=dl_terms.domain,
+                    domain_definedness=dl_terms.domain_definedness,
+                )
+            premises.append(
+                self._dl_premise(
+                    "T-ODE-domain",
+                    "The ODE remains in its domain until an interrupt is taken",
+                    domain_problem,
+                    automatically_true=self._is_true(domain),
+                )
+            )
+
+        # Table 2 只有“有限 d 且存在自然后继 T”的规则需要精确边界 premise。
+        # 纯通信中断形式 ``delay(d) \unrhd A`` 的 d 是外部批注，不声称存在一条
+        # 自然超时迁移，因此不能额外强加“在 t=d 离开 B”的 boundary 义务。
+        if tail and not infinite_duration:
+            if dl_terms is None:
+                boundary_problem: DLFormula | UntranslatedDLFormula = (
+                    UntranslatedDLFormula(
+                        "boundary",
+                        dl_term_error or "failed to prepare ODE symbolic terms",
+                    )
+                )
+            else:
+                boundary_problem = self._make_dl_formula(
+                    "boundary",
+                    boundary_formula,
+                    precondition=dl_terms.precondition,
+                    equations=dl_terms.equations,
+                    domain=dl_terms.domain,
+                    domain_definedness=dl_terms.domain_definedness,
+                    duration=dl_terms.duration,
+                    clock=dl_terms.clock,
+                )
+            premises.append(
+                self._dl_premise(
+                    "T-ODE-boundary",
+                    "Before delay d the ODE remains in B, and at d it satisfies not B",
+                    boundary_problem,
+                )
+            )
+
+        if not tail or infinite_duration:
+            # fallback 固定为 bottom；tail 仍传给通信分支，因为无限演化也可能
+            # 被通信提前中断，分支 continuation 完成后仍应执行外层 tail。
+            interrupt_context = self._ode_post_context(
+                node,
+                context,
+                evolved,
+                assumption=_ODEPostAssumption.DOMAIN_AND_SAFETY,
+            )
+            premises.append(
+                self._event_premise(
+                    node.interrupts,
+                    tail,
+                    interrupt_context,
+                    judgment.terminal,
+                )
+            )
+
+            def conclude_without_timeout(
+                children: tuple[Any, ...],
+            ) -> _ProcessInferenceResult:
+                """组合无自然超时分支的 ODE 通信反应和正式 bottom fallback。"""
+
+                choices = children[0]
+                if isinstance(choices, _InferenceFailure):
+                    return _INFERENCE_FAILURE
+                return make_timed_type(duration, choices, BottomType())
+
+            return _RuleExpansion(
+                "T-ODE",
+                tuple(premises),
+                conclude_without_timeout,
+            )
+
+        # 运行到这里必然是有限 d 且存在顺序后继：自然到时后把 tail 推导为
+        # timed type 的 fallback；通信中断分支也在自己的 continuation 后接 tail。
+        fallback_context = self._ode_post_context(
+            node,
+            context,
+            evolved,
+            assumption=_ODEPostAssumption.NOT_DOMAIN_AND_SAFETY,
+        )
+        # 新版 Table 2 在通信中断分支只允许使用 safety；自然结束分支则使用
+        # ``not B and safety``。不能把纯通信规则的 ``B and safety`` 搬到这里。
+        interrupt_context = self._ode_post_context(
+            node,
+            context,
+            evolved,
+            assumption=_ODEPostAssumption.SAFETY,
+        )
+        premises.extend(
+            (
+                self._event_premise(
+                    node.interrupts,
+                    tail,
+                    interrupt_context,
+                    judgment.terminal,
+                ),
+                self._process_premise(
+                    tail,
+                    fallback_context,
+                    judgment.terminal,
+                ),
+            )
+        )
+
+        def conclude_with_timeout(
+            children: tuple[Any, ...],
+        ) -> _ProcessInferenceResult:
+            """组合 ODE 通信中断子类型与有限时延自然后继子类型。"""
+
+            choices, fallback = children
+            if isinstance(choices, _InferenceFailure) or isinstance(
+                fallback,
+                _InferenceFailure,
+            ):
+                return _INFERENCE_FAILURE
+            return make_timed_type(duration, choices, fallback)
+
+        return _RuleExpansion("T-ODE", tuple(premises), conclude_with_timeout)
+
+    def _ode_dl_terms(
+        self,
+        node: ODE,
+        context: _Context,
+        evolved: Sequence[str],
+    ) -> _ODEDLTerms:
+        """在 ODE 入口建立可用于 dL 模态的符号快照。
+
+        离散赋值规则把 ``symbols[x]`` 直接替换成右值项；而 ODE 左端必须是
+        KeYmaera X 的变量。这里为每个演化变量创建新鲜入口符号 ``x0``，并把
+        ``x0 = 当前值`` 加入前置条件。随后为 ``node.local_clock`` 创建一个
+        新鲜 Real 符号，把 ``t=0`` 加入前置条件并把 ``t'=1`` 加入方程。ODE
+        方程右端、域和安全式中的源名 ``t`` 都绑定到这个符号，保证它们读取
+        同一个当前演化时间，而该局部时钟不会泄漏到后继上下文。
+        """
+
+        self._fresh_counter += 1
+        ode_symbols = dict(context.symbols)
+        snapshot_translator = ExpressionTranslator(
+            context.gamma,
+            ode_symbols,
+        )
+        equalities: list[Any] = []
+
+        # ``evolved`` 可能因前面的结构错误含重复名；dL 公式只为每个名字建一次
+        # 快照，结构错误本身已经由 T-ODE 诊断为 FALSE。
+        for name in dict.fromkeys(evolved):
+            if name not in context.gamma:
+                raise DLTranslationError(
+                    f"cannot build dL formula for undeclared ODE variable {name!r}"
+                )
+            if context.gamma[name] != BasicType.REAL:
+                raise DLTranslationError(
+                    f"dL ODE variable {name!r} is not declared as Real"
+                )
+            old_value = ode_symbols.get(name)
+            if old_value is None:
+                old_value = snapshot_translator.symbol(name, context.gamma[name])
+            fresh_value = snapshot_translator.fresh_symbol(
+                name,
+                context.gamma[name],
+                f"__dlentry{self._fresh_counter}",
+            )
+            ode_symbols[name] = fresh_value
+            equalities.append(fresh_value == old_value)
+
+        if z3 is None:
+            raise DLTranslationError("z3-solver is required to materialize ODE clocks")
+        # ``@`` 不是项目变量词法 ``str.isidentifier()`` 的合法首字符，所以用户
+        # 不可能在 HCSP 表达式中捕获这个内部名称。每次调用的计数后缀又保证
+        # 不同 ODE 实例（含并行分量）获得不同的逻辑符号。
+        clock = z3.Real(f"@hcsp_ode_clock_{self._fresh_counter}")
+        clock_initial = snapshot_translator.translate(
+            node.local_clock.initial_value
+        ).term
+        equalities.append(clock == clock_initial)
+        ode_local_symbols = {node.local_clock.name: clock}
+
+        precondition = conjunction(context.path, *equalities)
+        translator = ExpressionTranslator(context.gamma, ode_symbols)
+        translated_equations: list[tuple[Any, Any]] = []
+        derivative_definedness: list[Any] = []
+        for variable, derivative in node.eqs:
+            name = str(variable)
+            # 重复和无效变量已在结构层诊断；这里拒绝生成可能含歧义的公式。
+            if name not in ode_symbols or context.gamma.get(name) != BasicType.REAL:
+                raise DLTranslationError(
+                    f"cannot materialize dL equation for {name!r}"
+                )
+            derivative_result = translator.translate(
+                derivative,
+                local_symbols=ode_local_symbols,
+            )
+            derivative_definedness.extend(
+                derivative_result.definedness
+            )
+            translated_equations.append(
+                (ode_symbols[name], derivative_result.term)
+            )
+
+        clock_derivative = translator.translate(
+            node.local_clock.derivative
+        ).term
+        translated_equations.append((clock, clock_derivative))
+
+        domain_result = translator.boolean_result(
+            node.constraint,
+            local_symbols=ode_local_symbols,
+        )
+        domain = domain_result.term
+        domain_definedness = conjunction(
+            *derivative_definedness,
+            *domain_result.definedness,
+        )
+        if node.local_clock_deadline is not None:
+            # wait(d) 的隐藏截止条件只在内部 dL 域中出现；普通 ODE 不会因为
+            # delay 批注而自动得到这个边界。用户在源 constraint 中写 t 时会
+            # 读取同一个局部时钟，但不能覆盖它的固定导数。Section 2.1 明确
+            # 使用严格演化域 t<d，使新版 Table 2 能在 t=d 证明 not B。
+            deadline_result = translator.translate(node.local_clock_deadline)
+            domain_definedness = conjunction(
+                domain_definedness,
+                *deadline_result.definedness,
+            )
+            domain = conjunction(
+                domain,
+                clock < deadline_result.term,
+            )
+        safety_result = translator.boolean_result(
+            node.annotation.safety,
+            local_symbols=ode_local_symbols,
+        )
+        safety = conjunction(
+            domain_definedness,
+            *safety_result.definedness,
+            safety_result.term,
+        )
+        delay = node.annotation.delay
+        if isinstance(delay, float) and delay == inf:
+            duration_term = None
+        else:
+            duration_result = translator.translate(delay)
+            if duration_result.definedness:
+                raise DLTranslationError(
+                    "finite ODE delay must be an everywhere-defined rational"
+                )
+            duration_term = duration_result.term
+        return _ODEDLTerms(
+            precondition,
+            tuple(translated_equations),
+            domain,
+            domain_definedness,
+            safety,
+            duration_term,
+            clock,
+        )
+
+    @staticmethod
+    def _make_dl_formula(
+        role: str,
+        builder: Any,
+        **arguments: Any,
+    ) -> DLFormula | UntranslatedDLFormula:
+        """调用一个严格 dL 构造器，并把不支持的子集保守记录为 UNKNOWN。"""
+
+        try:
+            return builder(**arguments)
+        except DLTranslationError as exc:
+            return UntranslatedDLFormula(role, str(exc))
+
+    def _ode_post_context(
+        self,
+        node: ODE,
+        context: _Context,
+        evolved: Sequence[str],
+        *,
+        assumption: _ODEPostAssumption,
+    ) -> _Context:
+        """为 ODE 结束/中断后创建新的符号状态与路径条件。
+
+        所有演化变量都换成新鲜符号，因为离开连续演化时其数值通常无法由简单
+        代入得到。新版 Table 2 对三种后继给出不同前置条件：纯通信规则的事件
+        后继使用 ``B & safety``；带自然超时规则的通信后继只使用 ``safety``；
+        自然结束后继使用 ``not B & safety``。调用方必须显式选择其中一种，避免
+        用单个布尔开关混淆两个不同规则。
+
+        若 domain/safety 使用了局部 ``t``，离开 ODE 时不能把这个名字泄漏到
+        Gamma。这里用一个新鲜 Real 翻译它，并以 ``exists t>=0`` 投影掉局部
+        时钟；所得条件仍是实际 ODE 后状态的保守后置事实。事件 continuation
+        或顺序后继中另行出现的 ``t`` 不受这个量词绑定。
+        """
+        post = context.clone()
+        self._fresh_counter += 1
+        translator = self._translator(post)
+        # 同一 ODE 的所有新鲜变量共享计数后缀，表示同一后状态快照。
+        for name in evolved:
+            if name in post.gamma:
+                post.symbols[name] = translator.fresh_symbol(
+                    name,
+                    post.gamma[name],
+                    f"__ode{self._fresh_counter}",
+                )
+        translator = self._translator(post)
+        try:
+            uses_local_clock = (
+                node.local_clock.name in node.annotation.safety.get_vars()
+                or (
+                    assumption != _ODEPostAssumption.SAFETY
+                    and (
+                        node.local_clock.name in node.constraint.get_vars()
+                        or node.local_clock_deadline is not None
+                    )
+                )
+            )
+            local_symbols: dict[str, Any] = {}
+            post_clock = None
+            if uses_local_clock:
+                if z3 is None:
+                    raise ExpressionError(
+                        "z3-solver is required to eliminate the ODE local clock"
+                    )
+                post_clock = z3.Real(
+                    f"@hcsp_ode_post_clock_{self._fresh_counter}"
+                )
+                local_symbols[node.local_clock.name] = post_clock
+            safety_result = translator.boolean_result(
+                node.annotation.safety,
+                local_symbols=local_symbols,
+            )
+            safety = self._defined_term(safety_result)
+            if assumption != _ODEPostAssumption.SAFETY:
+                domain_result = translator.boolean_result(
+                    node.constraint,
+                    local_symbols=local_symbols,
+                )
+                domain_term = domain_result.term
+                domain_definedness = list(domain_result.definedness)
+                if node.local_clock_deadline is not None:
+                    if post_clock is None:
+                        raise ExpressionError(
+                            "ODE.wait boundary needs its local post-state clock"
+                        )
+                    deadline_result = translator.translate(
+                        node.local_clock_deadline
+                    )
+                    domain_definedness.extend(deadline_result.definedness)
+                    domain_term = conjunction(
+                        domain_term,
+                        post_clock < deadline_result.term,
+                    )
+                if assumption == _ODEPostAssumption.DOMAIN_AND_SAFETY:
+                    domain_condition = conjunction(
+                        *domain_definedness,
+                        domain_term,
+                    )
+                else:
+                    domain_condition = conjunction(
+                        *domain_definedness,
+                        negation(domain_term),
+                    )
+                condition = conjunction(domain_condition, safety)
+            else:
+                condition = safety
+            if post_clock is not None:
+                condition = conjunction(post_clock >= 0, condition)
+                post.path = z3.Exists([post_clock], condition)
+            else:
+                post.path = condition
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-ODE", context.location)
+            post.path = z3.BoolVal(False) if z3 is not None else False
+        return post
+
+    # ------------------------------------------------------------------
+    # Recursive rules
+    # ------------------------------------------------------------------
+    def rule_t_mu(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """[T-mu] 引入递归边界不变式，并求解行为类型方程。
+
+        Section 2.1 只包含显式 ``mu X.P``；递归回边必须由进程体中的 ``Var(X)``
+        写出。``Mu`` 构造器已按 Assumption 2.2 拒绝未受通信保护的源码回边；
+        本规则在生成行为类型后仍复核相同结构不变量。仅当类型体确实引用新鲜
+        类型变量时才构造 ``MuType``。
+        """
+
+        node = judgment.nodes[0]
+        tail = judgment.nodes[1:]
+        context = judgment.context
+        if tail:
+            self._diagnose(
+                Verdict.UNKNOWN,
+                "Sequential continuation after a recursive process is outside "
+                "the guarded tail-recursive fragment implemented here",
+                "T-mu",
+                context.location,
+            )
+
+        source_name = node.variable
+        body = node.body
+        # X 的边界不变量只来自绑定处的 RecursionAnnotation。
+        invariant = node.annotation.invariant
+
+        premises: list[_Premise] = []
+        try:
+            invariant_at_entry = self._translator(context).boolean_result(
+                invariant
+            )
+            premises.append(
+                self._fol_premise(
+                    "T-mu",
+                    f"Entry path entails recursion invariant for {source_name}",
+                    implies(
+                        context.path,
+                        self._defined_term(invariant_at_entry),
+                    ),
+                )
+            )
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-mu", context.location)
+
+        # 类型变量与源程序变量分开命名，避免 alpha 等价判断受到源名称影响。
+        self._type_var_counter += 1
+        type_var = TypeVar(f"t{self._type_var_counter}")
+        binding = _RecBinding(source_name, type_var, invariant)
+        body_context = self._fresh_recursion_context(context, binding)
+        premises.append(
+            self._process_premise(
+                tuple(self._as_nodes(body)),
+                body_context,
+                EndType(),
+            )
+        )
+
+        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
+            """用递归体子类型决定是否需要构造通信保护的 MuType。"""
+
+            body_type = children[0]
+            if isinstance(body_type, _InferenceFailure):
+                return _INFERENCE_FAILURE
+            if self._contains_type_var(body_type, type_var.name):
+                if not self._guarded(body_type, type_var.name):
+                    self._diagnose(
+                        Verdict.FALSE,
+                        f"Recursive type variable {type_var.name} is not communication-guarded",
+                        "T-mu",
+                        context.location,
+                    )
+                    return _INFERENCE_FAILURE
+                return MuType(type_var.name, body_type)
+            return body_type
+
+        return _RuleExpansion("T-mu", tuple(premises), conclude)
+
+    def rule_t_x(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _RuleExpansion:
+        """[T-X] 在显式递归调用处检查边界不变式和尾位置限制。"""
+
+        node = judgment.nodes[0]
+        tail = judgment.nodes[1:]
+        context = judgment.context
+        name = node.name
+        binding = context.rec_env.get(name)
+        if binding is None:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Unbound process variable {name!r}",
+                "T-X",
+                context.location,
+            )
+            return _RuleExpansion("T-X", (), lambda _children: _INFERENCE_FAILURE)
+        if tail:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Recursive call {name!r} must be in tail position",
+                "T-X",
+                context.location,
+            )
+        premise = self._recursion_boundary_premise(binding, context)
+        premises = () if premise is None else (premise,)
+        return _RuleExpansion(
+            "T-X",
+            premises,
+            lambda _children: binding.type_var,
+        )
+
+    def _recursion_boundary_premise(
+        self,
+        binding: _RecBinding,
+        context: _Context,
+    ) -> _FormulaPremise | None:
+        """构造递归回边不变式公式 premise；表达式非法时返回 ``None``。"""
+        try:
+            invariant = self._translator(context).boolean_result(
+                binding.invariant
+            )
+            return self._fol_premise(
+                "T-X",
+                f"Recursive body re-establishes invariant for {binding.source_name}",
+                implies(context.path, self._defined_term(invariant)),
+            )
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-X", context.location)
+            return None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _lazy_assignment_post_state(
+        context: _Context,
+        target: str,
+        assigned_term: Any,
+    ) -> _LazyAssignmentPostState:
+        """计算赋值的惰性最强后置状态，不生成待综合谓词或证明义务。
+
+        若赋值前符号映射为 ``rho``，本函数返回的后继映射 ``rho'`` 满足
+        ``rho'(target) = eval(e, rho)``，其余变量保持 ``rho'(y) = rho(y)``；
+        路径公式仍是赋值前符号上的 ``phi``。二者共同表示经典公式
+        ``exists x_old. phi[x_old/x] and x = e[x_old/x]``，但不会引入存在量词。
+        """
+
+        if target not in context.symbols:
+            # 正常上下文会在 _initial_context 中为 Gamma 的每个变量建符号；
+            # 保留显式检查，防止后续内部重构悄悄产生不完整状态。
+            raise ExpressionError(
+                f"Assignment target {target!r} has no symbol in the current state"
+            )
+        post_context = context.clone()
+        previous_term = context.symbols[target]
+        post_context.symbols[target] = assigned_term
+        return _LazyAssignmentPostState(
+            target=target,
+            previous_term=previous_term,
+            assigned_term=assigned_term,
+            pre_path=context.path,
+            post_context=post_context,
+        )
+
+    def _initial_context(
+        self,
+        gamma: Mapping[str, BasicType],
+        theta: dict[str, ChannelType],
+        path_condition: Any,
+        location: str,
+    ) -> _Context:
+        """为一个配置建立初始 Z3 符号、路径条件和类型固有约束。
+
+        名称前缀包含配置位置，确保并行分量中即使误用同名符号也不会在 Z3
+        层意外合并。``Nat >= 0`` 等类型域事实在此统一加入路径条件。
+        """
+        symbols: dict[str, Any] = {}
+        translator = ExpressionTranslator(gamma, symbols, name_prefix=f"{location}__")
+        for name, value_type in gamma.items():
+            try:
+                translator.symbol(name, value_type)
+            except ExpressionError as exc:
+                self._diagnose(Verdict.FALSE, str(exc), "environment", location)
+        try:
+            path_result = translator.boolean_result(path_condition)
+            path = conjunction(
+                self._defined_term(path_result),
+                *(
+                    constraint
+                    for name, value_type in gamma.items()
+                    for constraint in self._type_domain_constraints(
+                        value_type,
+                        symbols[name],
+                    )
+                ),
+            )
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "environment", location)
+            path = z3.BoolVal(False) if z3 is not None else False
+        return _Context(dict(gamma), theta, path, symbols, {}, location)
+
+    def _fresh_recursion_context(
+        self,
+        context: _Context,
+        binding: _RecBinding,
+    ) -> _Context:
+        """从不变式建立递归体入口的抽象状态。
+
+        不沿用调用点的具体符号值，而为所有变量建立新鲜符号并仅假设递归
+        不变式；这正是循环不变式证明中“任意一次迭代”的抽象。
+        """
+        self._fresh_counter += 1
+        symbols: dict[str, Any] = {}
+        translator = ExpressionTranslator(
+            context.gamma,
+            symbols,
+            name_prefix=f"{context.location}__rec{self._fresh_counter}__",
+        )
+        for name, value_type in context.gamma.items():
+            translator.symbol(name, value_type)
+        try:
+            path_result = translator.boolean_result(binding.invariant)
+            path = conjunction(
+                self._defined_term(path_result),
+                *(
+                    constraint
+                    for name, value_type in context.gamma.items()
+                    for constraint in self._type_domain_constraints(
+                        value_type,
+                        symbols[name],
+                    )
+                ),
+            )
+        except ExpressionError as exc:
+            self._diagnose(Verdict.FALSE, str(exc), "T-mu", context.location)
+            path = z3.BoolVal(False) if z3 is not None else False
+        rec_env = dict(context.rec_env)
+        rec_env[binding.source_name] = binding
+        return _Context(
+            gamma=dict(context.gamma),
+            theta=context.theta,
+            path=path,
+            symbols=symbols,
+            rec_env=rec_env,
+            location=f"{context.location}.{binding.source_name}",
+        )
+
+    def rule_t_parallel_system(
+        self,
+        judgment: _SystemJudgment,
+    ) -> _RuleExpansion:
+        """[T-||] 把二元系统并行展开为左右两个系统子 judgment。
+
+        ``Parallel`` 不是 ``Process``，因此这里只生成 configuration 类型
+        ``ParallelType``，不会把它作为某个 process continuation 使用。
+        """
+
+        node = judgment.system
+        context = judgment.context
+        overlap = self._process_vars(node.left) & self._process_vars(node.right)
+        if overlap:
+            self._diagnose(
+                Verdict.FALSE,
+                "Parallel system components share variables: "
+                + ", ".join(sorted(overlap)),
+                "T-||",
+                context.location,
+            )
+
+        left_context = context.clone(location=f"{context.location}.parallel.left")
+        right_context = context.clone(location=f"{context.location}.parallel.right")
+        premises = (
+            _ChildJudgmentPremise(_SystemJudgment(node.left, left_context)),
+            _ChildJudgmentPremise(_SystemJudgment(node.right, right_context)),
+        )
+
+        def conclude(children: tuple[Any, ...]) -> _ConfigurationInferenceResult:
+            """把左右系统子类型组合为二元 ParallelType。"""
+
+            left_type, right_type = children
+            if isinstance(left_type, _InferenceFailure) or isinstance(
+                right_type,
+                _InferenceFailure,
+            ):
+                return _INFERENCE_FAILURE
+            return ParallelType((left_type, right_type))
+
+        return _RuleExpansion("T-||", premises, conclude)
+
+    def _solve_parallel_system_judgment(
+        self,
+        judgment: _SystemJudgment,
+    ) -> _ConfigurationInferenceResult:
+        """求解二元系统并行 judgment，并记录显式左右 premises。"""
+
+        context = judgment.context
+        parallel_step = self._start_step(
+            "T-||",
+            context.location,
+            "推导二元系统组合 S || S'",
+            context=context,
+        )
+        expansion = self.rule_t_parallel_system(judgment)
+        result = self._solve_rule_expansion(expansion)
+        result_text = (
+            "推导失败，至少一个并行系统分支没有正式配置类型"
+            if isinstance(result, _InferenceFailure)
+            else f"并行配置类型 = {result}"
+        )
+        self._finish_step(
+            parallel_step,
+            result_text,
+            self._premise_summary(expansion),
+        )
+        return result
+
+    def _translator(self, context: _Context) -> ExpressionTranslator:
+        """创建读取并更新当前分支符号表的表达式翻译器。"""
+        return ExpressionTranslator(context.gamma, context.symbols)
+
+    @staticmethod
+    def _defined_term(result: ExprResult) -> Any:
+        """把表达式值与其求值有定义条件合成为一个公式。"""
+
+        return conjunction(*result.definedness, result.term)
+
+    def _definedness_premise(
+        self,
+        rule: str,
+        description: str,
+        context: _Context,
+        result: ExprResult,
+    ) -> _FormulaPremise | None:
+        """在当前路径下为偏表达式生成显式有定义性 premise。
+
+        常量非零除数等经化简已显然为真的条件不会增加 Proof Pool 噪声；
+        可能为零或确定为零的条件则保留，由 Z3 给出证明或反例。
+        """
+
+        if not result.definedness:
+            return None
+        condition = simplify(conjunction(*result.definedness))
+        if self._is_true(condition):
+            return None
+        return self._fol_premise(
+            rule,
+            description,
+            implies(context.path, condition),
+        )
+
+    @staticmethod
+    def _display_term(value: Any) -> str:
+        """尽量化简逻辑项；原始用户字符串等非 Z3 值则安全地直接显示。"""
+
+        try:
+            return str(simplify(value))
+        except Exception:
+            return str(value)
+
+    def _start_step(
+        self,
+        rule: str,
+        location: str,
+        subject: str,
+        *,
+        context: _Context | None = None,
+        gamma: Mapping[str, BasicType] | None = None,
+        theta: Mapping[str, ChannelType] | None = None,
+        path: Any = None,
+        symbols: Mapping[str, Any] | None = None,
+    ) -> int:
+        """按进入规则的先序顺序保存环境快照，并返回待补结果的列表下标。"""
+
+        active_gamma = context.gamma if context is not None else (gamma or {})
+        active_theta = context.theta if context is not None else (theta or {})
+        active_path = context.path if context is not None else path
+        active_symbols = context.symbols if context is not None else (symbols or {})
+        step = InferenceStep(
+            number=len(self.steps) + 1,
+            rule=rule,
+            location=location,
+            subject=subject,
+            gamma=tuple(
+                (name, str(value_type))
+                for name, value_type in sorted(active_gamma.items())
+            ),
+            theta=tuple(
+                (name, str(channel_type))
+                for name, channel_type in sorted(active_theta.items())
+            ),
+            path_condition=(
+                "" if active_path is None else self._display_term(active_path)
+            ),
+            symbolic_state=tuple(
+                (name, self._display_term(term))
+                for name, term in sorted(active_symbols.items())
+            ),
+        )
+        self.steps.append(step)
+        return len(self.steps) - 1
+
+    def _finish_step(self, index: int, result: str, detail: str = "") -> None:
+        """在不改变规则入口编号和环境快照的前提下写入规则结果。"""
+
+        self.steps[index] = self.steps[index].completed(result, detail)
+
+    @staticmethod
+    def _rule_name(node: Any) -> str:
+        """返回进程节点在当前实现中对应的 Table 2 规则名。"""
+
+        if isinstance(node, Skip):
+            return "T-Skip"
+        if isinstance(node, Assert):
+            return "T-Assert"
+        if isinstance(node, Assign):
+            return "T-Assign"
+        if isinstance(node, InputChannel):
+            return "T-In"
+        if isinstance(node, OutputChannel):
+            return "T-Out"
+        if isinstance(node, If):
+            return "T-If"
+        if isinstance(node, InternalChoice):
+            return "T-sqcup"
+        if isinstance(node, ODE):
+            return "T-ODE"
+        if isinstance(node, Mu):
+            return "T-mu"
+        if isinstance(node, Var):
+            return "T-X"
+        return "structural"
+
+    @staticmethod
+    def _describe_process_node(node: Any) -> str:
+        """把严格 AST 节点转换为接近论文语法的简短用户说明。"""
+
+        if isinstance(node, Skip):
+            return "skip"
+        if isinstance(node, Assert):
+            return f"assert({node.condition})"
+        if isinstance(node, Assign):
+            return f"{node.target} := {node.expression}"
+        if isinstance(node, InputChannel):
+            targets = ", ".join(str(target) for target in node.targets)
+            return f"{node.channel}?({targets})"
+        if isinstance(node, OutputChannel):
+            payloads = ", ".join(str(payload) for payload in node.payloads)
+            return f"{node.channel}!({payloads})"
+        if isinstance(node, If):
+            return f"if {node.condition} then P else P'"
+        if isinstance(node, InternalChoice):
+            return "P \\sqcup P'"
+        if isinstance(node, ODE):
+            equations = ", ".join(
+                f"{name}'={derivative}" for name, derivative in node.eqs
+            ) or "(only local t'=1)"
+            return (
+                f"<{equations} & {node.constraint}> "
+                f"[safety={node.annotation.safety}, delay={node.annotation.delay}]"
+            )
+        if isinstance(node, Mu):
+            return f"mu {node.variable} [invariant={node.annotation.invariant}].P"
+        if isinstance(node, Var):
+            return node.name
+        return repr(node)
+
+    @staticmethod
+    def _rule_explanation(rule: str) -> str:
+        """给详细报告补充规则作用，同时避免把结构推导与证明结论混淆。"""
+
+        explanations = {
+            "T-Skip": "skip 不改变 Gamma、路径条件或符号状态，继续检查顺序后继。",
+            "T-Assert": "生成路径条件蕴含断言的 FOL 义务；断言不是 assume。",
+            "T-Assign": (
+                "按 phi -> phi'{e/x} 确定性生成惰性最强后置状态；"
+                "不把未知 phi' 交给 Proof Pool 综合。"
+            ),
+            "T-In": "从 Theta 取得各槽类型，为接收目标建立新鲜值并假设 refinement。",
+            "T-Out": "逐槽检查输出表达式类型，并证明实际载荷满足 refinement。",
+            "T-If": "分别在 phi∧B 和 phi∧¬B 下检查两个分支。",
+            "T-sqcup": "独立检查内部非确定选择的两个分支并保留两种行为。",
+            "T-ODE": "检查连续变量并生成 safety、domain、boundary 的 dL 义务。",
+            "T-mu": "引入递归类型变量和边界不变量，再检查递归体。",
+            "T-X": "检查递归回边的边界不变量，并返回对应类型变量。",
+            "structural": "当前对象不属于项目定义的 HCSP 进程节点。",
+        }
+        return explanations.get(rule, "")
+
+    @staticmethod
+    def _process_premise(
+        nodes: Sequence[Process],
+        context: _Context,
+        terminal: ProcessType,
+    ) -> _ChildJudgmentPremise:
+        """构造顺序进程子 judgment premise，不立即执行它。"""
+
+        return _ChildJudgmentPremise(
+            _ProcessJudgment(tuple(nodes), context, terminal)
+        )
+
+    @staticmethod
+    def _event_premise(
+        reaction: EventReaction,
+        tail: Sequence[Process],
+        context: _Context,
+        terminal: ProcessType,
+    ) -> _ChildJudgmentPremise:
+        """构造事件反应子 judgment premise，不立即执行它。"""
+
+        interrupt_context = context.clone(
+            location=f"{context.location}.interrupt"
+        )
+        return _ChildJudgmentPremise(
+            _EventJudgment(
+                reaction,
+                tuple(tail),
+                interrupt_context,
+                terminal,
+            )
+        )
+
+    @staticmethod
+    def _state_premise(
+        rule: str,
+        description: str,
+        formula: Any,
+        state: Mapping[str, Any],
+        symbols: Mapping[str, Any],
+    ) -> _FormulaPremise:
+        """构造 ``sigma |= phi`` 状态前提，不立即调用 Z3。"""
+
+        return _FormulaPremise(
+            _PendingProof(
+                ProofObligation(
+                    rule=rule,
+                    description=description,
+                    formula=formula,
+                    kind="state",
+                ),
+                state=dict(state),
+                symbols=dict(symbols),
+            )
+        )
+
+    @staticmethod
+    def _fol_premise(
+        rule: str,
+        description: str,
+        formula: Any,
+    ) -> _FormulaPremise:
+        """构造一阶逻辑公式 premise，不立即调用 Z3。"""
+
+        return _FormulaPremise(
+            _PendingProof(
+                ProofObligation(
+                    rule=rule,
+                    description=description,
+                    formula=formula,
+                    kind="fol",
+                )
+            )
+        )
+
+    @staticmethod
+    def _dl_premise(
+        rule: str,
+        description: str,
+        formula: Any,
+        *,
+        automatically_true: bool = False,
+    ) -> _FormulaPremise:
+        """构造动态逻辑公式 premise，保留恒真标记供第二阶段使用。
+
+        即使 safety/domain 语法上为 true，也先进入同一个 Pool；这样最终报告
+        的义务顺序完全由规则生成顺序决定，而证明器只在统一处理阶段运行。
+        """
+
+        return _FormulaPremise(
+            _PendingProof(
+                ProofObligation(
+                    rule=rule,
+                    description=description,
+                    formula=formula,
+                    kind="dl",
+                ),
+                automatically_true=automatically_true,
+            )
+        )
+
+    @staticmethod
+    def _premise_summary(expansion: _RuleExpansion) -> str:
+        """把显式 premises 渲染成审计报告中的紧凑推导树说明。"""
+
+        descriptions: list[str] = []
+        for premise in expansion.premises:
+            if isinstance(premise, _FormulaPremise):
+                obligation = premise.pending.obligation
+                descriptions.append(
+                    f"formula[{obligation.kind}:{obligation.rule}]"
+                )
+                continue
+            child = premise.judgment
+            if isinstance(child, _ConfigurationJudgment):
+                descriptions.append(f"configuration[{child.context.location}]")
+            elif isinstance(child, _SystemJudgment):
+                descriptions.append(f"system[{child.context.location}]")
+            elif isinstance(child, _ProcessJudgment):
+                subject = (
+                    "T-End"
+                    if not child.nodes
+                    else TypeChecker._describe_process_node(child.nodes[0])
+                )
+                descriptions.append(f"process[{subject}]@{child.context.location}")
+            elif isinstance(child, _EventJudgment):
+                descriptions.append(f"event[E]@{child.context.location}")
+        summary = (
+            "Premises: " + ", ".join(descriptions) + "."
+            if descriptions
+            else "Premises: (none)."
+        )
+        post_state = expansion.assignment_post_state
+        if post_state is None:
+            return summary
+        target = post_state.target
+        return (
+            summary
+            + " 惰性最强后置状态: "
+            + f"赋值前 {target}={TypeChecker._display_term(post_state.previous_term)}; "
+            + f"右值={TypeChecker._display_term(post_state.assigned_term)}; "
+            + f"赋值后 symbols[{target}]="
+            + f"{TypeChecker._display_term(post_state.post_context.symbols[target])}; "
+            + "phi' 已由该符号映射确定，未加入 Proof Pool。"
+        )
+
+    def _discharge_proof_pool(self) -> None:
+        """在类型规则全部展开后统一化简、分派并判定 Pool 中的全部前提。
+
+        化简式只作为证明器输入，最终 ``ProofObligation`` 仍保存规则展开时
+        生成的原始公式。这样 ``phi => B``、``phi => phi'{e/x}`` 等 Table 2
+        premise 即使被 Z3 化简为 ``True``，审计报告中也不会丢失原始结构。
+        """
+
+        kind_counts = {
+            kind: sum(
+                pending.obligation.kind == kind for pending in self.proof_pool
+            )
+            for kind in ("state", "fol", "dl")
+        }
+        pool_step = self._start_step(
+            "Proof-Pool",
+            "judgment",
+            f"统一判定 {len(self.proof_pool)} 条已收集证明义务",
+        )
+        decided: list[ProofObligation] = []
+
+        for pending in self.proof_pool:
+            obligation = pending.obligation
+            # 默认后端直接接收规则公式；state/FOL 分支会把该字段替换为实际
+            # 使用的化简式，使最终报告同时保留原公式和证明器输入。
+            proof_formula = obligation.formula
+
+            try:
+                if obligation.kind == "state":
+                    if pending.state is None or pending.symbols is None:
+                        verdict = Verdict.FALSE
+                        detail = "invalid state obligation in Proof Pool"
+                    else:
+                        proof_formula = simplify(obligation.formula)
+                        verdict, detail = self.proof_engine.state_satisfies(
+                            proof_formula,
+                            pending.state,
+                            pending.symbols,
+                        )
+                elif obligation.kind == "fol":
+                    proof_formula = simplify(obligation.formula)
+                    verdict, detail = self.proof_engine.valid(proof_formula)
+                elif obligation.kind == "dl":
+                    if pending.automatically_true:
+                        verdict = Verdict.TRUE
+                        detail = (
+                            "the annotated safety/domain formula is "
+                            "syntactically true"
+                        )
+                    else:
+                        backend_result = self.dl_checker(obligation)
+                        if isinstance(backend_result, DLCheckResult):
+                            verdict = backend_result.verdict
+                            detail = backend_result.detail
+                        else:
+                            verdict = Verdict.from_value(backend_result)
+                            detail = (
+                                "configured dL checker returned no decision"
+                                if backend_result is None
+                                else "result returned by the configured dL checker"
+                            )
+                else:
+                    verdict = Verdict.UNKNOWN
+                    detail = f"unsupported Proof Pool kind: {obligation.kind}"
+            except Exception as exc:
+                # 外部证明器、化简器或自定义后端失败都保守为 UNKNOWN；Pool 中
+                # 的其余义务仍继续判定，最终报告一次展示全部可得结果。
+                verdict = Verdict.UNKNOWN
+                detail = f"proof checker failed: {exc}"
+
+            # ``decided`` 只替换判定结果，原始 formula 保持不变，因而报告
+            # 可以逐字追溯到规则展开阶段生成的 premise。
+            decided.append(
+                obligation.decided(
+                    verdict,
+                    detail,
+                    proof_formula=proof_formula,
+                )
+            )
+
+        self.obligations = decided
+        proved = sum(item.verdict == Verdict.TRUE for item in decided)
+        disproved = sum(item.verdict == Verdict.FALSE for item in decided)
+        unknown = sum(item.verdict == Verdict.UNKNOWN for item in decided)
+        self._finish_step(
+            pool_step,
+            (
+                f"Pool 判定完成: true={proved}, false={disproved}, "
+                f"unknown={unknown}"
+            ),
+            (
+                f"分类数量: state={kind_counts['state']}, "
+                f"fol={kind_counts['fol']}, dl={kind_counts['dl']}。"
+                "FOL 由 Z3 判定有效性，dL 由配置的证明后端判定。"
+            ),
+        )
+
+    def _report(
+        self,
+        inferred: ConfigurationType | None,
+        component_types: tuple[ConfigurationType | None, ...],
+    ) -> CheckReport:
+        """合并义务与诊断的三值结果，构造不可变最终报告。"""
+        verdict = Verdict.combine(
+            [item.verdict for item in self.obligations]
+            + [item.verdict for item in self.diagnostics]
+        )
+        return CheckReport(
+            verdict=verdict,
+            inferred_type=inferred,
+            component_types=component_types,
+            obligations=tuple(self.obligations),
+            diagnostics=tuple(self.diagnostics),
+            steps=tuple(self.steps),
+        )
+
+    def _diagnose(
+        self,
+        verdict: Verdict,
+        message: str,
+        rule: str = "",
+        location: str = "",
+    ) -> None:
+        """追加一条带规则和位置的诊断，不中断后续可恢复检查。"""
+        self.diagnostics.append(Diagnostic(verdict, message, rule, location))
+
+    @staticmethod
+    def _channel_name(channel: str | Channel) -> str:
+        """把项目 Channel 或字符串规范成 Theta 的通道键。"""
+        if isinstance(channel, str):
+            # Theta 是另一条公开通道名输入路径，必须与 process/type AST 使用
+            # 完全相同的标识符规则，不能让非法名称绕过 Channel 构造边界。
+            return Channel(channel).name
+        if isinstance(channel, Channel):
+            return channel.name
+        raise TypeError(
+            "Theta keys must be strings or hcsp_typechecker Channel objects"
+        )
+
+    def _as_nodes(self, process: Process) -> list[Process]:
+        """递归展开论文二元 ``Sequence``，保持从左到右的执行次序。"""
+
+        if isinstance(process, SequenceHP):
+            return self._as_nodes(process.first) + self._as_nodes(process.second)
+        return [process]
+
+    @staticmethod
+    def _is_true(formula: Any) -> bool:
+        """识别 Python/Z3 中语法化简后恒真的公式。"""
+        if formula is True:
+            return True
+        return z3 is not None and z3.is_true(simplify(formula))
+
+    def _require_numeric_type(
+        self,
+        value_type: BasicType,
+        subject: str,
+        context: _Context,
+    ) -> None:
+        """为需要数值表达式的规则生成一致的类型诊断。"""
+        if value_type not in {
+            BasicType.NAT,
+            BasicType.INT,
+            BasicType.RATIONAL,
+            BasicType.REAL,
+        }:
+            self._diagnose(
+                Verdict.FALSE,
+                f"{subject} must be numeric, got {value_type}",
+                "expression-type",
+                context.location,
+            )
+
+    def _type_domain_constraints(
+        self,
+        value_type: BasicType,
+        symbol: Any,
+    ) -> tuple[Any, ...]:
+        """Logical facts intrinsic to a basic type, currently Nat >= 0."""
+
+        if value_type == BasicType.NAT:
+            return (symbol >= 0,)
+        return ()
+
+    def _contains_type_var(self, value: ProcessType, name: str) -> bool:
+        """递归判断行为类型中是否含指定自由类型变量。"""
+
+        if isinstance(value, TypeVar):
+            return value.name == name
+        if isinstance(value, (InputType, OutputType)):
+            return self._contains_type_var(value.continuation, name)
+        if isinstance(value, (ExternalChoiceType, InternalChoiceType)):
+            return any(
+                self._contains_type_var(branch, name)
+                for branch in value.branches
+            )
+        if isinstance(value, PureDelayType):
+            return self._contains_type_var(value.continuation, name)
+        if isinstance(value, CommunicationTimeoutType):
+            return self._contains_type_var(value.choices, name)
+        if isinstance(value, TimedExternalChoiceType):
+            return self._contains_type_var(
+                value.choices,
+                name,
+            ) or self._contains_type_var(value.fallback, name)
+        if isinstance(value, MuType):
+            return value.variable != name and self._contains_type_var(
+                value.body,
+                name,
+            )
+        return False
+
+    def _guarded(
+        self,
+        value: ProcessType,
+        name: str,
+        under_communication: bool = False,
+    ) -> bool:
+        """防御性复核递归类型变量是否受输入/输出通信前缀保护。
+
+        ``under_communication`` 一旦经过 InputType/OutputType 即为真；仅经过
+        纯等待、选择等构造不算通信保护。遇到同名内层 ``MuType`` 时停止追踪，
+        因为该名字已被新的绑定遮蔽。正常项目 AST 已在 ``Mu`` 构造时通过
+        Assumption 2.2；此处防止后续类型转换代码破坏该性质。
+        """
+        if isinstance(value, TypeVar):
+            return value.name != name or under_communication
+        if isinstance(value, (InputType, OutputType)):
+            return self._guarded(value.continuation, name, True)
+        if isinstance(value, (ExternalChoiceType, InternalChoiceType)):
+            return all(
+                self._guarded(branch, name, under_communication)
+                for branch in value.branches
+            )
+        if isinstance(value, PureDelayType):
+            return self._guarded(value.continuation, name, under_communication)
+        if isinstance(value, CommunicationTimeoutType):
+            return self._guarded(value.choices, name, under_communication)
+        if isinstance(value, TimedExternalChoiceType):
+            return self._guarded(
+                value.choices,
+                name,
+                under_communication,
+            ) and self._guarded(value.fallback, name, under_communication)
+        if isinstance(value, MuType):
+            return value.variable == name or self._guarded(
+                value.body,
+                name,
+                under_communication,
+            )
+        return True
+
+    def _process_vars(self, process: Any) -> set[str]:
+        """从项目 HCSP 节点读取状态变量，用于并行 Gamma 自动分区。
+
+        外部对象返回空集并会在实际推导阶段产生结构错误；这里不调用其同名
+        方法，避免重新引入鸭子类型兼容。
+        """
+        if not isinstance(process, HCSP):
+            return set()
+        return process.get_vars()
+
+    def _input_bound_vars(self, process: Any) -> set[str]:
+        """收集输入写入的目标；这些变量可以不预先出现在 Gamma。"""
+        if not isinstance(process, HCSP):
+            return set()
+        return process.get_input_bound_vars()
+
+
+def check_hcsp(
+    *,
+    gamma: Mapping[str, BasicType] | None,
+    theta: Mapping[str, ChannelType | Any] | None,
+    configurations: Sequence[Configuration | tuple[Mapping[str, Any], Any] | Any],
+    path_condition: Any = True,
+    expected_types: Sequence[ConfigurationType] | None = None,
+    dl_checker: DLChecker | None = None,
+    keymaerax_config: KeYmaeraXConfig | None = None,
+    z3_timeout_ms: int = 5_000,
+) -> CheckReport:
+    """按设计 PPT 的输入形式提供无状态便捷 API。
+
+    该函数负责构造 :class:`TypingJudgment` 和一次性 :class:`TypeChecker`。需要
+    重用 ODE 配置或自定义检查流程时，可直接实例化 ``TypeChecker``。
+    """
+
+    judgment = TypingJudgment(
+        gamma=gamma,
+        theta=theta,
+        configurations=configurations,
+        path_condition=path_condition,
+        expected_types=expected_types,
+    )
+    return TypeChecker(
+        dl_checker=dl_checker,
+        keymaerax_config=keymaerax_config,
+        z3_timeout_ms=z3_timeout_ms,
+    ).check(judgment)
