@@ -27,6 +27,7 @@ Thumbs.db
 .tmp/
 tmp/
 C%3A/
+/gpt_need/
 
 # KeYmaera X is an optional external dependency.  Do not publish the jar,
 # per-user database/configuration, or generated proof evidence with the code.

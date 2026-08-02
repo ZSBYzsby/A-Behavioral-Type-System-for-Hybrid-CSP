@@ -39,6 +39,7 @@ IGNORED_PARTS = {
     ".keymaerax-home",
     ".keymaerax-artifacts",
     "keymaerax-artifacts",
+    "gpt_need",
     ".tmp",
     "tmp",
     "C%3A",
