@@ -153,6 +153,37 @@ class Assumption22ConstructionTests(unittest.TestCase):
         )
         self.assertIsInstance(Mu("X", body), Mu)
 
+    # 测试输入：三元内部选择的两个分支都通信，公共 continuation 为 X。
+    # 预期行为：Mu 成功构造，因为到达公共 X 的两条路径都已受通信保护。
+    # 检查内容：确认 Assumption 2.2 把左右出口状态分别传入第三字段。
+    # 论文对应：``(P \sqcup P');Q`` 中每条到 Q 内递归回边的路径都必须通信。
+    def test_choice_common_continuation_inherits_each_guarded_exit(self) -> None:
+        """两个分支都通信时，公共递归后继受保护。"""
+
+        body = InternalChoice(
+            InputChannel("left", "v"),
+            OutputChannel("right", 1),
+            Var("X"),
+        )
+        self.assertIsInstance(Mu("X", body), Mu)
+
+    # 测试输入：左分支通信、右分支 skip，公共 continuation 为 X。
+    # 预期行为：构造失败，未通信的右路径不能借用左分支的保护状态。
+    # 检查内容：确认合并出口仍保留 False，并在 continuation 的 X 处报错。
+    # 论文对应：Assumption 2.2 对每条路径全称量化。
+    def test_choice_common_continuation_rejects_one_unguarded_exit(self) -> None:
+        """只有一个分支通信不足以保护公共递归后继。"""
+
+        with self.assertRaisesRegex(ValueError, r"body\.continuation"):
+            Mu(
+                "X",
+                InternalChoice(
+                    InputChannel("left", "v"),
+                    Skip(),
+                    Var("X"),
+                ),
+            )
+
     # 测试输入：先执行 If；两个分支都是通信，随后公共后继为 X。
     # 预期行为：Mu 成功构造，因为到公共后继的每个出口状态都已通信。
     # 检查内容：验证分支出口状态会汇合并正确传递给 Sequence.second。

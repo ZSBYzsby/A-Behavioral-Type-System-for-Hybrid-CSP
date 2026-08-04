@@ -8,7 +8,7 @@
 import unittest
 
 from hcsp_typechecker import (
-    BasicType,
+    ContinuousType,
     EndType,
     ODE,
     ODEAnnotation,
@@ -16,13 +16,17 @@ from hcsp_typechecker import (
     Sequence,
     Skip,
 )
-from test2._support import assert_conversion, check_process
+from test2._support import (
+    assert_conversion,
+    check_process,
+    select_natural_timeout_dl,
+)
 
 
 class FinitePureDelayODEExample(unittest.TestCase):
     """检查无通信事件分支的有限连续演化。"""
 
-    # 测试输入：x:Real，x'=1，B 为 x<1，safety 为 x<=1，delay=1，后继 skip。
+    # 测试输入：x:ContinuousType，x'=1，B 为 x<1，safety 为 x<=1，delay=1。
     # 预期行为：空 angelic choice 与有限自然后继规范成 delay(1).0。
     # 预期类型：PureDelayType(1, EndType())。
     # 检查内容：PureDelayType 以及 T-ODE-safety、T-ODE-boundary 义务来源。
@@ -40,9 +44,10 @@ class FinitePureDelayODEExample(unittest.TestCase):
         )
         report = check_process(
             process,
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             state={"x": 0},
             path_condition="x == 0",
+            dl_checker=select_natural_timeout_dl,
         )
         assert_conversion(
             self,

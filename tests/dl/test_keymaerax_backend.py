@@ -32,15 +32,17 @@ from unittest.mock import patch
 
 from hcsp_typechecker import (
     BasicType,
+    ChannelType,
     Configuration,
+    ContinuousType,
     DLFormula,
     KeYmaeraXBackend,
     KeYmaeraXConfig,
     ODE,
     ODEAnnotation,
+    OutputChannel,
     ProofObligation,
     Sequence,
-    Skip,
     UntranslatedDLFormula,
     Verdict,
     check_hcsp,
@@ -385,7 +387,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
     # 测试输入：同一 keep_artifacts 后端连续验证两次相同义务。
     # 预期行为：两次 archive 位于不同的唯一子目录，旧文件不会被覆盖。
     # 检查内容：记录 -prove 输入路径并确认路径不同、文件均保留且父目录存在。
-    # 论文对应：Proof Pool 的每条 dL premise 都应保有可独立审计的证明输入。
+    # 论文对应：每条顺序判定的 dL premise 都应保有可独立审计的证明输入。
     def test_persistent_artifacts_are_isolated_per_obligation(self) -> None:
         """持久证明产物必须支持重复调用和并发调用而不共享固定文件名。"""
 
@@ -502,7 +504,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.UNKNOWN)
         self.assertIn("proof-search timeout", result.detail)
 
-    # 测试输入：带有限 delay/safety 的 ODE#Skip 和显式后端配置。
+    # 测试输入：带有限 delay/safety 的 ODE#done!0 和显式后端配置。
     # 预期行为：公开 API 返回 true，并调用后端两次。
     # 检查内容：核对送出的 dL 义务依次是 safety 与 boundary 且均通过。
     # 论文对应：Section 4.3 ODE 规则从进程推导到外部 dL 证明的完整链路。
@@ -516,7 +518,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
                 True,
                 annotation=ODEAnnotation(safety="x >= 0", delay=1),
             ),
-            Skip(),
+            OutputChannel("done", 0),
         )
         completed = subprocess.CompletedProcess(
             ["java"],
@@ -530,8 +532,8 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             return_value=completed,
         ) as run:
             report = check_hcsp(
-                gamma={"x": BasicType.REAL},
-                theta={},
+                gamma={"x": ContinuousType()},
+                theta={"done": ChannelType(BasicType.INT)},
                 path_condition="x >= 0",
                 configurations=[Configuration({"x": 0}, process)],
                 keymaerax_config=backend.config,

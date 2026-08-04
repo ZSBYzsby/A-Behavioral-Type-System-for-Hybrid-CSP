@@ -29,6 +29,7 @@ from hcsp_typechecker import (
     BasicType,
     ChannelType,
     Configuration,
+    ContinuousType,
     EventChoice,
     ODE,
     ODEAnnotation,
@@ -76,7 +77,7 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
             annotation=ODEAnnotation(safety=True, delay=1),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"alarm": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -86,7 +87,7 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertEqual(_assertion_verdict(report), Verdict.TRUE)
 
-    # 测试输入：同一 ODE 显式后接 Skip，使其采用带自然超时的规则；事件后继
+    # 测试输入：同一 ODE 显式后接 done!0，使其唯一采用带自然超时的规则；事件后继
     #           仍尝试断言 x<1，而 safety=true 不提供该事实。
     # 预期行为：断言为 false，证明实现没有从另一条规则错误继承 B。
     # 检查内容：边界 dL 由可信后端批准，只观察事件 continuation 的路径条件。
@@ -101,9 +102,17 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
             annotation=ODEAnnotation(safety=True, delay=1),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
-            theta={"alarm": ChannelType(BasicType.INT)},
-            configurations=[Configuration({"x": 0}, Sequence(evolution, Skip()))],
+            gamma={"x": ContinuousType()},
+            theta={
+                "alarm": ChannelType(BasicType.INT),
+                "done": ChannelType(BasicType.INT),
+            },
+            configurations=[
+                Configuration(
+                    {"x": 0},
+                    Sequence(evolution, OutputChannel("done", 0)),
+                )
+            ],
             path_condition="x == 0",
             dl_checker=_approve_dl,
         )
@@ -113,7 +122,7 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
 
     # 测试输入：边界 B 为 x<1 的 ODE 自然结束后断言 x>=1。
     # 预期行为：断言成立，因为自然后继在 ``not B and safety`` 下检查。
-    # 检查内容：若实现像旧版一样只传递 safety=true，本断言会被判为 false。
+    # 检查内容：若实现遗漏自然结束所需的 not-domain 条件，本断言会被判为 false。
     # 论文对应：超时规则的 ``Gamma.Theta.not B∧phi |- P::T``。
     def test_timeout_continuation_receives_not_domain_and_safety(self) -> None:
         """自然超时后继可以使用演化域已经失效这一事实。"""
@@ -127,7 +136,7 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
             Assert("x >= 1"),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",

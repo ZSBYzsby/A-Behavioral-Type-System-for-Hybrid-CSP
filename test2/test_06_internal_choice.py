@@ -22,7 +22,8 @@ from test2._support import assert_conversion, check_process
 class InternalChoiceExample(unittest.TestCase):
     """检查显式内部选择保持两条候选行为。"""
 
-    # 测试输入：left!0 与 right!0 组成二元 InternalChoice。
+    # 测试输入：left!0 与 right!0 组成缺省 continuation=Skip()
+    #           的三字段 InternalChoice。
     # 预期行为：生成两个输出行为的内部选择，而非外部通信选择。
     # 预期类型：InternalChoiceType((OutputType("left", EndType()), OutputType("right", EndType())))。
     # 检查内容：选择节点类别、分支通道名与各自 EndType continuation。

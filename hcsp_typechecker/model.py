@@ -3,8 +3,8 @@
 本模块只定义数据，不执行具体的类型推导。审计代码时可以把这里看成系统的
 “词汇表”：
 
-* :class:`BasicType`、:class:`ChannelType` 描述变量环境 ``Gamma`` 与通道环境
-  ``Theta`` 中允许出现的值类型；
+* :class:`BasicType`、:class:`ContinuousType`、:class:`ChannelType` 描述变量
+  环境 ``Gamma`` 与通道环境 ``Theta`` 中允许出现的类型；
 * :class:`TypingJudgment` 是检查器的输入；
 * :class:`InferenceStep`、:class:`ProofObligation`、:class:`Diagnostic` 和
   :class:`CheckReport` 是检查器输出的可审计证据。
@@ -22,16 +22,17 @@ HCSP 进程语法由 ``hcsp_process_ast.py`` 独立定义，行为类型语法�
 
 本文件中的定义按检查过程分为三层：
 
-* ``BasicType`` 表示 ``Gamma`` 中的状态变量类型和每个表达式的结果类型，
-  ``ChannelType`` 表示承载一个或多个独立 ``BasicType`` 槽位的 ``Theta`` 项；
+* ``BasicType`` 表示普通值变量类型和每个表达式的结果类型，
+  ``ContinuousType`` 显式标记 ``Gamma`` 中的连续实变量，``ChannelType`` 表示
+  承载一个或多个独立 ``BasicType`` 槽位的 ``Theta`` 项；
 * ``Configuration``、``TypingJudgment`` 表示一次检查请求；
 * ``InferenceStep``、``ProofObligation``、``Diagnostic``、``CheckReport``
   表示规则执行轨迹、逻辑证据和最终结果。
 
-除明确写出规范化逻辑的构造器外，这些类都是不可变数据容器。Table 2 规则先
-确定性地生成逻辑前提，再把具体公式作为未判定 ``ProofObligation`` 放入
-``checker.py`` 的统一证明队列；全部规则展开后，FOL/dL 后端才统一写回判定
-结果。不能因为公式已经确定或已经进入数据类，就认为对应性质已经被证明。
+除明确写出规范化逻辑的构造器外，这些类都是不可变数据容器。Table 2 规则
+确定性地产生具体 ``ProofObligation``，统一求解器在该 premise 的推导位置立即
+调用 FOL/dL 后端。不能因为公式已经确定或已经进入数据类，就认为对应性质
+已经被证明。
 
 ────────────────── 与论文 Section 4.2/4.3 的对应 ─────────────────────────
 
@@ -39,10 +40,12 @@ Section 4.1 的行为类型 ``T``、angelic type ``A`` 和 Section 4.2 的组合
 ``mathcal T`` 已全部移入 ``hcsp_type_ast.py``，该文件同时保存逐节点论文对照。
 
 Definition 4.1 的 ``Gamma`` 同时描述值变量、递归变量和连续变量。本项目将其
-拆分：公开 ``TypingJudgment.gamma`` 保存值变量类型；递归类型及边界不变量由
-``checker._Context.rec_env`` 和 ``Mu`` 批注保存；连续变量的演化信息由 ``ODE``
-批注与 dL 公式保存。``Theta`` 则由 ``ChannelType`` 表示项目扩展后的 refinement
-type ``{(eta1:B1,...,etan:Bn) | phi}``；一槽情形退化为论文的
+拆分：公开 ``TypingJudgment.gamma`` 用 ``BasicType`` 表示普通值变量，并用
+``ContinuousType`` 表示论文连续向量类型的逐标量投影；递归类型及边界不变量由
+``checker._Context.rec_env`` 和 ``Mu`` 批注保存。连续变量的向量场和 safety
+仍来自对应 ``ODE`` 节点，而变量类别本身不再由 ODE 左端临时猜测。``Theta``
+则由 ``ChannelType`` 表示项目扩展后的 refinement type
+``{(eta1:B1,...,etan:Bn) | phi}``；一槽情形退化为论文的
 ``{eta : B | phi}``。Table 2 的公式前提被记录为 ``ProofObligation``。
 
 ────────────────────────────────────────────────────────────────────────────
@@ -146,9 +149,10 @@ def normalize_type(value: Any, *, subject: str = "Value type") -> BasicType:
     """把便捷写法归一化为检查器内部唯一的基础值类型。
 
     调用方可以传入枚举、Python 类型对象或字符串别名。论文未要求积类型，
-    因此 tuple/list 不能表示一个普通值的类型；Gamma、表达式结果以及 Theta
-    通信签名中的每个独立槽位都统一使用 ``BasicType``。完整的多槽 Theta 项
-    由 ``ChannelType`` 逐槽调用本函数构造。
+    因此 tuple/list 不能表示一个普通值的类型。表达式结果、Theta 通信签名中
+    的每个独立槽位以及 Gamma 中的普通变量都使用 ``BasicType``；Gamma 中的
+    连续变量由 ``ContinuousType`` 额外包装。完整的多槽 Theta 项由
+    ``ChannelType`` 逐槽调用本函数构造。
     """
     if isinstance(value, BasicType):
         return value
@@ -179,6 +183,74 @@ def normalize_type(value: Any, *, subject: str = "Value type") -> BasicType:
         if key in aliases:
             return aliases[key]
     raise TypeError(f"{subject} must be a BasicType, got {value!r}")
+
+
+# --------------------------------------------------------------------------
+# 论文对应：Definition 4.1 的连续变量项
+#           ``underlined(v) : R_{>=0} partial-function R^|v|``。
+# 角色对应：在公开 Gamma 中显式区分连续实变量与同为 Real 的普通值变量。
+# 构造方式：ContinuousType() 或 ContinuousType(BasicType.REAL)。
+# 构造检查：当前 HCSP/dL 语义只允许实值连续轨迹，其他基础类型立即拒绝。
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ContinuousType:
+    """一个连续变量的轨迹类型及其当前值基础类型。
+
+    论文用一个向量项表示 ``v : R_{>=0} partial-function R^n``。项目的 Gamma
+    仍按标量变量名索引，因此把该向量类型逐分量表示为若干
+    ``name: ContinuousType()``。表达式读取变量时使用 ``value_type`` 所示的
+    当前值类型；T-ODE 则额外要求方程左端具有这个连续标记。
+    """
+
+    value_type: BasicType = BasicType.REAL
+
+    def __init__(self, value_type: Any = BasicType.REAL):
+        """建立连续实轨迹类型，并拒绝 Bool/离散数值轨迹。"""
+
+        normalized = normalize_type(
+            value_type,
+            subject="Continuous variable value type",
+        )
+        if normalized != BasicType.REAL:
+            raise TypeError(
+                "Continuous variables must have current value type Real, "
+                f"got {normalized}"
+            )
+        object.__setattr__(self, "value_type", normalized)
+
+    def __str__(self) -> str:
+        """按论文轨迹类型的标量形式显示连续变量声明。"""
+
+        return "R>=0 ~> Real"
+
+
+# Gamma 项只允许普通基础类型或显式连续实轨迹类型。进程变量类型保存在
+# checker 的递归环境中，不与 Python 字符串键上的值变量混用。
+GammaType = BasicType | ContinuousType
+
+
+def normalize_gamma_type(value: Any, *, subject: str = "Gamma entry") -> GammaType:
+    """规范化 Gamma 项，同时保留普通 Real 与连续 Real 的类别差异。"""
+
+    if isinstance(value, ContinuousType):
+        return value
+    try:
+        return normalize_type(value, subject=subject)
+    except TypeError as exc:
+        raise TypeError(
+            f"{subject} must be a BasicType or ContinuousType, got {value!r}"
+        ) from exc
+
+
+def gamma_value_type(value: Any, *, subject: str = "Gamma entry") -> BasicType:
+    """返回 Gamma 变量在普通表达式中读取当前值时使用的基础类型。"""
+
+    normalized = normalize_gamma_type(value, subject=subject)
+    return (
+        normalized.value_type
+        if isinstance(normalized, ContinuousType)
+        else normalized
+    )
 
 
 # 论文对应：服务于 Table 2 的 [T-Assign]、[T-In]、[T-Out] 表达式类型前提；
@@ -323,7 +395,7 @@ def normalize_channel_type(value: Any) -> ChannelType:
 
 # --------------------------------------------------------------------------
 # 论文对应：Section 4.2 组合配置判断中的单个 ``(sigma, P)``；Table 2
-#           [T-sigma] 由 ``Gamma·Theta·phi |- P :: T`` 和 ``sigma |= phi``
+#           [T-sigma] 由 ``Gamma·Theta·phi |- P :: T`` 和 ``|= phi[sigma]``
 #           得到 ``Gamma·Theta·phi |- (sigma, P) :: T``。
 # 判断对应：并行规则输入中的单个 <sigma, P> configuration。
 # 构造方式：Configuration(state, process, gamma=None, path_condition=None, name=None)。
@@ -334,24 +406,34 @@ def normalize_channel_type(value: Any) -> ChannelType:
 class Configuration:
     """并行判断中的单个 ``<state, process>`` 配置。
 
-    ``gamma`` 和 ``path_condition`` 可以覆盖全局环境，用于给不同并行分量设置
-    独立局部变量与局部路径条件。
+    ``gamma`` 和 ``path_condition`` 可以为不同并行叶子声明独立局部环境，
+    但不是不受约束的“覆盖”：TypeChecker 要求局部 Gamma 两两不交、与全局
+    Gamma 同型且并集恰为全局 Gamma。若使用局部路径，则所有并行叶子都必须
+    提供，外层默认 ``true`` 仅表示最终路径由这些局部路径的合取产生。
+
+    ``state`` 是 Gamma 所声明状态空间上的部分赋值：允许
+    ``dom(state)`` 是局部 ``dom(Gamma)`` 的真子集，未赋值变量留给
+    ``|= phi[state]`` 的有效性检查；但 state 不得引入 Gamma 未声明的变量。
+
+    严格的论文配置叶子只接受 ``Process``。项目为无状态协议保留
+    ``Configuration({}, Parallel(...))`` 便捷写法；只要 Gamma、state 或路径
+    非平凡，就必须改写为多个显式 Configuration，使每个叶子独立应用 T-sigma。
     """
 
     state: Mapping[str, Any]
     process: Any
-    gamma: Mapping[str, BasicType] | None = None
+    gamma: Mapping[str, GammaType] | None = None
     path_condition: Any | None = None
     name: str | None = None
 
-    # 功能：保存一个配置及其可选局部环境覆盖，并复制可变初始状态。
+    # 功能：保存一个配置及其可选局部环境声明，并复制可变初始状态。
     # 检查/模型关系：state=None 规范化为空状态；gamma/path/process 保持输入，
     #                后续 T-|| 展开及 configuration/system/process judgment 求解器验证。
     def __init__(
         self,
         state: Mapping[str, Any] | None,
         process: Any,
-        gamma: Mapping[str, BasicType] | None = None,
+        gamma: Mapping[str, GammaType] | None = None,
         path_condition: Any | None = None,
         name: str | None = None,
     ):
@@ -383,7 +465,7 @@ class TypingJudgment:
     提供时额外校验推导结果，未提供时仅返回推导出的行为类型。
     """
 
-    gamma: Mapping[str, BasicType]
+    gamma: Mapping[str, GammaType]
     theta: Mapping[str, ChannelType | Any]
     configurations: tuple[Configuration, ...]
     path_condition: Any = True
@@ -393,7 +475,7 @@ class TypingJudgment:
     # 检查/模型关系：不按 expected_types 反推类型；它只在推导完成后用于比较。
     def __init__(
         self,
-        gamma: Mapping[str, BasicType] | None,
+        gamma: Mapping[str, GammaType] | None,
         theta: Mapping[str, ChannelType | Any] | None,
         configurations: Sequence[Configuration | tuple[Mapping[str, Any], Any] | Any],
         path_condition: Any = True,
@@ -424,14 +506,14 @@ class TypingJudgment:
 #           ``phi => B``、[T-Assign] 的 ``phi => phi'{e/x}``、
 #           [T-Out] 的 ``phi => refinement{e/eta}``、
 #           ODE 规则按形状产生的 safety/domain/boundary dL 前提，以及
-#           [T-sigma] 的 ``sigma |= phi``。
+#           [T-sigma] 的 ``|= phi[sigma]``。
 #           ProofObligation 是实现证据对象，不属于论文的类型语法。
 # 结果对应：某条 Table 2 规则产生的一条独立 FOL、dL 或初态证明义务。
 # 构造方式：ProofObligation(rule, description, formula, kind="fol",
 #                            verdict=UNKNOWN, detail="", proof_formula=None)。
 # 构造检查：本类只冻结公式和元数据，不调用 Z3/KeYmaera X；checker.py 的
-#           FormulaPremise 由统一求解器加入 Pool，_discharge_proof_pool 再统一
-#           化简、判定并写回不可变副本。
+#           顺序 premise 求解器在规则当前位置立即化简、判定并写回不可变
+#           副本。ODE 候选规则中未被选中的义务会标记 active=False。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ProofObligation:
@@ -449,6 +531,8 @@ class ProofObligation:
     verdict: Verdict = Verdict.UNKNOWN
     detail: str = ""
     proof_formula: Any | None = None
+    active: bool = True
+    candidate: str = ""
 
     # 功能：保留规则原始公式和来源信息，写入证明器实际输入、结论及说明。
     # 检查/模型关系：formula 始终对应规则生成的 premise；proof_formula 对应
@@ -509,22 +593,21 @@ class Diagnostic:
 
 
 # --------------------------------------------------------------------------
-# 论文对应：记录检查器实际应用 Section 4.2/4.3、Table 2 规则和最终公共公式池
-#           阶段的先后次序；论文只给出推导树/Pool 思路，不定义运行时轨迹类。
+# 论文对应：记录检查器实际应用 Section 4.2/4.3、Table 2 规则和每条
+#           公式 premise 的顺序立即判定；论文只给出推导树，不定义运行时轨迹类。
 # 结果对应：一条规则应用时的进程片段、Gamma、Theta、路径条件、符号状态和
-#           候选类型，或 Proof-Pool 的统一判定汇总。它与 ProofObligation 分工：
+#           候选类型，或单条公式的当场判定。它与 ProofObligation 分工：
 #           本类说明“如何推导/何时证明”，后者保存具体公式及其证明结果。
 # 构造方式：通常由 TypeChecker._start_step 创建，再用 completed 写入结果。
 # 构造检查：所有环境和公式均保存为展示字符串，不能反向参与类型推导。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class InferenceStep:
-    """一次类型规则应用或 Proof-Pool 阶段的不可变执行快照。
+    """一次类型规则应用或单条公式立即判定的不可变执行快照。
 
     ``number`` 是进入规则时分配的先序编号，因此条件、选择或递归产生嵌套
-    推导时，报告仍按用户阅读源程序的顺序展示。类型规则的 ``result`` 只表示
-    候选类型或结构结果；最后的 Proof-Pool 步骤才汇总逻辑真假，单条证据仍须
-    查看 ``ProofObligation``。
+    推导时，报告仍按用户阅读源程序的顺序展示。公式步骤在相应规则与其后继之间
+    立即出现；单条公式和证明器证据仍查看 ``ProofObligation``。
     """
 
     number: int
@@ -562,10 +645,11 @@ class CheckReport:
     """类型检查的最终审计报告。
 
     报告同时保留总体结论、推导类型、全部证明义务和诊断，避免调用方只能看到
-    一个布尔值却无法追溯失败原因。``inferred_type is None`` 表示结构推导未能
-    形成 Table 2 类型；``component_types`` 中的 None 保留对应配置的失败位置。
-    若只是一个可构造类型的证明义务判为 false，候选类型仍会保留，调用方必须
-    同时检查 ``verdict``，不能把“存在候选类型”解释成检查成功。
+    一个布尔值却无法追溯失败原因。``inferred_type is None`` 表示结构或静态
+    类型前提未能形成 Table 2 类型，或推导在 false/unknown 公式 premise 处
+    停止；``component_types`` 中的 None 保留对应配置的失败或未访问位置。此时
+    ``obligations`` 与 ``steps`` 只保存停止点以前已经实际处理的推导前缀，不会
+    用未验证的后继拼出候选类型。
     """
 
     verdict: Verdict
@@ -586,9 +670,10 @@ class CheckReport:
     # 检查/模型关系：这是展示函数，不重新合并 verdict 或隐藏失败证据。
     def summary(self) -> str:
         """生成紧凑的单行统计，适合测试失败信息和命令行输出。"""
-        proved = sum(item.verdict == Verdict.TRUE for item in self.obligations)
-        disproved = sum(item.verdict == Verdict.FALSE for item in self.obligations)
-        unknown = sum(item.verdict == Verdict.UNKNOWN for item in self.obligations)
+        active = tuple(item for item in self.obligations if item.active)
+        proved = sum(item.verdict == Verdict.TRUE for item in active)
+        disproved = sum(item.verdict == Verdict.FALSE for item in active)
+        unknown = sum(item.verdict == Verdict.UNKNOWN for item in active)
         return (
             f"{self.verdict.value}: type={self.inferred_type}; "
             f"obligations(proved={proved}, false={disproved}, unknown={unknown}); "
@@ -602,7 +687,7 @@ class CheckReport:
         """返回证明义务在论文规则中的简写形状或表达式侧条件说明。"""
 
         exact_shapes = {
-            "T-sigma": "[T-sigma]  sigma |= phi",
+            "T-sigma": "[T-sigma]  |= phi[sigma]",
             "T-Assert": "[T-Assert]  phi => B",
             "T-Assign-post": "[T-Assign]  phi => phi'{e/x}",
             "T-Out": "[T-Out]  phi => refinement{e/eta}",
@@ -660,9 +745,9 @@ class CheckReport:
         """生成包含原始公式、证明器输入和遗留义务的多行用户报告。"""
 
         verdict_explanations = {
-            Verdict.TRUE: "全部结构检查和证明义务均已通过",
-            Verdict.FALSE: "至少发现一项确定的结构错误或未满足的证明义务",
-            Verdict.UNKNOWN: "候选类型可能已生成，但至少一项证明义务尚未判定",
+            Verdict.TRUE: "全部结构检查、静态类型前提和证明义务均已通过",
+            Verdict.FALSE: "至少发现结构/静态类型错误或未满足的证明义务",
+            Verdict.UNKNOWN: "推导在未决证明义务或不支持的规则边界处停止",
         }
         lines = [
             "=== 类型检查详细报告 ===",
@@ -678,21 +763,34 @@ class CheckReport:
             for index, component_type in enumerate(self.component_types, start=1):
                 lines.append(f"K{index}: {component_type if component_type is not None else '(failed)'}")
 
-        proved = sum(item.verdict == Verdict.TRUE for item in self.obligations)
-        disproved = sum(item.verdict == Verdict.FALSE for item in self.obligations)
-        unknown = sum(item.verdict == Verdict.UNKNOWN for item in self.obligations)
+        active_obligations = tuple(
+            item for item in self.obligations if item.active
+        )
+        inactive_obligations = tuple(
+            item for item in self.obligations if not item.active
+        )
+        proved = sum(
+            item.verdict == Verdict.TRUE for item in active_obligations
+        )
+        disproved = sum(
+            item.verdict == Verdict.FALSE for item in active_obligations
+        )
+        unknown = sum(
+            item.verdict == Verdict.UNKNOWN for item in active_obligations
+        )
         lines.extend(
             (
                 "",
-                "=== Proof Pool：公式与证明义务 ===",
-                f"义务总数 : {len(self.obligations)}",
+                "=== 顺序公式判定记录 ===",
+                f"有效义务 : {len(active_obligations)}",
+                f"未选候选 : {len(inactive_obligations)}",
                 f"已证明   : {proved}",
                 f"未通过   : {disproved}",
                 f"待证明   : {unknown}",
             )
         )
         if not self.obligations:
-            lines.append("(无证明义务)")
+            lines.append("(无公式判定记录)")
         status_labels = {
             Verdict.TRUE: "已证明",
             Verdict.FALSE: "未通过",
@@ -704,11 +802,19 @@ class CheckReport:
             Verdict.UNKNOWN: "未解决；仍需可信证明后端或人工证明",
         }
         for index, obligation in enumerate(self.obligations, start=1):
+            activity = "有效" if obligation.active else "未选候选"
+            candidate = (
+                f" | candidate={obligation.candidate}"
+                if obligation.candidate
+                else ""
+            )
             lines.extend(
                 (
                     "",
-                    f"[O{index:02d}] {status_labels[obligation.verdict]} | "
-                    f"{obligation.rule} | {obligation.kind.upper()}",
+                    f"[O{index:02d}] {activity} | "
+                    f"{status_labels[obligation.verdict]} | "
+                    f"{obligation.rule} | {obligation.kind.upper()}"
+                    f"{candidate}",
                     f"     论文前提 : {self._paper_premise(obligation)}",
                     f"     证明目标 : {obligation.description}",
                     f"     判定后端 : {self._proof_backend(obligation.kind)}",
@@ -731,12 +837,19 @@ class CheckReport:
             lines.append(f"     判定结果 : {obligation.verdict.value}")
             if obligation.detail:
                 lines.append(f"     证明器说明: {obligation.detail}")
-            lines.append(f"     处理状态 : {retention_labels[obligation.verdict]}")
+            lines.append(
+                "     处理状态 : "
+                + (
+                    retention_labels[obligation.verdict]
+                    if obligation.active
+                    else "所属 ODE 候选规则未被选中；仅保留供审计"
+                )
+            )
 
         unresolved = tuple(
             (index, obligation)
             for index, obligation in enumerate(self.obligations, start=1)
-            if obligation.verdict != Verdict.TRUE
+            if obligation.active and obligation.verdict != Verdict.TRUE
         )
         lines.extend(("", "=== 未解决或未通过的证明义务 ==="))
         if not unresolved:
@@ -750,6 +863,20 @@ class CheckReport:
             lines.append(
                 f"[O{index:02d}] {status_labels[obligation.verdict]} | "
                 f"{obligation.rule} | 后续操作：{next_action}"
+            )
+
+        inactive_unresolved = tuple(
+            (index, obligation)
+            for index, obligation in enumerate(self.obligations, start=1)
+            if not obligation.active and obligation.verdict != Verdict.TRUE
+        )
+        lines.extend(("", "=== 未选 ODE 候选的未决证据 ==="))
+        if not inactive_unresolved:
+            lines.append("(无)")
+        for index, obligation in inactive_unresolved:
+            lines.append(
+                f"[O{index:02d}] {obligation.candidate or '-'} | "
+                f"{status_labels[obligation.verdict]} | {obligation.rule}"
             )
 
         lines.extend(("", "=== 规则执行过程 ==="))
@@ -798,8 +925,10 @@ class CheckReport:
                 "",
                 "=== 汇总 ===",
                 f"规则步骤 : {len(self.steps)}",
-                f"证明义务 : {len(self.obligations)} "
+                f"证明记录 : {len(self.obligations)}",
+                f"有效义务 : {len(active_obligations)} "
                 f"(true={proved}, false={disproved}, unknown={unknown})",
+                f"未选候选 : {len(inactive_obligations)}",
                 f"遗留义务 : {len(unresolved)} "
                 f"(未通过={disproved}, 待证明={unknown})",
                 f"诊断数量 : {len(self.diagnostics)}",

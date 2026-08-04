@@ -19,6 +19,7 @@ from hcsp_typechecker import (
     CheckReport,
     Configuration,
     ConfigurationType,
+    ContinuousType,
     Verdict,
     check_hcsp,
     types_equivalent,
@@ -31,10 +32,21 @@ def approve_dl(_obligation: object) -> Verdict:
     return Verdict.TRUE
 
 
+def select_natural_timeout_dl(obligation: object) -> Verdict:
+    """否证 domain、证明其他 dL premise，使 ODE;skip 选择自然超时规则。"""
+
+    formula = getattr(obligation, "formula", None)
+    return (
+        Verdict.FALSE
+        if getattr(formula, "role", "") == "domain"
+        else Verdict.TRUE
+    )
+
+
 def check_process(
     process: Any,
     *,
-    gamma: Mapping[str, BasicType] | None = None,
+    gamma: Mapping[str, BasicType | ContinuousType] | None = None,
     theta: Mapping[str, ChannelType | Any] | None = None,
     state: Mapping[str, Any] | None = None,
     path_condition: Any = True,
@@ -80,4 +92,3 @@ def assert_conversion(
     diagnostics = "\n".join(item.message for item in report.diagnostics)
     for fragment in diagnostic_contains:
         test_case.assertIn(fragment, diagnostics, detail)
-

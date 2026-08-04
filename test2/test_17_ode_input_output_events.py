@@ -10,6 +10,7 @@ import unittest
 from hcsp_typechecker import (
     BasicType,
     ChannelType,
+    ContinuousType,
     EndType,
     EventChoice,
     ExternalChoiceType,
@@ -51,7 +52,7 @@ class ODEInputOutputEventsExample(unittest.TestCase):
         real = ChannelType(BasicType.REAL)
         report = check_process(
             Sequence.of(evolution, OutputChannel("done", "x")),
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"reset": real, "alarm": real, "done": real},
             state={"x": 0},
             path_condition="x == 0",

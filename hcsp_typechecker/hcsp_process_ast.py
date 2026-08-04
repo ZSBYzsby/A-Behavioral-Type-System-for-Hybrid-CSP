@@ -17,10 +17,13 @@ Assumption 2.2、并行系统及 Assumption 2.1。类型推导不在本文件执
 
 ────────────────── 基础语法与多标量通信扩展 ───────────────────────────────
 
-除通信参数表外，下面的 E/P/S 结构对应论文 Section 2.1。项目把论文的单值通信
-扩展为一次传递一个或多个独立标量；不易用 ASCII 准确表示的运算符写成未渲染
-的 LaTeX 命令。字符串表达式会立即通过 ``ensure_expr`` 转为项目自己的
-``Expr``。
+除通信参数表和内部选择的规范 AST 形状外，下面的 E/P/S 结构对应论文
+Section 2.1。项目把论文的单值通信扩展为一次传递一个或多个独立标量；
+同时把论文可通过顺序组合写出的 ``(P \sqcup P'); Q`` 规范化为唯一三元
+``InternalChoice(P, P_prime, Q)``。构造时可省略第三个实参，但 AST 对象的
+第三字段仍会保存 ``Skip()``。
+不易用 ASCII 准确表示的运算符写成未渲染的 LaTeX 命令。字符串表达式会立即通过
+``ensure_expr`` 转为项目自己的 ``Expr``。
 
 .. code-block:: text
 
@@ -42,7 +45,7 @@ Assumption 2.2、并行系统及 Assumption 2.1。类型推导不在本文件执
         | if B then P else P'
         | <dot(v)=e & B> \unrhd E
         | P; P'
-        | P \sqcup P'
+        | (P \sqcup P'); P''
         | X
         | mu X.P
 
@@ -55,7 +58,8 @@ Assumption 2.2、并行系统及 Assumption 2.1。类型推导不在本文件执
     <dot(v)=e & B> \unrhd E       ODE([("v", e)], B, E,
                                       annotation=ODEAnnotation(...))
     P; P'                         Sequence(P, P_prime)
-    P \sqcup P'                   InternalChoice(P, P_prime)
+    (P \sqcup P'); P''            InternalChoice(P, P_prime, P_double_prime)
+    P \sqcup P'                   InternalChoice(P, P_prime)  # Q = Skip()
     X                             Var("X")
     mu X.P                        Mu("X", P,
                                       annotation=RecursionAnnotation(...))
@@ -169,8 +173,8 @@ Section 4.2/4.3 不增加新的 ``P`` 节点，而是在既有 ODE/Mu 节点上�
     Sequence.of(P1, ..., Pn)
       = Sequence(P1, ... Sequence(Pn-1, Pn) ...)
 
-    InternalChoice.of(P1, ..., Pn)
-      = InternalChoice(P1, ... InternalChoice(Pn-1, Pn) ...)
+    InternalChoice.of(P1, ..., Pn, continuation=Q)
+      = InternalChoice(P1, ... InternalChoice(Pn-1, Pn) ..., Q)
 
     EventChoice.of()
       = EmptyEvent()
@@ -206,9 +210,10 @@ V，因此不同 ODE（包括并行 ODE）的时钟不会发生名称碰撞。
 分支 continuation 或 ODE 的顺序后继；那些位置若需要持久可观察的时钟，仍应
 使用另一个普通状态变量并在 Gamma 中显式声明。
 
-AST 节点类别仍与论文 Section 2.1 的 E/P/S 构造类别一致；项目差异只有通信
-参数表的多标量扩展、既有 ODE/Mu 节点上的批注字段，以及不会形成新节点的
-辅助构造器。
+AST 节点类别仍与论文 Section 2.1 的 E/P/S 构造类别一致；项目差异是通信
+参数表的多标量扩展、既有 ODE/Mu 节点上的批注字段，以及内部选择将论文中
+等价的 ``Sequence(InternalChoice(P, P'), Q)`` 规范保存为三元
+``InternalChoice(P, P', Q)``。这只改变 AST 的唯一表示，不改变 HCSP 运行语义。
 
 ────────────────────────────────────────────────────────────────────────────
 
@@ -713,6 +718,15 @@ class Sequence(Process):
             raise TypeError("Sequence first operand must be a Process")
         if not isinstance(second, Process):
             raise TypeError("Sequence second operand must be a Process")
+        trailing = first
+        while isinstance(trailing, Sequence):
+            trailing = trailing.second
+        if isinstance(trailing, InternalChoice):
+            raise ValueError(
+                "InternalChoice owns its common continuation; use "
+                "InternalChoice(left, right, continuation) instead of "
+                "placing an InternalChoice before a later Sequence continuation"
+            )
         object.__setattr__(self, "first", first)
         object.__setattr__(self, "second", second)
         _validate_assumption21(self)
@@ -744,59 +758,107 @@ class Sequence(Process):
             raise TypeError("Sequence.of items must all be Process nodes")
         result: Process = items[-1]
         for item in reversed(items[:-1]):
-            result = cls(item, result)
+            result = _append_sequence_continuation(item, result)
         return result
 
 # --------------------------------------------------------------------------
-# 论文对应：Section 2.1 的内部非确定选择 P ::= P \sqcup P'；
-#           Table 2 的 T-\sqcup。
-# 构造方式：InternalChoice(left, right)。
-# 构造检查：dataclass 完成赋值后立即要求左右分支都属于 Process，
-#           并检查合并分支的 Assumption 2.1。
+# 论文对应：Section 2.1 中等价的 ``(P \sqcup P'); Q``；Table 2
+#           经顺序后继补全的 T-\sqcup。
+# 构造方式：InternalChoice(left, right, continuation=Skip())。
+# 构造检查：左分支、右分支和公共后继都必须属于 Process，并对完整
+#           三元子树检查 Assumption 2.1。二元调用只是 continuation
+#           缺省为 Skip() 的构造器形式，AST 对象始终含第三个字段。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class InternalChoice(Process):
-    r"""二元内部选择 ``P \sqcup P'``。"""
+    r"""三元内部选择 ``(P \sqcup P'); Q``。"""
 
     left: Process
     right: Process
+    continuation: Process = field(default_factory=Skip)
 
-    # 功能：验证二元内部选择两侧的语法范畴。
-    # 检查/论文关系：拒绝 E 和 Parallel；
-    #                分支的可类型性由 T-\sqcup 分别检查。
+    # 功能：验证两个选择分支和它们共享的顺序后继。
+    # 检查/论文关系：拒绝 E 和 Parallel；T-\sqcup 将 continuation 同时
+    #                交给左右子 judgment，不需要通用 T-Seq。
     def __post_init__(self) -> None:
-        """两个选择分支都必须是顺序进程。"""
+        """两个分支与公共后继都必须是顺序进程。"""
         if not isinstance(self.left, Process) or not isinstance(self.right, Process):
             raise TypeError("InternalChoice branches must be Process nodes")
+        if not isinstance(self.continuation, Process):
+            raise TypeError("InternalChoice continuation must be a Process node")
         _validate_assumption21(self)
 
-    # 功能：合并两个非确定分支使用的用户值变量。
-    # 检查/论文关系：不选择具体分支；类型检查器会保留两个分支的行为类型。
+    # 功能：合并两个非确定分支及公共后继的用户值变量。
+    # 检查/论文关系：不选择具体分支；类型检查器会保留两个带同一
+    #                continuation 的完整行为类型。
     def get_vars(self) -> set[str]:
         """合并两个选择分支的变量。"""
         return set(_assumption21_info(self).value_variables)
 
-    # 功能：合并两个内部选择分支中的输入绑定变量。
-    # 检查/论文关系：仅用于环境收集，不改变选择的非确定语义。
+    # 功能：合并两个分支和公共后继中的输入绑定变量。
+    # 检查/论文关系：分支输入可捕获 continuation 中的同名变量；此方法只用于
+    #                环境收集，不选择实际运行分支。
     def get_input_bound_vars(self) -> set[str]:
         """合并两个选择分支引入的输入变量。"""
         return set(_assumption21_info(self).bound_value_variables)
 
-    # 功能：把一个或多个分支右结合为二元 InternalChoice 树。
-    # 检查/论文关系：单分支原样返回，零分支拒绝；方法不创建一元或多元节点，
-    #                每一层仍由 cls 构造器执行 P 范畴和 Assumption 2.1 检查。
+    # 功能：把一个或多个分支右结合，并把公共 continuation 存入最外层。
+    # 检查/论文关系：零分支拒绝；单分支退化为普通顺序组合；多分支的
+    #                每一层仍由三字段 cls 构造器执行范畴和 Assumption 2.1 检查。
     @classmethod
-    def of(cls, *branches: Process) -> Process:
-        """把多个分支右结合展开成二元 ``InternalChoice`` AST。"""
+    def of(
+        cls,
+        *branches: Process,
+        continuation: Process | None = None,
+    ) -> Process:
+        """把多个分支右结合，并把公共后继存入最外层三元节点。"""
 
         if not branches:
             raise ValueError("InternalChoice.of needs at least one branch")
         if not all(isinstance(branch, Process) for branch in branches):
             raise TypeError("InternalChoice.of branches must be Process nodes")
+        common_tail = Skip() if continuation is None else continuation
+        if not isinstance(common_tail, Process):
+            raise TypeError("InternalChoice.of continuation must be a Process node")
+        if len(branches) == 1:
+            return (
+                branches[0]
+                if isinstance(common_tail, Skip)
+                else Sequence.of(branches[0], common_tail)
+            )
         result: Process = branches[-1]
         for branch in reversed(branches[:-1]):
             result = cls(branch, result)
-        return result
+        if not isinstance(result, InternalChoice):
+            raise AssertionError("multiple branches must produce InternalChoice")
+        return cls(result.left, result.right, common_tail)
+
+
+# 功能：把一个顺序后继追加到已有进程，同时保持内部选择三元规范形。
+# 检查/论文关系：普通顺序树按结合律向右追加；若执行前缀最后是
+#                InternalChoice，后继必须进入其 continuation 字段，不产生旧嵌套形状。
+def _append_sequence_continuation(
+    prefix: Process,
+    continuation: Process,
+) -> Process:
+    """为 ``Sequence.of`` 生成不含外置选择后继的唯一规范 AST。"""
+
+    if isinstance(prefix, InternalChoice):
+        combined = (
+            continuation
+            if isinstance(prefix.continuation, Skip)
+            else _append_sequence_continuation(
+                prefix.continuation,
+                continuation,
+            )
+        )
+        return InternalChoice(prefix.left, prefix.right, combined)
+    if isinstance(prefix, Sequence):
+        return Sequence(
+            prefix.first,
+            _append_sequence_continuation(prefix.second, continuation),
+        )
+    return Sequence(prefix, continuation)
 
 
 # ────────────────── ODE 批注、局部时钟与 wait ──────────────────────────────
@@ -1305,7 +1367,8 @@ def _assumption22_exit_states(
         return frozenset(result)
 
     if isinstance(node, InternalChoice):
-        # 内部选择的一个分支不能借用另一个分支发生过的通信。
+        # 内部选择的一个分支不能借用另一个分支的通信；左右分支
+        # 的每种出口状态都必须分别传入同一个 continuation。
         left_states = _assumption22_exit_states(
             node.left,
             variable,
@@ -1318,7 +1381,17 @@ def _assumption22_exit_states(
             guarded,
             f"{location}.right",
         )
-        return left_states | right_states
+        result: set[bool] = set()
+        for state in sorted(left_states | right_states):
+            result.update(
+                _assumption22_exit_states(
+                    node.continuation,
+                    variable,
+                    state,
+                    f"{location}.continuation",
+                )
+            )
+        return frozenset(result)
 
     if isinstance(node, ODE):
         # 每个事件 continuation 先由自己的事件通信保护；ODE 自然结束则不
@@ -1625,10 +1698,15 @@ def _assumption21_info(
             _assumption21_info(node.second),
         )
     if isinstance(node, InternalChoice):
-        # 两个分支并列，没有一个分支能绑定另一个分支。
-        return _merge_assumption21_info(
+        # 左右分支先并列合并，之后作为一个复合顺序前缀绑定公共
+        # continuation；这与原 ``Sequence(InternalChoice(...), Q)`` 形状一致。
+        branches = _merge_assumption21_info(
             _assumption21_info(node.left),
             _assumption21_info(node.right),
+        )
+        return _sequence_assumption21_info(
+            branches,
+            _assumption21_info(node.continuation),
         )
     if isinstance(node, ODE):
         # 方程右端、演化域和 safety 中的 t 由本 ODE 的 local_clock 绑定；

@@ -11,9 +11,9 @@
 这里判断的是公式有效性/可证明性，不是寻找一个满足赋值。后者不足以验证论文
 Table 2 中形如 ``pre -> [ODE]post`` 的全称安全性质。
 
-KeYmaera X 后端只在类型规则全部展开、具体 dL 义务进入证明队列后调用。它既不
-选择离散赋值的 ``phi'``，也不把多个 Pool 项联立成谓词综合问题；每次调用都只
-独立判定一条已经确定的 ``ProofObligation``。
+KeYmaera X 后端在类型规则走到具体 dL premise 时立即调用。它既不选择离散
+赋值的 ``phi'``，也不把多条公式联立成谓词综合问题；每次调用都只独立判定
+一条已经确定的 ``ProofObligation``。
 """
 
 from __future__ import annotations

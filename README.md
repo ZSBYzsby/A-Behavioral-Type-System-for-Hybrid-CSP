@@ -10,8 +10,8 @@ HCSP 语法，并把 Section 4.2/4.3 要求的安全、时延和递归不变量�
 - 每个 `rule_t_*` 只返回显式 `RuleExpansion(premises, conclude)`，不在规则内递归；
 - `T-Assign` 在规则展开时确定性地生成惰性最强后置状态，不把未知 `phi'` 留给证明器综合；
 - 统一求解器递归处理 child judgment premises，并自底向上组合行为类型；
-- 已经具体化的 formula premises（state、FOL、dL）只进入统一 Pool，不在规则展开时调用证明器；
-- 全部可达类型规则展开后，统一化简 Pool 并分别交给 Z3/KeYmaera X；
+- 已经具体化的 formula premises（state、FOL、dL）按规则书写顺序立即化简并交给 Z3/KeYmaera X；
+- 有限 ``ODE;skip`` 顺序试用两条 Table 2 规则，并根据各自 premise 的即时结果选择唯一可行结论；
 - 返回 `true`、`false` 或 `unknown`，并保留推导类型、证明义务和诊断信息。
 
 ## 获取源码并准备环境
@@ -107,9 +107,19 @@ P ::= skip | x := e | assert(B)
 S ::= P | S || S'
 ```
 
-其中 `If`、`Sequence`、`InternalChoice` 和 `Parallel` 都是二元节点，`E` 只能
+其中 `If`、`Sequence` 和 `Parallel` 是二元节点，`InternalChoice` 是带公共
+后继的三元节点，`E` 只能
 出现在 ODE 的中断字段中。`Sequence.of(...)`、`InternalChoice.of(...)`、
-`EventChoice.of(...)`、`Parallel.of(...)` 是生成上述递归二元树的类方法。
+`EventChoice.of(...)`、`Parallel.of(...)` 是生成上述规范递归 AST 的类方法。
+
+`(P |~| P'); Q` 的唯一规范表示是 `InternalChoice(P, P', Q)`。
+`InternalChoice(P, P')` 是允许缺省第三项的便捷写法，构造后的
+`continuation` 字段仍实际保存 `Skip()`。直接写
+`Sequence(InternalChoice(...), Q)` 会被拒绝；`Sequence.of(...)` 若遇到这种
+便捷输入，会立即把 Q 吸收进三元选择节点。
+
+Table 2 的 T-sqcup 在这个 AST 上分别推导 `P; Q` 和 `P'; Q`，再把结果
+组成内部选择类型。因此无需引入通用的类型级 `T-Seq`。
 
 通道名 `ch` 与项目变量名使用相同的 `str.isidentifier()` 词法规则。比如
 `channel`、`channel_1`、`_private` 和 `通道_1` 合法；空白名称、`1channel`、
@@ -147,7 +157,8 @@ assert ode.local_clock.derivative == Literal(1)
 ```
 
 在一个 ODE 的方程右端、演化域和 `safety` 中，保留名 `t` 直接表示该 ODE
-隐式时钟的当前值；上例的 Gamma 只需声明 `x: Real`，不需要声明或初始化 `t`。
+隐式时钟的当前值；上例的 Gamma 只需声明 `x: ContinuousType()`，不需要声明
+或初始化 `t`。
 这个默认例子的 domain/safety 都是 `true`，所以纯通信中断、无自然后继的
 ODE 可直接生成 type `delay(5).(\bot)`。若 ODE 后还有顺序后继，则会按论文
 生成精确 boundary 义务，未配置 KeYmaera X 时总体判定保守显示 `unknown`。
@@ -280,17 +291,17 @@ python -m unittest discover -s test2 -p "test_*.py" -v
 python scripts/check_repository.py
 ```
 
-`tests/` 当前共有 204 个自动化测试，并按职责放在九个子目录中；`test2/`
+`tests/` 当前共有 237 个自动化测试，并按职责放在九个子目录中；`test2/`
 另外提供 35 个便于逐文件审计和手工修改的 Process -> Type 单样例：
 
 ```text
 tests/
 ├── expressions/    23 个表达式 AST、输入边界和精确解析测试
-├── hcsp_syntax/    58 个 Section 2.1 AST 与 Assumption 2.1/2.2 测试
+├── hcsp_syntax/    59 个 Section 2.1 AST 与 Assumption 2.1/2.2 测试
 ├── annotations/    19 个 Section 4.2/4.3 批注与自动局部时钟测试
 ├── type_ast/       10 个行为类型 AST 规范化测试
-├── typechecking/   52 个转换、Table 2 契约、赋值后状态、子 judgment、Pool 和通信测试
-├── model/          9 个值类型、通道边界、环境自检和详细报告测试
+├── typechecking/   83 个转换、Table 2 契约、短路推导、ODE 选规和通信测试
+├── model/         10 个值类型、连续类型、通道边界、环境自检和详细报告测试
 ├── logic/          6 个表达式语义、偏函数有定义性和状态值测试
 ├── dl/             26 个 dL 公式、KeYmaera X 后端和公开 API 集成测试
 └── quality/        1 个全项目文档及测试审计注释完整性检查
@@ -336,22 +347,49 @@ print(report.format_detailed())  # 原始公式、证明器输入、证据和遗
 
 `check_hcsp(...)` 的环境输入为：
 
-1. `gamma`：值变量类型环境；
+1. `gamma`：普通变量和连续变量的类型环境；
 2. `theta`：通道 refinement 类型环境；
 3. `path_condition`：默认 `True`；
 4. `configurations`：进程或 `(state, process)` 列表；
 5. `expected_types`：可选的 HCSP 行为类型列表。
 
+并行的有状态系统应按 Table 2 写成多个 `Configuration(state, process, gamma=...,
+path_condition=...)`：局部 Gamma 必须两两不交、类型与全局 Gamma 一致，并且
+它们的并集恰好等于全局 Gamma；若使用局部路径，所有并行叶子都必须提供，
+外层 `path_condition` 保持默认 `True`，表示结论路径由局部路径合取产生。
+`Configuration({}, Parallel(...))` 仅作为空 Gamma、空 state、`True` 路径的
+无状态协议便捷写法保留；有状态 `Parallel` 必须拆成多个配置叶子。
+
 ODE 与递归批注不再通过第二个映射覆盖，而是直接位于
 `Configuration.process` 的 AST 中。这保证审计时一个进程只有一份批注来源。
+
+Gamma 显式区分两类标量变量：普通变量写成 ``BasicType``，连续变量写成
+``ContinuousType()``。例如：
+
+```python
+gamma = {
+    "mode": BasicType.INT,      # 普通离散状态
+    "gain": BasicType.REAL,     # 普通实数参数，不能作为 ODE 方程左端
+    "x": ContinuousType(),      # 连续状态，可以出现在 x'=e 的左端
+}
+```
+
+``ContinuousType`` 是论文连续向量类型在项目字符串键 Gamma 上的逐标量投影，
+不是普通值的另一种数值精度，也不是 tuple。读取 ``x``、给 ``x`` 赋值或通过
+输入更新 ``x`` 时，其当前值仍按 ``Real`` 检查，并且连续类别标记会被保留；
+只有 ODE 方程左端额外要求该标记。普通 ``BasicType.REAL`` 参数仍可出现在
+导数右端、演化域和 safety 中。ODE 的隐藏局部时钟 ``t`` 由节点自行管理，
+不进入 Gamma。
 
 返回 `CheckReport`：
 
 - `verdict`：`true / false / unknown`；
-- `inferred_type`：组合后的行为类型；结构推导失败时为 `None`；
+- `inferred_type`：组合后的行为类型；结构/静态前提失败或逻辑 premise 为
+  `false/unknown`、导致推导停止时为 `None`；
 - `component_types`：每个 configuration 的行为类型，失败位置保留为 `None`；
-- `obligations`：统一 Pool 在第二阶段完成判定后的公式及结果；其中 `formula`
-  保留规则生成的原始 premise，`proof_formula` 保存实际送入证明器的化简公式；
+- `obligations`：按推导顺序已经完成判定的公式及结果；其中 `formula` 保留规则
+  生成的原始 premise，`proof_formula` 保存实际送入证明器的化简公式；ODE
+  候选义务还以 `active/candidate` 区分最终采用与仅供审计的证据；
 - `diagnostics`：结构错误、类型不匹配和不支持项。
 - `format_detailed()`：按义务编号打印论文 premise、两层公式、判定后端、证明器
   说明，并在独立区域集中列出所有 `false/unknown` 遗留义务。
@@ -359,8 +397,12 @@ ODE 与递归批注不再通过第二个映射覆盖，而是直接位于
 论文中的 `BottomType`（`\bot`）始终是正式行为类型，例如有限时延没有正常
 后继时的类型结果。它不承担错误恢复职责；未声明通道、非法守卫等导致无法按
 Table 2 形成类型时，报告使用 `None`，具体原因保存在 `diagnostics` 中。若类型
-结构可以形成、但某项证明义务为 false，候选类型仍会保留，此时必须结合
-`verdict` 判断检查是否成功。
+静态类型前提（例如赋值两侧基础类型、Bool 守卫、通信槽位类型、ODE 导数
+类型）失败时，Table 2 规则不能成立，因而不生成正式类型。普通规则的逻辑
+premise 只有判为 `true` 才继续；一旦为 `false` 或 `unknown`，当前推导立即
+停止，未访问的后继不再生成步骤、证明义务或候选类型。报告仍完整保留停止点
+以前的部分轨迹。``ODE;skip`` 是选规场景：每条候选规则在自己的非真 premise
+处停止，选择器只会采用所有 premise 均已证明且结论唯一的候选。
 
 ## 项目自有 AST
 
@@ -374,7 +416,7 @@ Table 2 形成类型时，报告使用 `None`，具体原因保存在 `diagnosti
 - `hcsp_typechecker.checker`：四类 conclusion judgment、两类 premise、
   `RuleExpansion` 和统一递归求解器；各 `rule_t_*` 只展开一层推导规则，
   process/system 结果类型仍严格分离；`T-Assign` 通过赋值前路径与更新后的
-  符号映射表示惰性最强后置状态，Pool 只判定已经具体化的逻辑公式；
+  符号映射表示惰性最强后置状态；顺序求解器只判定已经具体化的逻辑公式；
 - `hcsp_typechecker.model`：Gamma/Theta 的值与通道类型、typing judgment、
   proof obligation、diagnostic 和最终报告。
 
@@ -398,7 +440,7 @@ hp = Sequence.of(
     Assert(CompareExpr((Variable("x"), Literal(0)), (">=",))),
 )
 
-# 普通表达式结果和 Gamma 项都是单个标量基础类型。
+# 普通表达式结果都是标量基础类型；Gamma 另用 ContinuousType 标记连续量。
 scalar_value = ensure_expr("x + 1")
 multi_channel = ChannelType(
     (BasicType.INT, BasicType.BOOL),
@@ -413,8 +455,9 @@ multi_output = OutputChannel("data", ("x", "ready"))
 
 表达式层只支持标量字面量、变量、算术、比较、布尔连接和简单函数调用。
 论文未要求普通积类型，因此项目不定义 tuple 表达式或 ``TupleType``；字符串形式
-和 Python tuple/list 对象都会在普通表达式构造边界被拒绝。表达式结果以及 Gamma
-中的每个状态变量仍对应单个 ``BasicType``。``ChannelType`` 保存一个非空的
+和 Python tuple/list 对象都会在普通表达式构造边界被拒绝。表达式结果对应
+单个 ``BasicType``；Gamma 项为 ``BasicType`` 或 ``ContinuousType``，但每个
+变量的当前值仍是一个标量。``ChannelType`` 保存一个非空的
 ``BasicType`` 槽位序列；``InputChannel`` 和 ``OutputChannel`` 保存同元数的目标变量
 或载荷表达式序列。这里的 Python tuple 只是通信参数列表，不是可赋给变量或由表达式
 求值得到的 tuple 值。每个载荷表达式都独立产生一个标量值，refinement 可以同时引用
@@ -424,7 +467,7 @@ multi_output = OutputChannel("data", ("x", "ready"))
 
 表达式翻译结果同时保存 Z3 项、`BasicType` 和求值有定义条件。`/` 始终按实数
 除法处理，整数操作数会先显式提升；除数非零、`sqrt` 参数非负等条件由相应
-Table 2 规则加入公共 Proof Pool。`%` 只接受 Nat/Int。因而除零、负数平方根
+Table 2 规则在相应 premise 位置立即判定。`%` 只接受 Nat/Int。因而除零、负数平方根
 或 Real 取模会得到可审计的 `false` 义务/诊断，不会沿用 Z3 的全函数扩展，
 也不会把原始 `Z3Exception` 泄漏给用户。
 
@@ -447,7 +490,7 @@ program = Sequence.of(
 )
 
 report = check_hcsp(
-    gamma={"x": BasicType.REAL},
+    gamma={"x": ContinuousType()},
     theta={"done": ChannelType((BasicType.INT,))},
     path_condition="x == 0",
     configurations=[Configuration({"x": 0}, program)],

@@ -4,10 +4,11 @@ r"""HCSP Section 2.1 抽象语法树逐产生式测试。
 
 测试内容
 --------
-1. 节点种类必须恰好等于论文的 ``E / P / S`` 产生式；
+1. 节点种类必须恰好等于论文的 ``E / P / S`` 产生式，其中内部
+   选择使用与论文二元选择+顺序组合等价的三元规范形；
 2. 每个节点的子项必须属于正确语法范畴；
 3. E、P、S 的继承关系和跨层拒绝边界；
-4. 便捷类方法只能展开成论文节点，不能引入新的 AST 种类；
+4. 便捷类方法只能展开成项目规范节点，不能引入新的 AST 种类；
 5. ODE/Mu 批注作为字段存在，但不改变 Section 2.1 节点库存。
 6. 通道名称必须满足与变量相同的标识符词法规则，非法名称在 AST 边界拒绝。
 7. ``ODE.wait(d)`` 只展开为 ODE/Sequence/Skip，并使用自动局部时钟。
@@ -16,6 +17,7 @@ r"""HCSP Section 2.1 抽象语法树逐产生式测试。
 论文对应
 --------
 逐项对应 Section 2.1 的事件反应 ``E``、顺序进程 ``P`` 和系统 ``S`` 文法；
+``InternalChoice(P, P', Q)`` 是 ``(P \sqcup P');Q`` 的唯一规范 AST；
 ``ODEAnnotation`` 与 ``RecursionAnnotation`` 对应 Section 4.2/4.3 的批注扩展。
 """
 
@@ -142,6 +144,7 @@ def assert_process(test: unittest.TestCase, process: Process) -> None:
     if isinstance(process, InternalChoice):
         assert_process(test, process.left)
         assert_process(test, process.right)
+        assert_process(test, process.continuation)
         return
     if isinstance(process, Mu):
         test.assertIsInstance(process.variable, str)
@@ -421,8 +424,8 @@ class Section21ProcessGrammarTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Invalid channel name"):
                     OutputChannel(name, 0)
 
-    # 测试输入：合法二元 If，以及缺失 else、E 分支、Parallel 分支。
-    # 预期行为：合法节点保留两个 P；三种非法调用均被拒绝。
+    # 测试输入：合法二元 If，以及缺失/多余参数、E 分支、Parallel 分支。
+    # 预期行为：合法节点保留两个 P；四种非法调用均被拒绝。
     # 检查内容：同时覆盖参数个数和两个分支的语法范畴。
     # 论文对应：``if B then P else P'`` 是严格二元进程产生式。
     def test_if_is_binary_and_requires_two_process_branches(self) -> None:
@@ -433,6 +436,8 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         self.assertIsInstance(node.else_branch, Process)
         with self.assertRaises(TypeError):
             If(True, Skip())  # type: ignore[call-arg]
+        with self.assertRaises(TypeError):
+            If(True, Skip(), Skip(), Skip())  # type: ignore[call-arg]
         with self.assertRaises(TypeError):
             If(True, Skip(), EmptyEvent())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
@@ -468,9 +473,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, r"equations must be an iterable"):
             ODE(None, True, annotation=ODEAnnotation(delay=1))  # type: ignore[arg-type]
 
-    # 测试输入：合法 Assign; Skip，以及 E/Parallel 混入左右项。
-    # 预期行为：合法 Sequence 通过；三个跨层组合抛 TypeError。
-    # 检查内容：分别检查左右项都必须属于 Process。
+    # 测试输入：合法 Assign; Skip、缺失/多余参数，以及 E/Parallel 混入左右项。
+    # 预期行为：合法 Sequence 通过；错误元数和跨层组合均抛 TypeError。
+    # 检查内容：检查固定二元形状及左右项都必须属于 Process。
     # 论文对应：Section 2.1 的二元顺序产生式 ``P; P'``。
     def test_sequence_is_binary_p_composition(self) -> None:
         """Sequence 的左右项都必须是 P，不能接受 E 或并行系统。"""
@@ -478,25 +483,44 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         node = Sequence(Assign("x", 1), Skip())
         assert_process(self, node)
         with self.assertRaises(TypeError):
+            Sequence(Skip())  # type: ignore[call-arg]
+        with self.assertRaises(TypeError):
+            Sequence(Skip(), Skip(), Skip())  # type: ignore[call-arg]
+        with self.assertRaises(TypeError):
             Sequence(EmptyEvent(), Skip())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             Sequence(Parallel(Skip(), Skip()), Skip())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             Sequence(Skip(), EmptyEvent())  # type: ignore[arg-type]
 
-    # 测试输入：合法 Skip \sqcup Assign，以及 E/Parallel 非法分支。
-    # 预期行为：合法内部选择通过，两个跨范畴输入被拒绝。
-    # 检查内容：确认 InternalChoice 两侧都只能保存 P。
-    # 论文对应：Section 2.1 的二元内部非确定选择 ``P \sqcup P'``。
-    def test_internal_choice_is_binary_p_composition(self) -> None:
-        """InternalChoice 的两个操作数都必须是 P。"""
+    # 测试输入：显式 ``(Skip \sqcup Assign); Assert``、缺省后继以及
+    #           错误元数及 E/Parallel 混入三个 Process 字段的非法情况。
+    # 预期行为：显式三元节点保存公共后继；二元调用自动补 Skip。
+    # 检查内容：确认三个字段都只能保存 P。
+    # 论文对应：``(P \sqcup P');Q`` 与二元选择+顺序组合等价。
+    def test_internal_choice_is_ternary_p_composition(self) -> None:
+        """InternalChoice 始终保存两个分支和一个公共后继。"""
 
-        node = InternalChoice(Skip(), Assign("x", 1))
+        node = InternalChoice(Skip(), Assign("x", 1), Assert(True))
         assert_process(self, node)
+        self.assertIsInstance(node.continuation, Assert)
+        defaulted = InternalChoice(Skip(), Skip())
+        self.assertIsInstance(defaulted.continuation, Skip)
+        with self.assertRaisesRegex(ValueError, "owns its common continuation"):
+            Sequence(defaulted, Assert(True))
+        normalized = Sequence.of(defaulted, Assert(True))
+        self.assertIsInstance(normalized, InternalChoice)
+        self.assertIsInstance(normalized.continuation, Assert)
+        with self.assertRaises(TypeError):
+            InternalChoice(Skip())  # type: ignore[call-arg]
+        with self.assertRaises(TypeError):
+            InternalChoice(Skip(), Skip(), Skip(), Skip())  # type: ignore[call-arg]
         with self.assertRaises(TypeError):
             InternalChoice(EmptyEvent(), Skip())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             InternalChoice(Skip(), Parallel(Skip(), Skip()))  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            InternalChoice(Skip(), Skip(), EmptyEvent())  # type: ignore[arg-type]
 
     # 测试输入：带不变量的合法 Mu，以及非法变量名、E/S body、错误批注。
     # 预期行为：合法递归通过；四类构造错误在 AST 边界被拒绝。
@@ -520,12 +544,12 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             Mu("X", Skip(), annotation=True)  # type: ignore[arg-type]
 
-    # 测试输入：Sequence.of 三项和 InternalChoice.of 三分支便捷调用。
-    # 预期行为：两者都展开成右结合的二元 Process 树。
-    # 检查内容：检查递归字段、零/单项边界，并确认旧自由函数已从 API 删除。
-    # 论文对应：类方法不得扩展 Section 2.1 的二元 ; 和 \sqcup 文法。
-    def test_nary_class_methods_expand_to_binary_process_trees(self) -> None:
-        """多项顺序和内部选择类方法只生成右结合二元树。"""
+    # 测试输入：Sequence.of 三项和带 continuation 的 InternalChoice.of。
+    # 预期行为：顺序仍右结合；多分支选择的最外层保存公共后继。
+    # 检查内容：检查递归字段以及零项、单项和多项边界。
+    # 论文对应：多分支辅助构造仍只使用同一 InternalChoice 节点类。
+    def test_nary_class_methods_expand_to_canonical_process_trees(self) -> None:
+        """多项顺序右结合，多分支选择使用三元规范节点。"""
 
         self.assertIsInstance(Sequence.of(), Skip)
         only = Assign("only", 0)
@@ -534,42 +558,19 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             InternalChoice.of()
         sequential = Sequence.of(Assign("x", 0), Assert(True), Skip())
-        choice = InternalChoice.of(Assign("x", 0), Assign("x", 1), Skip())
+        choice = InternalChoice.of(
+            Assign("x", 0),
+            Assign("x", 1),
+            Skip(),
+            continuation=Assert(True),
+        )
         self.assertIsInstance(sequential, Sequence)
         self.assertIsInstance(sequential.second, Sequence)
         self.assertIsInstance(choice, InternalChoice)
         self.assertIsInstance(choice.right, InternalChoice)
+        self.assertIsInstance(choice.continuation, Assert)
         assert_process(self, sequential)
         assert_process(self, choice)
-        for legacy_name in (
-            "sequence",
-            "internal_choice",
-            "event_choice",
-            "parallel",
-            "wait",
-        ):
-            self.assertFalse(hasattr(process_ast, legacy_name))
-            self.assertFalse(hasattr(public_api, legacy_name))
-
-    # 测试输入：If、Sequence、InternalChoice 的一元和超额参数调用。
-    # 预期行为：所有错误元数调用均由 Python/构造器抛出 TypeError。
-    # 检查内容：逐类防止二元论文节点退化为隐式多元节点。
-    # 论文对应：Section 2.1 明确给出这些构造的固定二元形状。
-    def test_binary_process_nodes_reject_missing_or_extra_operands(self) -> None:
-        """If、Sequence 和 InternalChoice 不能退化成一元或多元 AST 节点。"""
-
-        with self.assertRaises(TypeError):
-            If(True, Skip())  # type: ignore[call-arg]
-        with self.assertRaises(TypeError):
-            If(True, Skip(), Skip(), Skip())  # type: ignore[call-arg]
-        with self.assertRaises(TypeError):
-            Sequence(Skip())  # type: ignore[call-arg]
-        with self.assertRaises(TypeError):
-            Sequence(Skip(), Skip(), Skip())  # type: ignore[call-arg]
-        with self.assertRaises(TypeError):
-            InternalChoice(Skip())  # type: ignore[call-arg]
-        with self.assertRaises(TypeError):
-            InternalChoice(Skip(), Skip(), Skip())  # type: ignore[call-arg]
 
     # 测试输入：``ODE.wait("1 / 2")`` 以及包级、模块级 ODE 类。
     # 预期行为：得到 ODE; skip 二元树，ODE 自动时钟截止值为精确 Fraction(1,2)。

@@ -9,7 +9,11 @@ from fractions import Fraction
 import unittest
 
 from hcsp_typechecker import EndType, ODE, PureDelayType
-from test2._support import assert_conversion, check_process
+from test2._support import (
+    assert_conversion,
+    check_process,
+    select_natural_timeout_dl,
+)
 
 
 class WaitSugarExample(unittest.TestCase):
@@ -23,7 +27,10 @@ class WaitSugarExample(unittest.TestCase):
     def test_wait_sugar_becomes_exact_rational_delay(self) -> None:
         """wait 应在不污染 Gamma 的前提下生成精确有理时延。"""
 
-        report = check_process(ODE.wait(Fraction(3, 2)))
+        report = check_process(
+            ODE.wait(Fraction(3, 2)),
+            dl_checker=select_natural_timeout_dl,
+        )
         expected = PureDelayType(Fraction(3, 2), EndType())
         assert_conversion(
             self,

@@ -31,6 +31,7 @@ from hcsp_typechecker import (
     BasicType,
     ChannelType,
     Configuration,
+    ContinuousType,
     DLFormula,
     ODE,
     ODEAnnotation,
@@ -50,6 +51,23 @@ def _approve_and_collect(storage: list[object]):
 
         storage.append(obligation)
         return Verdict.TRUE
+
+    return checker
+
+
+def _select_boundary_and_collect(storage: list[object]):
+    """记录两个 ODE 候选，否证 domain 并唯一选中 boundary 规则。"""
+
+    def checker(obligation: object) -> Verdict:
+        """按 dL role 返回可区分两条规则的模拟结果。"""
+
+        storage.append(obligation)
+        formula = getattr(obligation, "formula", None)
+        return (
+            Verdict.FALSE
+            if getattr(formula, "role", "") == "domain"
+            else Verdict.TRUE
+        )
 
     return checker
 
@@ -84,7 +102,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             annotation=ODEAnnotation(safety="x >= t and t <= 2", delay=2),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -129,7 +147,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
 
     # 测试输入：delay=1 的 ODE 后接 done 输出，因而具有 fallback。
     # 预期行为：boundary 公式在无域 ODE 的单个 box 中分别检查 t<d -> B 和
-    #           t=d -> not B，不再生成旧版 diamond 可达性近似。
+    #           t=d -> not B，且不混入与 Table 2 不同的 diamond 可达性条件。
     # 检查内容：查验严格时钟比较、边界等式、否定域以及 ODE 程序中没有 B。
     # 论文对应：新版 Table 2 带自然后继规则的精确边界 dL 前提。
     def test_boundary_uses_strict_before_and_not_domain_at_deadline(self) -> None:
@@ -145,7 +163,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             OutputChannel("done", 0),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -186,7 +204,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             OutputChannel("done", 0),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -221,7 +239,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             ),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -257,7 +275,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             annotation=ODEAnnotation(safety="x >= 0", delay=inf),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x >= 0",
@@ -292,7 +310,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             gamma={},
             theta={},
             configurations=[Configuration({}, process)],
-            dl_checker=_approve_and_collect(captured),
+            dl_checker=_select_boundary_and_collect(captured),
         )
 
         boundary = next(
@@ -329,7 +347,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             OutputChannel("done", 0),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL, "y": BasicType.REAL},
+            gamma={"x": ContinuousType(), "y": BasicType.REAL},
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0, "y": 0}, process)],
             path_condition="x == 0 and y == 0",
@@ -359,7 +377,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             annotation=ODEAnnotation(safety="x >= 0", delay=1),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -387,7 +405,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             annotation=ODEAnnotation(safety="x >= 0", delay=1),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL, "flag": BasicType.BOOL},
+            gamma={"x": ContinuousType(), "flag": BasicType.BOOL},
             theta={},
             configurations=[Configuration({"x": 0, "flag": True}, process)],
             path_condition="flag and x == 0",

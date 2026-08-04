@@ -22,6 +22,7 @@ from hcsp_typechecker import (
     BasicType,
     ChannelType,
     Configuration,
+    ContinuousType,
     InputChannel,
     ODE,
     ODEAnnotation,
@@ -51,11 +52,11 @@ class DetailedReportTests(unittest.TestCase):
         )
 
     # 测试输入：空 Gamma 下的 ch?x; ch!x，Theta(ch) 为一槽 Int refinement type。
-    # 预期行为：轨迹先按 environment、T-||、T-sigma、T-In、T-Out、T-End
-    #           完成类型推导，最后才出现 Proof-Pool；T-Out 的入口快照已经包含
+    # 预期行为：T-sigma 的 state 和 T-Out 的 FOL 公式分别在各自规则位置
+    #           立即出现 Proof 步骤；T-Out 的入口快照已经包含
     #           x:Int 和输入动作建立的新鲜符号。
     # 检查内容：规则先序编号、输入作用域产生的环境变化、逐层候选类型和
-    #           Pool 阶段严格位于全部类型规则之后。
+    #           公式判定与规则展开的严格顺序。
     # 论文对应：Section 4.2/Table 2 的环境判断、T-sigma、T-In、T-Out、T-End。
     def test_trace_exposes_rule_order_and_input_environment_change(self) -> None:
         """规则轨迹应让用户看见输入值如何进入后继类型检查上下文。"""
@@ -69,15 +70,16 @@ class DetailedReportTests(unittest.TestCase):
                 "environment",
                 "T-||",
                 "T-sigma",
+                "Proof",
                 "T-In",
                 "T-Out",
+                "Proof",
                 "T-End",
-                "Proof-Pool",
             ),
         )
         self.assertEqual(
             tuple(step.number for step in report.steps),
-            (1, 2, 3, 4, 5, 6, 7),
+            (1, 2, 3, 4, 5, 6, 7, 8),
         )
 
         input_step = next(step for step in report.steps if step.rule == "T-In")
@@ -89,7 +91,9 @@ class DetailedReportTests(unittest.TestCase):
         )
         self.assertIn("ch?.ch!.0", input_step.result)
         self.assertIn("ch!.0", output_step.result)
-        self.assertIn("true=2", report.steps[-1].result)
+        proof_steps = tuple(step for step in report.steps if step.rule == "Proof")
+        self.assertEqual(len(proof_steps), 2)
+        self.assertTrue(all("= true" in step.result for step in proof_steps))
         output_obligation = next(
             obligation
             for obligation in report.obligations
@@ -115,8 +119,8 @@ class DetailedReportTests(unittest.TestCase):
             "T-Out @ K1",
             "Gamma    : x:Int",
             "Theta    : ch:{eta:Int | true}",
-            "=== Proof Pool：公式与证明义务 ===",
-            "[O02] 已证明 | T-Out | FOL",
+            "=== 顺序公式判定记录 ===",
+            "[O02] 有效 | 已证明 | T-Out | FOL",
             "论文前提 : [T-Out]  phi => refinement{e/eta}",
             "规则生成公式（原始）:",
             "证明器实际输入:",
@@ -124,10 +128,11 @@ class DetailedReportTests(unittest.TestCase):
             "处理状态 : 已解决",
             "=== 未解决或未通过的证明义务 ===",
             "(无；所有已生成证明义务均已证明)",
-            "Proof-Pool @ judgment",
+            "Proof @ T-Out",
             "=== 诊断信息 ===",
-            "规则步骤 : 7",
-            "证明义务 : 2 (true=2, false=0, unknown=0)",
+            "规则步骤 : 8",
+            "证明记录 : 2",
+            "有效义务 : 2 (true=2, false=0, unknown=0)",
             "遗留义务 : 0 (未通过=0, 待证明=0)",
         )
         for fragment in expected_fragments:
@@ -135,8 +140,9 @@ class DetailedReportTests(unittest.TestCase):
                 self.assertIn(fragment, rendered)
 
     # 测试输入：具有非平凡 safety 和有限自然后继的 ODE，dL 后端固定返回 unknown。
-    # 预期行为：类型仍可生成，但 safety/boundary 两项均明确列入待证明义务区。
-    # 检查内容：dL 论文公式、后端说明、义务编号、建议操作和最终遗留数量。
+    # 预期行为：两个 ODE 候选都在首条 unknown safety premise 处停止，因此
+    #           不伪造唯一类型，只保留两条已经实际判定的候选证据。
+    # 检查内容：候选标记、dL 公式、选择诊断和未选候选证据区。
     # 论文对应：Table 2 两条带 fallback ODE premise 必须保留，不能因后端缺失而隐藏。
     def test_unknown_dl_formulas_are_repeated_in_unresolved_section(self) -> None:
         """报告应把尚未判定的 dL 公式集中列出并给出后续操作。"""
@@ -150,7 +156,7 @@ class DetailedReportTests(unittest.TestCase):
             Skip(),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -159,16 +165,18 @@ class DetailedReportTests(unittest.TestCase):
         rendered = report.format_detailed()
 
         self.assertEqual(report.verdict, Verdict.UNKNOWN)
+        self.assertIsNone(report.inferred_type)
         expected_fragments = (
-            "待证明   : 2",
-            "[O02] 待证明 | T-ODE-safety | DL",
-            "[O03] 待证明 | T-ODE-boundary | DL",
+            "未选候选 : 2",
+            "candidate=communication-only",
+            "candidate=natural-timeout",
+            "[O02] 未选候选 | 待证明 | T-ODE-safety | DL",
+            "[O03] 未选候选 | 待证明 | T-ODE-safety | DL",
             "[T-unrhd/T-unrhd-prime]",
-            "[T-unrhd-prime]",
             "配置的 dL 后端（通常为 KeYmaera X）",
-            "[O02] 待证明 | T-ODE-safety | 后续操作：配置可信证明后端",
-            "[O03] 待证明 | T-ODE-boundary | 后续操作：配置可信证明后端",
-            "遗留义务 : 2 (未通过=0, 待证明=2)",
+            "=== 未选 ODE 候选的未决证据 ===",
+            "stopped at an unknown premise",
+            "遗留义务 : 0 (未通过=0, 待证明=0)",
         )
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):

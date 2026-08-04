@@ -7,11 +7,11 @@
 Z3 项仍可在通道 callable refinement 和证明器内部出现，但它们不是 HCSP AST
 的一部分。不支持的数学函数会被建模为未解释函数，以保持证明结论保守。
 
-本模块同时服务于推导的两个不同阶段：``ExpressionTranslator`` 在规则展开阶段
-确定性地产生带类型的 Z3 项和有定义性条件；``Z3ProofEngine`` 在所有规则展开
-完成后判定收集到的具体 FOL 公式。它不综合路径谓词或赋值后置条件。T-Assign
-已经由 ``checker.py`` 把右值项写入后继符号映射，因此传到这里的证明目标中不
-存在等待 Z3 搜索的未知 ``phi'``。
+本模块同时服务于推导的两个职责：``ExpressionTranslator`` 在规则展开时
+确定性地产生带类型的 Z3 项和有定义性条件；``Z3ProofEngine`` 在统一求解器
+遇到相应公式 premise 时立即判定具体 FOL 公式。它不综合路径谓词或赋值后置
+条件。T-Assign 已经由 ``checker.py`` 把右值项写入后继符号映射，因此传到
+这里的证明目标中不存在等待 Z3 搜索的未知 ``phi'``。
 """
 
 from __future__ import annotations
@@ -38,8 +38,11 @@ from .expressions import (
 from .model import (
     BasicType,
     ChannelType,
+    GammaType,
     Verdict,
+    gamma_value_type,
     is_subtype,
+    normalize_gamma_type,
     normalize_type,
 )
 
@@ -97,14 +100,14 @@ class ExpressionTranslator:
 
     def __init__(
         self,
-        gamma: Mapping[str, BasicType],
+        gamma: Mapping[str, GammaType],
         symbols: MutableMapping[str, Any] | None = None,
         *,
         name_prefix: str = "",
     ):
         """建立规范化变量环境，并可复用调用方提供的符号表。"""
         self.gamma = {
-            str(name): normalize_type(value, subject="Gamma entry")
+            str(name): normalize_gamma_type(value, subject="Gamma entry")
             for name, value in gamma.items()
         }
         self.symbols: MutableMapping[str, Any] = {} if symbols is None else symbols
@@ -124,25 +127,25 @@ class ExpressionTranslator:
         other._functions = self._functions
         return other
 
-    def symbol(self, name: str, value_type: BasicType | None = None) -> Any:
-        """按需创建并缓存基础类型变量对应的 Z3 常量。"""
+    def symbol(self, name: str, value_type: GammaType | None = None) -> Any:
+        """按需按 Gamma 项的当前值基础类型创建并缓存 Z3 常量。"""
         if z3 is None:
             raise ExpressionError("z3-solver is not installed")
         name = str(name)
         if name in self.symbols:
             return self.symbols[name]
         actual_type = (
-            self.gamma.get(name, BasicType.REAL)
+            gamma_value_type(self.gamma.get(name, BasicType.REAL))
             if value_type is None
-            else normalize_type(value_type, subject="Symbol type")
+            else gamma_value_type(value_type, subject="Symbol type")
         )
         value = self._fresh_scalar(name, actual_type)
         self.symbols[name] = value
         return value
 
-    def fresh_symbol(self, name: str, value_type: BasicType, suffix: str) -> Any:
-        """创建不写入当前符号表的新鲜符号。"""
-        normalized = normalize_type(value_type, subject="Fresh symbol type")
+    def fresh_symbol(self, name: str, value_type: GammaType, suffix: str) -> Any:
+        """按 Gamma 项的当前值类型创建不写入符号表的新鲜符号。"""
+        normalized = gamma_value_type(value_type, subject="Fresh symbol type")
         return self._fresh_scalar(f"{name}{suffix}", normalized)
 
     def _fresh_scalar(self, name: str, value_type: BasicType) -> Any:
@@ -301,7 +304,12 @@ class ExpressionTranslator:
             value = self.symbol(expression.name)
             return ExprResult(
                 value,
-                self.gamma.get(expression.name, self._type_of_z3(value)),
+                gamma_value_type(
+                    self.gamma.get(
+                        expression.name,
+                        self._type_of_z3(value),
+                    )
+                ),
             )
 
         if isinstance(expression, UnaryExpr):
@@ -608,14 +616,27 @@ class Z3ProofEngine:
         state: Mapping[str, Any],
         symbols: Mapping[str, Any],
     ) -> tuple[Verdict, str]:
-        """检查一个可能不完整的具体状态是否满足路径条件。"""
+        """按 ``|= phi[sigma]`` 检查部分状态是否满足路径条件。
+
+        ``symbols`` 是 Gamma 声明产生的有类型符号表。状态 ``sigma`` 可以只给
+        其中一部分变量赋值；未赋值变量保留在 ``phi[sigma]`` 中，由有效性检查
+        隐式全称量化。反之，sigma 中出现 symbols/Gamma 未声明的键没有可用的
+        类型解释，属于未定义状态，必须拒绝而不能静默忽略。
+        """
         if z3 is None:
             return Verdict.UNKNOWN, "z3-solver is not installed"
+        undeclared = set(state) - set(symbols)
+        if undeclared:
+            names = ", ".join(
+                repr(name) for name in sorted(undeclared, key=repr)
+            )
+            return (
+                Verdict.FALSE,
+                "state contains variables not declared in Gamma: " + names,
+            )
         substitutions = []
         try:
             for name, concrete in state.items():
-                if name not in symbols:
-                    continue
                 substitutions.append(
                     (symbols[name], self._concrete(concrete, symbols[name].sort()))
                 )
@@ -627,24 +648,26 @@ class Z3ProofEngine:
             else formula
         )
         if z3.is_true(closed):
-            return Verdict.TRUE, "state satisfies the path condition"
+            return Verdict.TRUE, "the substituted path condition is true"
         if z3.is_false(closed):
-            return Verdict.FALSE, "state violates the path condition"
-        positive, _ = self.valid(closed)
-        if positive == Verdict.TRUE:
+            return Verdict.FALSE, "the substituted path condition is false"
+        verdict, detail = self.valid(closed)
+        if verdict == Verdict.TRUE:
             return (
                 Verdict.TRUE,
-                "path condition is valid for unspecified state variables",
+                "the residual path condition is valid for every unspecified "
+                f"state variable: {closed}",
             )
-        negative, _ = self.valid(z3.Not(closed))
-        if negative == Verdict.TRUE:
+        if verdict == Verdict.FALSE:
             return (
                 Verdict.FALSE,
-                "path condition is false for all unspecified state variables",
+                "the residual path condition is not valid: "
+                f"{closed}; {detail}",
             )
         return (
             Verdict.UNKNOWN,
-            f"state is partial; residual condition: {closed}",
+            "validity of the residual path condition is unknown: "
+            f"{closed}; {detail}",
         )
 
     @staticmethod

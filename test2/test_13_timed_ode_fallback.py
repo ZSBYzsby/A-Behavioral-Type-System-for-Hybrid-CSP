@@ -10,6 +10,7 @@ import unittest
 from hcsp_typechecker import (
     BasicType,
     ChannelType,
+    ContinuousType,
     EndType,
     EventChoice,
     ODE,
@@ -45,7 +46,7 @@ class TimedODEFallbackExample(unittest.TestCase):
         integer = ChannelType(BasicType.INT)
         report = check_process(
             process,
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"alarm": integer, "done": integer},
             state={"x": 0},
             path_condition="x == 0",

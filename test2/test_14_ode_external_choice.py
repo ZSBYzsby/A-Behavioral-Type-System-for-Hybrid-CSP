@@ -11,6 +11,7 @@ from hcsp_typechecker import (
     BasicType,
     ChannelType,
     CommunicationTimeoutType,
+    ContinuousType,
     EndType,
     EventChoice,
     ExternalChoiceType,
@@ -47,7 +48,7 @@ class ODEExternalChoiceExample(unittest.TestCase):
         integer = ChannelType(BasicType.INT)
         report = check_process(
             process,
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"left": integer, "right": integer},
         )
         choices = ExternalChoiceType(

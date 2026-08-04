@@ -11,6 +11,7 @@ import unittest
 from hcsp_typechecker import (
     BasicType,
     ChannelType,
+    ContinuousType,
     EndType,
     EventChoice,
     ODE,
@@ -43,7 +44,7 @@ class InfiniteDelayExample(unittest.TestCase):
         integer = ChannelType(BasicType.INT)
         report = check_process(
             Sequence.of(evolution, OutputChannel("done", 0)),
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"alarm": integer, "done": integer},
             state={"x": 0},
         )

@@ -138,7 +138,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
 
     # 测试输入：mixed!(true,1) 对应通道签名 (Int,Bool)。
     # 预期行为：两个槽位分别报告 Bool->Int 与 Nat->Bool 不兼容，总体 false。
-    # 检查内容：诊断必须带 slot 1/2，推导仍只生成一次 OutputType 动作。
+    # 检查内容：诊断必须带 slot 1/2，且静态类型前提失败后不生成 OutputType。
     # 论文对应：多标量扩展逐个检查 Gamma·phi |- ei:Bi，不合并成 tuple 判断。
     def test_each_output_slot_is_type_checked_independently(self) -> None:
         """交换槽位类型不能被整个参数表的外层形状掩盖。"""
@@ -154,9 +154,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertTrue(
-            types_equivalent(report.inferred_type, OutputType("mixed", EndType()))
-        )
+        self.assertIsNone(report.inferred_type)
         messages = tuple(item.message for item in report.diagnostics)
         self.assertTrue(any("slot 1 expects Int, got Bool" in text for text in messages))
         self.assertTrue(any("slot 2 expects Bool, got Nat" in text for text in messages))

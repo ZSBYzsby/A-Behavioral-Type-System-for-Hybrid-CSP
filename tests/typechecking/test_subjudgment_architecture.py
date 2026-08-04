@@ -3,15 +3,16 @@
 测试内容：
 
 * 每个 ``rule_t_*`` 方法是否只返回 ``RuleExpansion``；
-* 规则函数内部是否不再直接求解子规则或写入公共 Proof Pool；
+* 规则函数是否保持只展开一层，不直接求解子规则或调用证明器；
 * 一次含 ODE 的真实推导是否依次经过 configuration、system、process 和 event
-  四类子 judgment，并在报告中展示 formula/child premises。
+  四类子 judgment，并在报告中展示 formula/child premises；
+* dL 后端是否在相应 formula premise 位置立即运行。
 
 预期行为：规则函数只描述推导树的一层；统一求解器递归处理 child judgment，
-公式 premise 统一进入 Pool，候选类型构造完成后证明器才运行。
+公式 premise 由求解器当场判定，规则函数本身仍只描述一层推导树。
 
 论文对应：Table 2 横线下方是 conclusion judgment，横线上方分为逻辑公式
-premises 与子 judgments；实现使用同一公共 Pool 汇总逻辑前提。
+premises 与子 judgments；实现按它们在 ``RuleExpansion`` 中的顺序求解。
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from __future__ import annotations
 import ast
 import inspect
 import unittest
-from typing import get_type_hints
+from typing import Any, get_type_hints
 
 import hcsp_typechecker.checker as checker_module
 from hcsp_typechecker import Configuration, ODE, TypeChecker, TypingJudgment, Verdict
@@ -30,7 +31,7 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
 
     # 测试输入：checker.py 中当前全部 rule_t_* 方法的 Python AST 和类型标注。
     # 预期行为：所有规则返回 _RuleExpansion，且规则体不调用任何 _solve_*/_infer_*
-    #           入口、不直接写 proof_pool，也不直接递归调用其他 rule_t_* 方法。
+    #           入口、不直接调用 _decide_proof，也不递归调用其他 rule_t_* 方法。
     # 检查内容：返回类型以及规则函数调用图中的禁止边。
     # 论文对应：规则只由 conclusion 产生 premises，统一引擎负责推导树递归。
     def test_rules_only_expand_conclusions_into_premises(self) -> None:
@@ -61,7 +62,7 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
                         called.startswith("self._solve_")
                         or called.startswith("self._infer_")
                         or called.startswith("self.rule_t_")
-                        or called == "self.proof_pool.append"
+                        or called == "self._decide_proof"
                     ):
                         forbidden_calls.append(called)
                 self.assertEqual(forbidden_calls, [])
@@ -69,12 +70,32 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
     # 测试输入：ODE.wait(1)，其规则同时产生 dL 公式、事件反应和自然后继。
     # 预期行为：统一分派器实际看到四层 judgment；报告中的 T-sigma/T-ODE 说明
     #           分别列出 state formula、system、dL formula、event 和 process premise。
-    # 检查内容：运行时 judgment 类别、候选类型生成、详细 premise 轨迹与 Pool 顺序。
+    # 检查内容：运行时 judgment 类别、候选类型、premise 轨迹，以及后端调用
+    #           瞬间已经完成的 Proof 步骤和义务记录。
     # 论文对应：T-sigma、连续演化规则的公式 premise 与子 judgment premise。
     def test_runtime_solver_visits_all_judgment_layers(self) -> None:
-        """一次 ODE 推导应经过显式 judgment 树并把公式统一放入 Pool。"""
+        """一次 ODE 推导应经过显式 judgment 树并就地判定公式。"""
 
-        checker = TypeChecker(dl_checker=lambda _obligation: True)
+        proof_observations: list[
+            tuple[str, tuple[str, ...], tuple[str, ...]]
+        ] = []
+        checker: TypeChecker
+
+        # 功能：记录后端被调用时的执行轨迹，并唯一证明 boundary 候选。
+        def observing_backend(obligation: Any) -> bool:
+            """确认每条 dL premise 都在其推导位置立即进入证明后端。"""
+
+            role = getattr(obligation.formula, "role", "")
+            proof_observations.append(
+                (
+                    role,
+                    tuple(step.rule for step in checker.steps),
+                    tuple(item.rule for item in checker.obligations),
+                )
+            )
+            return role == "boundary"
+
+        checker = TypeChecker(dl_checker=observing_backend)
         visited: list[str] = []
         original_solver = checker._solve_child_judgment
 
@@ -111,7 +132,20 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
         self.assertIn("formula[dl:T-ODE-boundary]", ode_step.detail)
         self.assertIn("event[E]", ode_step.detail)
         self.assertIn("process[skip]", ode_step.detail)
-        self.assertEqual(report.steps[-1].rule, "Proof-Pool")
+        step_rules = tuple(step.rule for step in report.steps)
+        self.assertIn("T-ODE-Select", step_rules)
+        self.assertIn("Proof", step_rules)
+        self.assertEqual(
+            tuple(item[0] for item in proof_observations),
+            ("domain", "boundary"),
+        )
+        for _role, rules_at_call, obligations_at_call in proof_observations:
+            with self.subTest(role=_role):
+                self.assertEqual(rules_at_call[-1], "Proof")
+                self.assertEqual(
+                    obligations_at_call,
+                    ("T-sigma", "T-ODE-safety"),
+                )
 
 
 if __name__ == "__main__":

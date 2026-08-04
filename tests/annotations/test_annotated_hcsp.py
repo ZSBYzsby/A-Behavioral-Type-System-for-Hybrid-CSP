@@ -36,6 +36,7 @@ from hcsp_typechecker import (
     BottomType,
     ChannelType,
     Configuration,
+    ContinuousType,
     EndType,
     Expr,
     InputChannel,
@@ -265,7 +266,7 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             annotation=ODEAnnotation(safety=True, delay=math.inf),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
         )
@@ -290,7 +291,7 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             annotation=ODEAnnotation(delay=3),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             dl_checker=_approve_dl,
@@ -315,7 +316,7 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             annotation=ODEAnnotation(safety="x <= 8", delay=2),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -339,7 +340,7 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             annotation=ODEAnnotation(safety=True, delay="1 / 2"),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             dl_checker=_approve_dl,
@@ -370,7 +371,7 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             OutputChannel("done", 0),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -399,7 +400,7 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             Skip(),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             dl_checker=_approve_dl,
@@ -495,7 +496,7 @@ class RecursionAnnotationTypingTests(unittest.TestCase):
             annotation=RecursionAnnotation("x <= 1"),
         )
         report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"tick": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x <= 1",

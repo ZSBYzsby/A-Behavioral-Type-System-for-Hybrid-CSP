@@ -184,7 +184,7 @@ class TimedTypeNormalizationTests(unittest.TestCase):
 
     # 测试输入：int、float、Decimal 的同值时延，以及负数、Bool、NaN 等非法值。
     # 预期行为：有限合法值成为最简 Fraction，正无穷工厂规范为 A，其余失败。
-    # 检查内容：类型 AST 不再保存 Literal/浮点近似，也不能绕过 ODEAnnotation。
+    # 检查内容：类型 AST 只保存精确 duration，不保存 Literal/浮点近似。
     # 论文对应：0 <= d < infinity 的有限缩写和 delta=infinity 的 A 缩写。
     def test_duration_is_exact_and_checked_at_type_boundary(self) -> None:
         """类型节点独立维护精确非负有限时延不变量。"""

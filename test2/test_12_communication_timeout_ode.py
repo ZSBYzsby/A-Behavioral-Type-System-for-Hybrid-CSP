@@ -11,6 +11,7 @@ from hcsp_typechecker import (
     BasicType,
     ChannelType,
     CommunicationTimeoutType,
+    ContinuousType,
     EndType,
     EventChoice,
     ODE,
@@ -41,7 +42,7 @@ class CommunicationTimeoutODEExample(unittest.TestCase):
         )
         report = check_process(
             process,
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"tick": ChannelType(BasicType.INT)},
         )
         expected = CommunicationTimeoutType(2, OutputType("tick", EndType()))

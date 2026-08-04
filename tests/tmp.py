@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # 支持直接执行 ``python tests/tmp.py``。直接执行时 Python 默认只把 tests/
 # 放入模块搜索路径，因此这里显式加入项目根目录，以便导入 hcsp_typechecker。
@@ -26,9 +26,7 @@ from hcsp_typechecker import (  # noqa: E402  (项目根目录在上面加入搜
     BasicType,
     ChannelType,
     Configuration,
-    KeYmaeraXConfig,
-    ODE,
-    ODEAnnotation,
+    InputChannel,
     OutputChannel,
     Sequence,
     check_hcsp,
@@ -39,23 +37,34 @@ from hcsp_typechecker import (  # noqa: E402  (项目根目录在上面加入搜
 #                              手动修改区域
 # ============================================================================
 
-def build_case() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Any, Any]:
-    """返回 Gamma、Theta、初始状态、路径条件和待检查的 HCSP 进程。
+def build_case() -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    Any,
+    str,
+    Callable[[], Any],
+]:
+    """返回环境、源程序文本和延迟执行的 Process AST 构造函数。
 
-    修改下面五个变量即可测试其他例子。当前案例是 ``x'=1`` 的简单 ODE，
-    会同时产生 safety 和精确 boundary 两条 dL 证明义务，并由项目默认配置的
-    KeYmaera X 后端尝试证明。
+    修改下面的环境、源文本和构造函数即可测试其他例子。当前案例是
+    ``ch!x; ch?x``：先从
+    ``ch`` 发送当前 ``x``，随后再从同一通道接收一个值并绑定为 ``x``。
+
+    Process 使用延迟构造，使 ``main()`` 能在 Assumption 2.1/2.2 报错之前
+    先打印完整输入。修改案例时，应同步修改 ``source_text`` 和
+    ``build_process()``。
     """
 
-    # x 是唯一的用户状态变量。ODE 自动拥有隐藏局部时钟 t，因此 Gamma、初始
-    # 状态和方程列表中都不需要额外声明 t。
+    # 第一个输出需要读取 x，因此必须在 Gamma 和初始状态中声明它。注意：
+    # Gamma 声明不会改变 process 层的自由/绑定变量集合；后面的 ch?x 仍会
+    # 按 Section 2.1/Assumption 2.1 把 x 记为绑定变量。
     gamma = {
         "x": BasicType.REAL,
     }
     theta = {
-        # ODE 在 x=1 的边界自然结束；输出 refinement 用来验证后继确实可以
-        # 利用 ``not B and safety`` 推出 x=1。
-        "done": ChannelType(BasicType.REAL, "eta == 1"),
+        # 输入和输出使用同一个一槽 Real 通道；refinement=true，不额外限制值。
+        "ch": ChannelType(BasicType.REAL),
     }
 
     initial_state = {
@@ -64,27 +73,29 @@ def build_case() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Any, A
     path_condition = "x == 0"
 
     # 论文记法概要：
-    #   <dot(x)=1 & x<1>_{safety: x<=1, delay: 1};
-    #   done!x
+    #   ch!x; ch?x
     #
-    # 重点观察最终报告中的三条公式：
-    # 1. T-ODE-safety：在 0<=t<=1 内保持 x<=1；
-    # 2. T-ODE-boundary：t<1 时 x<1，t=1 时 not(x<1)；
-    # 3. T-Out：在自然结束路径 not B and safety 下证明发送值 x 满足 eta=1。
-    # 预期行为类型为 ``delay(1).done!.0``。
-    process = Sequence.of(
-        ODE(
-            [("x", 1)],
-            "x < 1",
-            annotation=ODEAnnotation(
-                safety="x <= 1",
-                delay=1,
-            ),
-        ),
-        OutputChannel("done", "x"),
-    )
+    source_text = "ch!x; ch?x"
 
-    return gamma, theta, initial_state, path_condition, process
+    # 按当前项目保留的 Assumption 2.1：第一个 ch!x 自由使用 x，后一个 ch?x
+    # 又把 x 作为输入绑定变量，因此整个进程同时具有 x in fv(P) 和 x in bv(P)。
+    # 该交集非空，Sequence 构造时应直接报错，而不会生成行为类型。
+    def build_process() -> Any:
+        """在输入信息打印完成后构造当前手写 Process AST。"""
+
+        return Sequence.of(
+            OutputChannel("ch", "x"),
+            InputChannel("ch", "x"),
+        )
+
+    return (
+        gamma,
+        theta,
+        initial_state,
+        path_condition,
+        source_text,
+        build_process,
+    )
 
 
 # ============================================================================
@@ -100,18 +111,35 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
     try:
-        gamma, theta, initial_state, path_condition, process = build_case()
+        (
+            gamma,
+            theta,
+            initial_state,
+            path_condition,
+            source_text,
+            process_builder,
+        ) = build_case()
     except Exception as exc:  # 手动脚本需要把构造期拒绝直接展示给用户。
-        print("=== Process AST 构造失败 ===")
+        print("=== 手动案例定义失败 ===")
         print(f"{type(exc).__name__}: {exc}")
         return 1
 
     print("=== 输入 ===")
-    print(f"Process AST   : {process!r}")
+    print(f"HCSP source   : {source_text}")
     print(f"Gamma         : {gamma!r}")
     print(f"Theta         : {theta!r}")
     print(f"Initial state : {initial_state!r}")
     print(f"Path condition: {path_condition!r}")
+
+    try:
+        process = process_builder()
+    except Exception as exc:
+        print("Process AST   : <构造失败>")
+        print("\n=== Process AST 构造失败 ===")
+        print(f"{type(exc).__name__}: {exc}")
+        return 1
+
+    print(f"Process AST   : {process!r}")
 
     try:
         report = check_hcsp(
@@ -119,11 +147,6 @@ def main() -> int:
             theta=theta,
             configurations=[Configuration(initial_state, process)],
             path_condition=path_condition,
-            # 公开版本不写死开发者电脑路径。配置依次来自 KEYMAERAX_JAR、
-            # KEYMAERAX_JAVA、KEYMAERAX_HOME、KEYMAERAX_TIMEOUT 等环境变量；
-            # 源码 checkout 也可把未纳入版本控制的 jar 放在 tools/ 下。
-            # 未配置证明器时报告会保守显示 unknown，而不会在这里抛出异常。
-            keymaerax_config=KeYmaeraXConfig.from_environment(),
         )
     except Exception as exc:
         print("\n=== 类型检查调用失败 ===")

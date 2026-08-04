@@ -8,16 +8,16 @@
 --------
 1. ``P01``-``P11``：全部十一种 P 节点及 ODE 事件反应的精确类型。
 2. ``S01``：并行系统到 ParallelType 的转换。
-3. ``C01``-``C08``：控制流组合、有限时延节点、``ODE.wait`` 和自动局部时钟。
-4. ``N01``-``N08``：断言、类型、通道、refinement、ODE 变量类型和缺少
-   dL 后端的 false/unknown 路径；不良递归已在 AST
-   构造测试中拒绝。
+3. ``C01``-``C09``：控制流组合、内部选择公共后继、有限时延节点、
+   ``ODE.wait`` 和自动局部时钟。
+4. ``N01``-``N13``：逻辑证明失败、静态类型失败、通道、refinement、ODE、
+   递归不变量、初始路径和缺少 dL 后端的 false/unknown 路径。
 5. 动态插桩所有 ``rule_t_*``，要求场景集实际进入每个规则入口。
 6. 结构推导失败使用 ``None``，并验证它不会与论文正式类型 ``BottomType`` 混淆。
 7. 检查推导入口的类型标注严格区分 process 类型 ``T`` 和 configuration 类型
    ``mathcal T``。
-8. Gamma 只允许 BasicType，Theta 的字符串键也必须满足与 process/type AST
-   相同的通道标识符规则。
+8. Gamma 只允许普通 BasicType 或 ContinuousType，Theta 的字符串键也必须
+   满足与 process/type AST 相同的通道标识符规则。
 
 论文对应
 --------
@@ -44,6 +44,7 @@ from hcsp_typechecker import (
     ChannelType,
     CheckReport,
     Configuration,
+    ContinuousType,
     CommunicationTimeoutType,
     ConfigurationType,
     EndType,
@@ -63,6 +64,7 @@ from hcsp_typechecker import (
     Parallel,
     ParallelType,
     PureDelayType,
+    RecursionAnnotation,
     ProcessType,
     Sequence,
     Skip,
@@ -82,6 +84,17 @@ def _true_dl(_obligation: object) -> Verdict:
     return Verdict.TRUE
 
 
+def _select_natural_timeout(obligation: object) -> Verdict:
+    """用角色感知的 mock 否证 domain 候选，唯一选中 boundary 规则。"""
+
+    formula = getattr(obligation, "formula", None)
+    return (
+        Verdict.FALSE
+        if getattr(formula, "role", "") == "domain"
+        else Verdict.TRUE
+    )
+
+
 @dataclass(frozen=True)
 class ConversionScenario:
     """一个进程到行为类型的可执行场景及其精确期望。"""
@@ -98,6 +111,7 @@ class ConversionScenario:
     dl_checker: Callable[[object], Any] | None = None
     diagnostic_contains: tuple[str, ...] = ()
     obligation_rules: tuple[str, ...] = ()
+    step_rules: tuple[str, ...] = ()
 
     def run(self) -> CheckReport:
         """调用公共入口并返回保留全部证明证据的检查报告。"""
@@ -240,7 +254,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                     OutputType("stop", EndType()),
                 )
             ),
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"sense": integer, "stop": integer},
             obligation_rules=("T-ODE-domain",),
         ),
@@ -271,6 +285,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 )
             ),
             theta={"left": integer, "right": integer},
+            step_rules=("T-sqcup",),
         ),
         ConversionScenario(
             "P10_MU_AND_VAR",
@@ -293,7 +308,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 1,
                 OutputType("done", EndType()),
             ),
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"done": integer},
             dl_checker=_true_dl,
             obligation_rules=("T-ODE-boundary",),
@@ -378,7 +393,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 2,
                 OutputType("tick", EndType()),
             ),
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"tick": integer},
             dl_checker=_true_dl,
             obligation_rules=("T-ODE-domain",),
@@ -396,7 +411,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 ),
                 OutputType("done", EndType()),
             ),
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"alarm": integer, "done": integer},
             state={"x": 0},
             path="x == 0",
@@ -412,7 +427,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 "alarm",
                 OutputType("done", EndType()),
             ),
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"alarm": integer, "done": integer},
             state={"x": 0},
             obligation_rules=("T-ODE-domain",),
@@ -423,7 +438,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             implicit_clock_wait,
             Verdict.TRUE,
             PureDelayType(1, EndType()),
-            dl_checker=_true_dl,
+            dl_checker=_select_natural_timeout,
             obligation_rules=("T-ODE-boundary",),
         ),
         ConversionScenario(
@@ -437,21 +452,40 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             obligation_rules=("T-ODE-boundary",),
         ),
         ConversionScenario(
+            "C09_INTERNAL_CHOICE_WITH_COMMON_TAIL",
+            "三元 (P |~| P'); Q 节点为两个分支保留同一顺序后继",
+            InternalChoice(
+                OutputChannel("left", 0),
+                OutputChannel("right", 0),
+                OutputChannel("done", 0),
+            ),
+            Verdict.TRUE,
+            InternalChoiceType(
+                (
+                    OutputType("left", OutputType("done", EndType())),
+                    OutputType("right", OutputType("done", EndType())),
+                )
+            ),
+            theta={"left": integer, "right": integer, "done": integer},
+            obligation_rules=("T-Out",),
+            step_rules=("T-sqcup",),
+        ),
+        ConversionScenario(
             "N01_ASSERT_FALSE",
             "不可证明的断言使检查结果为 false",
             Assert("x > 0"),
             Verdict.FALSE,
-            EndType(),
+            None,
             gamma={"x": BasicType.INT},
             state={"x": 0},
             obligation_rules=("T-Assert",),
         ),
         ConversionScenario(
             "N02_ASSIGN_TYPE_MISMATCH",
-            "赋值右值与 Gamma 类型不匹配时拒绝",
+            "赋值右值与 Gamma 类型不匹配时不生成行为类型",
             Assign("x", True),
             Verdict.FALSE,
-            EndType(),
+            None,
             gamma={"x": BasicType.INT},
             state={"x": 0},
             diagnostic_contains=("expects Int",),
@@ -469,7 +503,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "输出表达式违反通道 refinement 时拒绝",
             OutputChannel("bounded", -1),
             Verdict.FALSE,
-            OutputType("bounded", EndType()),
+            None,
             theta={
                 "bounded": ChannelType(
                     BasicType.INT,
@@ -490,24 +524,25 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N06_ODE_VARIABLE_NOT_REAL",
-            "用户 ODE 状态变量不是 Real 时拒绝；隐藏时钟不需要 Gamma 声明",
+            "用户 ODE 状态变量未显式声明为连续类型时拒绝；隐藏时钟不需要 Gamma 声明",
             ordinary_ode_variable,
             Verdict.FALSE,
-            PureDelayType(1, EndType()),
+            None,
             gamma={"x": BasicType.INT},
             dl_checker=_true_dl,
-            diagnostic_contains=("must have type Real",),
+            diagnostic_contains=("must have ContinuousType",),
         ),
         ConversionScenario(
             "N07_ODE_WITHOUT_DL_BACKEND",
             "非平凡 ODE 证明缺少后端时返回 unknown",
             Sequence.of(unknown_ode, Skip()),
             Verdict.UNKNOWN,
-            PureDelayType(1, EndType()),
-            gamma={"x": BasicType.REAL},
+            None,
+            gamma={"x": ContinuousType()},
             state={"x": 0},
             path="x == 0",
-            obligation_rules=("T-ODE-safety", "T-ODE-boundary"),
+            diagnostic_contains=("stopped at an unknown premise",),
+            obligation_rules=("T-ODE-safety",),
         ),
         ConversionScenario(
             "N08_ODE_VARIABLE_MISSING_FROM_GAMMA",
@@ -516,6 +551,67 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.FALSE,
             None,
             diagnostic_contains=("not declared in Gamma",),
+        ),
+        ConversionScenario(
+            "N09_ASSERT_CONDITION_NOT_BOOL",
+            "assert 条件不是 Bool 时静态类型推导失败",
+            Assert("x + 1"),
+            Verdict.FALSE,
+            None,
+            gamma={"x": BasicType.INT},
+            state={"x": 0},
+            diagnostic_contains=("Expected Bool formula",),
+        ),
+        ConversionScenario(
+            "N10_INPUT_TARGET_TYPE_MISMATCH",
+            "已有输入目标与通道槽位类型不兼容时不生成输入类型",
+            InputChannel("number", "flag"),
+            Verdict.FALSE,
+            None,
+            gamma={"flag": BasicType.BOOL},
+            theta={"number": integer},
+            state={"flag": False},
+            diagnostic_contains=("channel slot carries Int",),
+        ),
+        ConversionScenario(
+            "N11_ODE_DERIVATIVE_NOT_NUMERIC",
+            "ODE 导数不是数值表达式时不生成时延类型",
+            ODE(
+                [("x", True)],
+                True,
+                annotation=ODEAnnotation(delay=inf),
+            ),
+            Verdict.FALSE,
+            None,
+            gamma={"x": ContinuousType()},
+            state={"x": 0},
+            diagnostic_contains=("derivative of x must be numeric",),
+        ),
+        ConversionScenario(
+            "N12_RECURSION_INVARIANT_NOT_BOOL",
+            "递归不变量不是 Bool 时不构造 MuType",
+            Mu(
+                "X",
+                Sequence.of(InputChannel("tick", "u"), Var("X")),
+                annotation=RecursionAnnotation("counter + 1"),
+            ),
+            Verdict.FALSE,
+            None,
+            gamma={"counter": BasicType.INT},
+            theta={"tick": integer},
+            state={"counter": 0},
+            diagnostic_contains=("Expected Bool formula",),
+        ),
+        ConversionScenario(
+            "N13_INITIAL_PATH_NOT_BOOL",
+            "初始路径不是 Bool 时不进入 T-sigma 的系统类型推导",
+            Skip(),
+            Verdict.FALSE,
+            None,
+            gamma={"x": BasicType.INT},
+            state={"x": 0},
+            path="x + 1",
+            diagnostic_contains=("Expected Bool formula",),
         ),
     )
 
@@ -532,7 +628,8 @@ def _make_scenario_test(scenario: ConversionScenario):
 
     # 测试输入：scenario 中的 HCSP、Gamma、Theta、state、path 和 dL 后端。
     # 预期行为：报告 verdict/type 分别等于 scenario 的显式期望字段。
-    # 检查内容：还逐项核对期望诊断片段及必须生成的类型规则义务。
+    # 检查内容：还逐项核对期望诊断片段、必须生成的证明义务来源，
+    #           以及必须出现的原始/算法化规则轨迹。
     # 论文对应：每个场景的 case_id/description 指向相应 Table 2 规则。
     def test(self: ProcessToTypeScenarioTests) -> None:
         """执行一个进程到行为类型场景并核对全部声明结果。"""
@@ -562,6 +659,9 @@ def _make_scenario_test(scenario: ConversionScenario):
         actual_rules = {item.rule for item in report.obligations}
         for rule in scenario.obligation_rules:
             self.assertIn(rule, actual_rules)
+        actual_step_rules = {item.rule for item in report.steps}
+        for rule in scenario.step_rules:
+            self.assertIn(rule, actual_step_rules)
 
     return test
 
@@ -653,7 +753,7 @@ class InferenceFailureSeparationTests(unittest.TestCase):
         )
 
         formal_bottom_report = check_hcsp(
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={},
             configurations=[
                 Configuration(
@@ -703,7 +803,7 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
     """验证 Gamma/Theta 环境入口遵守基础类型和通道命名边界。"""
 
     # 测试输入：全局 Gamma 和 Configuration 局部 Gamma 分别使用 tuple/list 类型说明。
-    # 预期行为：两种入口都返回 false、无候选类型，并明确报告 BasicType 要求。
+    # 预期行为：两种入口都返回 false、无候选类型，并报告 Gamma 项类型要求。
     # 检查内容：确认局部环境失败也产生推导失败，而不是退化为空 Gamma 后继续。
     # 论文对应：Definition 4.1 的 Gamma 把每个状态变量映射到一个基础类型 B。
     def test_global_and_local_gamma_reject_container_type_specs(self) -> None:
@@ -732,7 +832,8 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
                 self.assertIsNone(report.inferred_type)
                 self.assertTrue(
                     any(
-                        "Gamma entry must be a BasicType" in item.message
+                        "Gamma entry must be a BasicType or ContinuousType"
+                        in item.message
                         for item in report.diagnostics
                     )
                 )

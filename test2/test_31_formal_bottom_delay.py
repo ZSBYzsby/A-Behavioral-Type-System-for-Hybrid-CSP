@@ -7,7 +7,7 @@
 
 import unittest
 
-from hcsp_typechecker import BasicType, BottomType, ODE, ODEAnnotation, PureDelayType
+from hcsp_typechecker import BottomType, ContinuousType, ODE, ODEAnnotation, PureDelayType
 from test2._support import assert_conversion, check_process
 
 
@@ -27,7 +27,7 @@ class FormalBottomDelayExample(unittest.TestCase):
             True,
             annotation=ODEAnnotation(delay=1),
         )
-        report = check_process(process, gamma={"x": BasicType.REAL}, state={"x": 0})
+        report = check_process(process, gamma={"x": ContinuousType()}, state={"x": 0})
         assert_conversion(
             self,
             report,

@@ -1,4 +1,4 @@
-r"""论文 Table 2 类型规则与 Proof Pool 的逐规则契约测试。
+r"""论文 Table 2 类型规则与顺序公式判定的逐规则契约测试。
 
 测试内容
 --------
@@ -22,7 +22,7 @@ premise”，并同时检查推导轨迹采用了正确的规则入口：
 --------
 逐项对应论文 Table 2 的 T-End、T-Skip、T-Assert、T-Assign、T-If、T-In、
 T-Out、T-⊔、T-⊓、T-ODE、两条定时 ODE 规则、T-mu、T-X、T-sigma 与
-T-parallel。若以后修改规则分派或 Proof Pool，本文件应首先暴露公式遗漏、
+T-parallel。若以后修改规则分派或顺序证明流程，本文件应首先暴露公式遗漏、
 方向颠倒或多生成义务的问题。
 """
 
@@ -37,6 +37,7 @@ from hcsp_typechecker import (
     BasicType,
     ChannelType,
     Configuration,
+    ContinuousType,
     EventChoice,
     If,
     InputChannel,
@@ -61,13 +62,25 @@ def _approve_dl(_obligation: object) -> Verdict:
     return Verdict.TRUE
 
 
+def _select_boundary_rule(obligation: object) -> Verdict:
+    """否证 domain 候选并证明 boundary，使 ``ODE;skip`` 唯一选中自然超时规则。"""
+
+    formula = getattr(obligation, "formula", None)
+    return (
+        Verdict.FALSE
+        if getattr(formula, "role", "") == "domain"
+        else Verdict.TRUE
+    )
+
+
 def _check_one(
     process: object,
     *,
-    gamma: Mapping[str, BasicType] | None = None,
+    gamma: Mapping[str, BasicType | ContinuousType] | None = None,
     theta: Mapping[str, ChannelType] | None = None,
     state: Mapping[str, Any] | None = None,
     path: object = True,
+    dl_checker: object = _approve_dl,
 ):
     """用单配置 T-sigma 包装一个进程，返回完整且可审计的检查报告。"""
 
@@ -76,7 +89,7 @@ def _check_one(
         theta={} if theta is None else theta,
         configurations=[Configuration(state, process)],
         path_condition=path,
-        dl_checker=_approve_dl,
+        dl_checker=dl_checker,  # type: ignore[arg-type]
     )
 
 
@@ -90,7 +103,7 @@ def _obligation_signature(report: object) -> tuple[tuple[str, str], ...]:
 
 
 def _step_rules(report: object) -> tuple[str, ...]:
-    """提取推导轨迹规则名；Proof-Pool 阶段也保留，调用方可按需忽略。"""
+    """提取推导轨迹规则名；就地 Proof 步骤也保留，调用方可按需忽略。"""
 
     return tuple(step.rule for step in report.steps)  # type: ignore[attr-defined]
 
@@ -100,7 +113,7 @@ class Table2RuleContractTests(unittest.TestCase):
 
     # 测试输入：分别检查 ``skip`` 与 ``skip # ch!(0)``。
     # 预期行为：前者只经过 T-End；后者先经过 T-Skip，再推导输出及终端 T-End。
-    # 检查内容：规则轨迹和两种场景的完整 Proof Pool 签名。
+    # 检查内容：规则轨迹和两种场景的完整顺序证明记录签名。
     # 论文对应：Table 2 的 T-End 没有 premise，T-Skip 只有后继 process judgment。
     def test_t_end_and_t_skip_follow_the_exact_source_shape(self) -> None:
         """终端与中间 skip 必须由两条不同的论文规则处理。"""
@@ -136,7 +149,7 @@ class Table2RuleContractTests(unittest.TestCase):
     # 测试输入：assert、赋值、if、输入、输出和内部选择的最小合法进程。
     # 预期行为：仅 T-Assert、T-Assign 的替换 premise 和 T-Out 增加 FOL 义务；
     #           T-If、T-In、T-⊔ 只建立表达式类型/子 judgment premise。
-    # 检查内容：每个场景的完整、有序 Proof Pool，而非仅检查某个规则“出现过”。
+    # 检查内容：每个场景的完整、有序证明记录，而非仅检查某个规则“出现过”。
     # 论文对应：Table 2 各离散规则横线以上的全部 premise。
     def test_discrete_rules_generate_exact_table2_formula_sets(self) -> None:
         """总定义离散表达式不得遗漏或额外产生 Table 2 公式。"""
@@ -146,7 +159,7 @@ class Table2RuleContractTests(unittest.TestCase):
             tuple[
                 str,
                 object,
-                Mapping[str, BasicType],
+                Mapping[str, BasicType | ContinuousType],
                 Mapping[str, ChannelType],
                 Mapping[str, Any],
                 object,
@@ -250,7 +263,7 @@ class Table2RuleContractTests(unittest.TestCase):
     # 测试输入：带两个输出事件分支、无顺序后继的有限 ODE。
     # 预期行为：T-⊓ 只展开事件子 judgment；其自身不增加公式。两条 T-Out
     #           refinement premise 来自分支，ODE 本身只增加 safety/domain。
-    # 检查内容：完整 Pool 签名、T-⊓ 轨迹和 dL 公式 role。
+    # 检查内容：完整证明记录签名、T-⊓ 轨迹和 dL 公式 role。
     # 论文对应：Table 2 的 T-⊓ 以及只有通信中断后继的第一条定时 ODE 规则。
     def test_external_choice_and_communication_only_ode_formula_set(self) -> None:
         """通信型 ODE 必须恰好生成 domain 与 safety 两类连续义务。"""
@@ -267,7 +280,7 @@ class Table2RuleContractTests(unittest.TestCase):
         )
         report = _check_one(
             process,
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             theta={"left": integer_channel, "right": integer_channel},
             state={"x": 0},
         )
@@ -294,7 +307,7 @@ class Table2RuleContractTests(unittest.TestCase):
     # 测试输入：有限 delay=1、演化域 x<1 且显式后接 skip 的 ODE。
     # 预期行为：存在自然后继，因此不生成 domain-invariant premise；改为生成
     #           safety 与精确边界 ``(t<d -> B) and (t=d -> not B)`` 两条义务。
-    # 检查内容：完整 Pool 签名、dL role，以及不存在 T-ODE-domain。
+    # 检查内容：两条候选的完整顺序证明记录，以及最终有效义务仅含 boundary。
     # 论文对应：Table 2 带 fallback 的第二条定时 ODE 规则。
     def test_finite_ode_with_fallback_has_exact_boundary_formula_set(self) -> None:
         """有限自然终止 ODE 必须选择 boundary，而不能沿用 domain premise。"""
@@ -309,9 +322,10 @@ class Table2RuleContractTests(unittest.TestCase):
         )
         report = _check_one(
             process,
-            gamma={"x": BasicType.REAL},
+            gamma={"x": ContinuousType()},
             state={"x": 0},
             path="x == 0",
+            dl_checker=_select_boundary_rule,
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
@@ -320,16 +334,31 @@ class Table2RuleContractTests(unittest.TestCase):
             (
                 ("T-sigma", "state"),
                 ("T-ODE-safety", "dl"),
+                ("T-ODE-domain", "dl"),
+                ("T-ODE-safety", "dl"),
                 ("T-ODE-boundary", "dl"),
             ),
+        )
+        self.assertEqual(
+            tuple(item.active for item in report.obligations),
+            (True, False, False, True, True),
         )
         ode_roles = tuple(
             obligation.formula.role
             for obligation in report.obligations
             if obligation.kind == "dl"
         )
-        self.assertEqual(ode_roles, ("safety", "boundary"))
-        boundary_source = report.obligations[2].formula.source
+        self.assertEqual(
+            ode_roles,
+            ("safety", "domain", "safety", "boundary"),
+        )
+        active_ode_roles = tuple(
+            obligation.formula.role
+            for obligation in report.obligations
+            if obligation.kind == "dl" and obligation.active
+        )
+        self.assertEqual(active_ode_roles, ("safety", "boundary"))
+        boundary_source = report.obligations[4].formula.source
         # KeYmaera X 打印器把 ``t < 1`` 规范成等价的 ``1 > t``，而
         # ``t = 1`` 可能打印成 ``1 = t``；两部分必须同时保留。
         self.assertIn("1 >", boundary_source)
@@ -340,7 +369,7 @@ class Table2RuleContractTests(unittest.TestCase):
     #           顶层配置。递归 invariant 使用默认 true。
     # 预期行为：递归产生 T-mu、T-X 两条蕴含；每个 configuration 各产生一条
     #           T-sigma 状态义务；T-parallel 本身不额外产生逻辑公式。
-    # 检查内容：递归和并行两组完整 Pool 签名及相应规则轨迹。
+    # 检查内容：递归和并行两组完整证明记录签名及相应规则轨迹。
     # 论文对应：Table 2 的 T-mu、T-X、T-sigma 和 T-parallel。
     def test_recursion_configuration_and_parallel_formula_sets(self) -> None:
         """递归边界与配置状态是最后四条规则中仅有的逻辑义务。"""
