@@ -11,6 +11,7 @@ r"""Section 4.1/4.2 行为类型 AST 的规范化与构造边界测试。
 7. 全部规范时延节点参与递归类型的 alpha 等价比较。
 8. ``BehavioralType``、``ConfigurationType``、``ProcessType`` 和
    ``AngelicType`` 抽象层不能被直接实例化。
+9. 嵌套选择、通信前缀、定时行为和并行组合的文本输出具有无歧义括号。
 
 论文对应
 --------
@@ -276,6 +277,86 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
         )
         self.assertTrue(types_equivalent(left, right))
         self.assertFalse(types_equivalent(left, changed))
+
+
+class TypeRenderingTests(unittest.TestCase):
+    """固定面向用户的类型文本结构，防止嵌套运算再次产生视觉歧义。"""
+
+    # 测试输入：输入前缀的后继是内部选择，两个内部选择分支均为输出前缀。
+    # 预期行为：输入前缀括住整个内部选择，每个输出前缀也括住自己的后继。
+    # 检查内容：输出不能被误读成 ``(in?.left!.0) \sqcup right!.0``。
+    # 论文对应：通信前缀 ``ch?.T`` 的作用域覆盖完整后继类型 ``T``。
+    def test_communication_prefix_parenthesizes_complete_continuation(self) -> None:
+        """通信后继中的选择必须明确属于该通信前缀。"""
+
+        value = InputType(
+            "in",
+            InternalChoiceType(
+                (
+                    OutputType("left", EndType()),
+                    OutputType("right", EndType()),
+                )
+            ),
+        )
+
+        self.assertEqual(
+            str(value),
+            r"in?.((left!.(0)) \sqcup (right!.(0)))",
+        )
+
+    # 测试输入：双通信分支的完整定时选择，其正常到时后继又是内部选择。
+    # 预期行为：\unrhd 右侧的整个 A 与 \triangleright 右侧的整个 T 分别加括号。
+    # 检查内容：外部选择的每条通信分支也各自具有清晰边界。
+    # 论文对应：``delay(d) \unrhd A \triangleright T`` 的 A/T 是两个独立子树。
+    def test_timed_type_parenthesizes_choices_and_fallback(self) -> None:
+        """完整定时类型应直接显露 choices 与 fallback 的 AST 边界。"""
+
+        choices = ExternalChoiceType(
+            (
+                InputType("reset", EndType()),
+                OutputType("alarm", EndType()),
+            )
+        )
+        fallback = InternalChoiceType(
+            (
+                OutputType("left", EndType()),
+                OutputType("right", EndType()),
+            )
+        )
+
+        self.assertEqual(
+            str(TimedExternalChoiceType(2, choices, fallback)),
+            r"delay(2) \unrhd ((reset?.(0)) \sqcap (alarm!.(0))) "
+            r"\triangleright ((left!.(0)) \sqcup (right!.(0)))",
+        )
+        self.assertEqual(
+            str(CommunicationTimeoutType(2, choices)),
+            r"delay(2) \unrhd ((reset?.(0)) \sqcap (alarm!.(0)))",
+        )
+
+    # 测试输入：左分量为递归内部选择，右分量为带输出后继的纯等待。
+    # 预期行为：mu 体、内部选择分支、delay 后继和每个并行分量均有明确括号。
+    # 检查内容：同时固定递归、时延和并行三种外层构造的组合显示。
+    # 论文对应：mathcal T 的两个分量分别保存完整的过程类型 T。
+    def test_parallel_type_parenthesizes_complete_components(self) -> None:
+        """并行竖线两侧必须能直接看出各自完整的配置子树。"""
+
+        recursive = MuType(
+            "t",
+            InternalChoiceType(
+                (
+                    InputType("ch", TypeVar("t")),
+                    OutputType("stop", EndType()),
+                )
+            ),
+        )
+        delayed = PureDelayType(1, OutputType("done", EndType()))
+
+        self.assertEqual(
+            str(ParallelType((recursive, delayed))),
+            r"(mu t.((ch?.(t)) \sqcup (stop!.(0)))) "
+            r"| (delay(1).(done!.(0)))",
+        )
 
 
 if __name__ == "__main__":

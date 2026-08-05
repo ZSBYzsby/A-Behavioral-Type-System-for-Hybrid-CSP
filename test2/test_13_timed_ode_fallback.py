@@ -1,7 +1,7 @@
 """单样例 13：有限 ODE 同时具有通信分支和自然到时后继。
 
 测试内容：验证 alarm 中断与 done 公共 tail 组合为完整定时外部选择。
-预期结果：``TimedExternalChoiceType(1, alarm!.done!.0, done!.0)``。
+预期结果：``TimedExternalChoiceType(1, alarm!.(done!.(0)), done!.(0))``。
 论文对应：Table 2 第二条有限 T-unrhd-prime 规则。
 """
 

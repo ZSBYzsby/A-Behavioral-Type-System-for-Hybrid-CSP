@@ -158,7 +158,8 @@ assert ode.local_clock.derivative == Literal(1)
 
 在一个 ODE 的方程右端、演化域和 `safety` 中，保留名 `t` 直接表示该 ODE
 隐式时钟的当前值；上例的 Gamma 只需声明 `x: ContinuousType()`，不需要声明
-或初始化 `t`。
+或初始化 `t`。匹配 Gamma 连续向量时只读取用户写在 `ODE.eqs` 左侧的变量，
+自动添加的 `t` 不属于该向量。
 这个默认例子的 domain/safety 都是 `true`，所以纯通信中断、无自然后继的
 ODE 可直接生成 type `delay(5).(\bot)`。若 ODE 后还有顺序后继，则会按论文
 生成精确 boundary 义务，未配置 KeYmaera X 时总体判定保守显示 `unknown`。
@@ -363,8 +364,8 @@ path_condition=...)`：局部 Gamma 必须两两不交、类型与全局 Gamma �
 ODE 与递归批注不再通过第二个映射覆盖，而是直接位于
 `Configuration.process` 的 AST 中。这保证审计时一个进程只有一份批注来源。
 
-Gamma 显式区分两类标量变量：普通变量写成 ``BasicType``，连续变量写成
-``ContinuousType()``。例如：
+Gamma 显式区分普通标量变量和连续向量的标量分量：普通变量写成
+``BasicType``，单元素连续向量写成 ``ContinuousType()``。例如：
 
 ```python
 gamma = {
@@ -374,12 +375,27 @@ gamma = {
 }
 ```
 
-``ContinuousType`` 是论文连续向量类型在项目字符串键 Gamma 上的逐标量投影，
-不是普通值的另一种数值精度，也不是 tuple。读取 ``x``、给 ``x`` 赋值或通过
-输入更新 ``x`` 时，其当前值仍按 ``Real`` 检查，并且连续类别标记会被保留；
-只有 ODE 方程左端额外要求该标记。普通 ``BasicType.REAL`` 参数仍可出现在
-导数右端、演化域和 safety 中。ODE 的隐藏局部时钟 ``t`` 由节点自行管理，
-不进入 Gamma。
+多分量连续向量必须显式声明成员，并把同一个声明登记到每个标量键：
+
+```python
+vehicle_trajectory = ContinuousType(
+    variables=("p", "v", "a"),
+    phi="p <= destination and v <= vmax",
+)
+gamma = {
+    "p": vehicle_trajectory,
+    "v": vehicle_trajectory,
+    "a": vehicle_trajectory,
+}
+```
+
+``ContinuousType`` 不是普通值的另一种数值精度，也不是 tuple 值。读取、赋值
+或通信更新一个分量时，其当前值仍按 ``Real`` 检查，并且完整连续声明被保留；
+只有 ODE 方程左端额外要求连续标记。声明中的 ``phi`` 仅在 ODE 用户方程左侧
+向量与 ``variables`` 按顺序精确相等时进入 dL 安全目标：子集、超集和不同顺序
+都不触发该性质。普通 ``BasicType.REAL`` 参数仍可出现在导数右端、演化域和
+safety 中。ODE 的隐藏局部时钟 ``t`` 由节点自行管理，不进入 Gamma，也不参与
+连续向量匹配。
 
 返回 `CheckReport`：
 

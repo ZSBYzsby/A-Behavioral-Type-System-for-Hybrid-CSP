@@ -230,8 +230,8 @@ class InputType(AngelicType):
             raise TypeError("Input type continuation must be a process type T")
 
     def __str__(self) -> str:
-        """按论文通信前缀记号打印输入类型。"""
-        return f"{self.channel}?.{self.continuation}"
+        """打印输入前缀，并用括号明确标出它所支配的完整后继类型。"""
+        return f"{self.channel}?.({self.continuation})"
 
 
 # --------------------------------------------------------------------------
@@ -255,8 +255,8 @@ class OutputType(AngelicType):
             raise TypeError("Output type continuation must be a process type T")
 
     def __str__(self) -> str:
-        """按论文通信前缀记号打印输出类型。"""
-        return f"{self.channel}!.{self.continuation}"
+        """打印输出前缀，并用括号明确标出它所支配的完整后继类型。"""
+        return f"{self.channel}!.({self.continuation})"
 
 
 # 论文对应：A 递归产生式中可以追加的 ch?.T 或 ch!.T 分支。
@@ -292,8 +292,8 @@ class ExternalChoiceType(AngelicType):
         object.__setattr__(self, "branches", items)
 
     def __str__(self) -> str:
-        r"""使用 ``\sqcap`` 连接全部通信分支。"""
-        return r" \sqcap ".join(str(branch) for branch in self.branches)
+        r"""使用 ``\sqcap`` 连接全部通信分支，并分别括住每个分支。"""
+        return r" \sqcap ".join(f"({branch})" for branch in self.branches)
 
 
 # 论文对应：A ::= 0 | A \sqcap ch?.T | A \sqcap ch!.T 的规范化构造入口。
@@ -417,8 +417,8 @@ class CommunicationTimeoutType(ProcessType):
         object.__setattr__(self, "choices", choices)
 
     def __str__(self) -> str:
-        """使用论文无正常后继的通信超时缩写。"""
-        return f"delay({self.duration}) \\unrhd {self.choices}"
+        """显示通信超时缩写，并用括号标出完整的通信选择 ``A``。"""
+        return f"delay({self.duration}) \\unrhd ({self.choices})"
 
 
 # 论文对应：完整的 delay(d) \unrhd A \triangleright T，其中 A 非空且 T != \bot。
@@ -454,10 +454,10 @@ class TimedExternalChoiceType(ProcessType):
         object.__setattr__(self, "fallback", fallback)
 
     def __str__(self) -> str:
-        """完整显示通信选择和正常到时后继。"""
+        """完整显示定时选择，并分别括住通信选择与正常到时后继。"""
         return (
-            f"delay({self.duration}) \\unrhd {self.choices} "
-            f"\\triangleright {self.fallback}"
+            f"delay({self.duration}) \\unrhd ({self.choices}) "
+            f"\\triangleright ({self.fallback})"
         )
 
 

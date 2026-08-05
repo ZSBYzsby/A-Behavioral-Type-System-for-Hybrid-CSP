@@ -24,7 +24,7 @@ class IfCommonTailExample(unittest.TestCase):
     """检查条件分支对公共 continuation 的传播。"""
 
     # 测试输入：flag:Bool；then 输出 left，else 输出 right，之后统一输出 done。
-    # 预期行为：得到 (left!.done!.0) sqcup (right!.done!.0)。
+    # 预期行为：显示为 (left!.(done!.(0))) sqcup (right!.(done!.(0)))。
     # 预期类型：InternalChoiceType((
     #     OutputType("left", OutputType("done", EndType())),
     #     OutputType("right", OutputType("done", EndType()))))。

@@ -25,7 +25,7 @@ class InputRefinementContinuationExample(unittest.TestCase):
     """检查输入 refinement 被加入通信后继的路径事实。"""
 
     # 测试输入：{eta:Int | eta>=0} 的 nonneg?x；随后 assert(x>=0); copy!x。
-    # 预期行为：T-In 替换 eta 为 x 后为断言提供事实，最终类型为 nonneg?.copy!.0。
+    # 预期行为：T-In 替换 eta 为 x 后为断言提供事实，最终显示为 nonneg?.(copy!.(0))。
     # 预期类型：InputType("nonneg", OutputType("copy", EndType()))。
     # 检查内容：输入/输出前缀和 T-Assert、T-Out 两类具体证明义务。
     # 论文对应：T-In 的 refinement 假设进入 continuation judgment。

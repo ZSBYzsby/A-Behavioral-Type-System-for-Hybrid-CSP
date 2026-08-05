@@ -97,11 +97,40 @@ ODE 左端可演化变量必须使用：
 ContinuousType()
 ```
 
+Definition 4.1 中连续类型还带有轨迹性质 \(\phi\)。非平凡性质使用：
+
+```python
+ContinuousType(phi="x >= 0")
+```
+
+若一个连续向量由多个标量组成，例如 \((p,v,a)\)，必须显式记录有序成员。项目
+仍按标量名索引 Gamma，所以把同一个不可变声明登记到每个分量键：
+
+```python
+trajectory = ContinuousType(
+    variables=("p", "v", "a"),
+    phi="phi_p and phi_v",
+)
+{
+    "p": trajectory,
+    "v": trajectory,
+    "a": trajectory,
+}
+```
+
+环境规范化要求显式向量的所有成员都存在并保存完全相同的声明，缺少成员或
+成员顺序/`phi` 不一致都会直接报错。T-ODE 只在用户写出的 ODE 左侧向量与
+`variables` 按顺序精确相等时验证该 `phi`；子集、超集和不同顺序均不触发。
+匹配到的性质不会进入 dL 连续程序的演化域充当假设，而是与 ODE 节点自己的
+safety 一同出现在后置安全目标中。
+
 `ContinuousType()` 与 `BasicType.REAL` 在 Gamma 中不相等，但连续变量的当前值
-仍翻译为实数。换句话说，它在代码中同时承担两项信息：
+仍翻译为实数。换句话说，它在代码中同时承担四项信息：
 
 - 当前值的基础类型是 `Real`；
-- 该变量有资格出现在 ODE 方程左端。
+- 该变量有资格出现在 ODE 方程左端；
+- `variables` 标识性质所属的完整连续向量；
+- `phi` 是该完整向量精确参与一次 ODE 时必须始终满足的状态空间性质。
 
 普通 `BasicType.REAL` 可以出现在 ODE 导数右端、演化域和 safety 中，但不能
 出现在 ODE 左端。
@@ -268,6 +297,10 @@ premise 只有两类：
 2. 同名项必须与全局项完全相等，包括普通 `Real` 与 `ContinuousType()` 的区别；
 3. 任意两个分量的 Gamma 定义域不相交；
 4. 全部局部 Gamma 的定义域并集精确覆盖全局 Gamma。
+
+显式连续向量在自动并行分区中是不可拆分的状态单元：某个配置使用任一成员时，
+完整向量都归该配置所有。两个并行配置分别使用同一向量的不同成员会因 Gamma
+重叠而被拒绝。
 
 局部路径条件要么所有 configuration 都提供，要么都不提供。若使用局部路径，
 外层路径必须是默认 `true`。
@@ -565,10 +598,12 @@ communication; P; ODE 外层 tail
 4. 每个导数表达式必须是数值类型；
 5. 演化域 `B` 必须是 Bool；
 6. safety `S` 必须是 Bool；
-7. 导数、`B`、`S` 的偏表达式有定义条件被收集。
+7. 与 ODE 用户左侧向量精确匹配的 `ContinuousType.phi` 必须是 Bool；
+8. 导数、`B`、`S` 和匹配连续 `phi` 的偏表达式有定义条件被收集。
 
 源表达式中的名字 `t` 在本 ODE 的导数右端、`B` 和 `S` 中被局部时钟遮蔽，
-不会读取同名 Gamma 项。
+不会读取同名 Gamma 项。该时钟只在 dL 动力系统构造阶段追加，不进入上述
+连续向量精确匹配。
 
 任一静态检查失败时，不生成 dL 义务，也不生成任何时延 Type AST。
 
@@ -596,11 +631,29 @@ x_i^0=\rho(x_i).
 Pre=\Phi\land\bigwedge_i(x_i^0=\rho(x_i))\land(\tau=0).
 \]
 
-用于证明的无域动力系统是：
+基础动力系统是：
 
 \[
 F^*=\{\dot x_1^0=e_1,\ldots,\dot x_n^0=e_n,\dot\tau=1\}.
 \]
+
+令 ODE 用户方程左侧的有序向量为
+
+\[
+V_{ODE}=(x_1,\ldots,x_n).
+\]
+
+检查器在 Gamma 中寻找 `variables`（省略时为所在键的单元素向量）恰好等于
+\(V_{ODE}\) 的 `ContinuousType` 声明。设匹配声明的互异性质合取为
+\(\Phi_\Gamma\)，其有定义条件为 \(D_\Gamma\)；没有精确匹配时二者均为
+`true`。当前 ODE 必须验证的 Gamma 连续条件为
+
+\[
+G_\Gamma=D_\Gamma\land\Phi_\Gamma.
+\]
+
+\(G_\Gamma\) 不进入 dL 程序域。dL 连续程序始终使用上面的无假设动力系统
+\(F^*\)，以免把待验证的连续条件预先假定为真。
 
 普通 ODE 的 delay 批注不会自动添加到演化域。只有 `ODE.wait(d)` 的私有
 `local_clock_deadline` 会把实际域扩展为：
@@ -611,26 +664,27 @@ B^*=B\land\tau<d.
 
 ### 9.3 safety dL 义务
 
-记 \(D_F,D_B,D_S\) 分别为导数、域表达式和 safety 表达式的有定义条件。
+记 \(D_F,D_B,D_S\) 分别为导数、源演化域表达式和节点 safety 的有定义条件。
+Gamma 连续条件与节点 safety 在同一条 dL 义务中共同接受检查。
 
 在没有走本地恒真捷径时，有限 delay 实际生成：
 
 \[
 Pre\Rightarrow[F^*]
-(\tau\le d\Rightarrow(D_F\land D_B\land D_S\land S)).
+(\tau\le d\Rightarrow(D_F\land D_B\land D_S\land S\land G_\Gamma)).
 \]
 
 在没有走本地恒真捷径时，无限 delay 实际生成：
 
 \[
-Pre\Rightarrow[F^*](D_F\land D_B\land D_S\land S).
+Pre\Rightarrow[F^*](D_F\land D_B\land D_S\land S\land G_\Gamma).
 \]
 
-注意 dL 程序 `F*` 本身不带演化域；`B` 只通过其有定义性间接出现在 safety
-后置条件中，而不是作为程序域限制。
+注意 Gamma 连续条件和待验证的源演化域 `B` 都不会进入 dL 程序域；前者作为
+安全目标接受证明，后者只通过其有定义性间接出现在 safety 后置条件中。
 
 若规则层用于捷径判断的公式
-\(D_F\land D_S\land S\) 语法化简为 true，则该义务直接记为 true，不调用
+\(D_F\land D_S\land S\land G_\Gamma\) 语法化简为 true，则该义务直接记为 true，不调用
 KeYmaera X；这一步的捷径判断没有包含 \(D_B\)。只有未走捷径、真正建立 dL
 公式时，后置条件才按上式包含 \(D_B\)。无法翻译为受支持 dL 子集时，保存
 `UntranslatedDLFormula`，通常由后端产生 unknown。
@@ -675,8 +729,11 @@ ODE 的 dL 证明义务不直接计算解析解。离开 ODE 时，代码把每�
 \[
 \widehat B=Def(B(post))\land B(post),
 \qquad
-\widehat S=Def(S(post))\land S(post).
+\widehat S=Def(S(post))\land S(post)\land G_\Gamma(post).
 \]
+
+这里把已经由同一条 dL 安全义务证明的节点 safety 与 Gamma 连续条件在 ODE
+结束/中断时刻的实例一起交给后继；二者都不是未经检查的路径假设。
 
 三种情况分别为：
 
@@ -920,7 +977,7 @@ InputType("ch", OutputType("ch", EndType()))
 显示为：
 
 ```text
-ch?.ch!.0
+ch?.(ch!.(0))
 ```
 
 ### 14.2 `x := x + 1; ch!x`
@@ -935,7 +992,7 @@ T-Out 对 `x` 的读取直接得到 `x0+1`，因此 refinement 证明使用更�
 赋值本身不产生行为前缀，最终类型只保留：
 
 ```text
-ch!.0
+ch!.(0)
 ```
 
 ### 14.3 `if B then ch1!0 else ch2!0`

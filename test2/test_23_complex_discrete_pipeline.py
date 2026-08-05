@@ -28,7 +28,7 @@ class ComplexDiscretePipelineExample(unittest.TestCase):
 
     # 测试输入：x 自增；按 x>=0 分支输出 positive，或 reset?y 后重置 x 并输出 negative；
     #           最后两个分支都输出 audit!x。
-    # 预期行为：类型为 positive!.audit!.0 与 reset?.negative!.audit!.0 的内部选择。
+    # 预期行为：类型为 positive!.(audit!.(0)) 与 reset?.(negative!.(audit!.(0))) 的内部选择。
     # 预期类型：InternalChoiceType((OutputType("positive", OutputType("audit", EndType())),
     #     InputType("reset", OutputType("negative", OutputType("audit", EndType())))))。
     # 检查内容：赋值不可观察性、输入绑定、分支结构、公共 tail 和多条 T-Out 义务。

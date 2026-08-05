@@ -1,164 +1,289 @@
-"""手动试验 HCSP 进程到行为类型的转换结果。
+"""论文 Section 5 Case Study：构造 Process AST 并生成 Type AST。
 
-本文件不是自动化单元测试，因此文件名故意不以 ``test_`` 开头。用户只需修改
-``build_case()`` 中的硬编码进程和环境，然后在项目根目录运行：
+在项目根目录运行：
 
     python -B tests/tmp.py
 
-脚本会依次显示 Process AST、总体判定、可读 Type、Type AST、规则原始公式、
-证明器实际输入、判定证据、遗留义务和诊断。如果进程在 AST 构造阶段违反
-Assumption 2.1/2.2，异常也会直接显示出来。
+本文件只做两件事：
+
+1. 用项目的 AST 构造器写出 ``Vehicle || Controller``；
+2. 调用 ``check_hcsp``，打印生成的行为 Type AST。
+
+论文案例与项目当前语法之间有两处必要的表示调整：
+
+* 论文的 ``stop?``/``stop!`` 是 unit 通信；项目要求每次通信至少携带一个
+  标量，所以这里用 ``stop?(stop_signal)``/``stop!(0)`` 表示同一控制事件。
+* 论文把 ``dh?... [] stop?...`` 事件选择接在 ``ch!(p,v)`` 后面；项目严格
+  区分 Process 和 EventReaction，因此用一个无限等待、无用户状态方程的 ODE
+  承载该事件选择。它不会改变用户状态，生成的通信行为类型与论文一致。
+
+案例产生的 dL 前提必须由本机 KeYmaera X 实际证明。只要任何证明义务返回
+``false`` 或 ``unknown``，类型推导就会停止并打印部分推导报告；只有全部
+证明义务均为 ``true`` 时，程序才输出正式 Type AST。
 """
 
 from __future__ import annotations
 
+import math
 import sys
+from fractions import Fraction
 from pathlib import Path
-from typing import Any, Callable
 
-# 支持直接执行 ``python tests/tmp.py``。直接执行时 Python 默认只把 tests/
-# 放入模块搜索路径，因此这里显式加入项目根目录，以便导入 hcsp_typechecker。
+# 允许直接执行 ``python -B tests/tmp.py``。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from hcsp_typechecker import (  # noqa: E402  (项目根目录在上面加入搜索路径)
+from hcsp_typechecker import (  # noqa: E402
+    Assign,
     BasicType,
     ChannelType,
     Configuration,
+    ContinuousType,
+    EventChoice,
+    HCSP,
+    If,
     InputChannel,
+    Mu,
+    ODE,
+    ODEAnnotation,
     OutputChannel,
+    Parallel,
+    Process,
+    RecursionAnnotation,
     Sequence,
+    Skip,
+    Var,
     check_hcsp,
 )
 
 
-# ============================================================================
-#                              手动修改区域
-# ============================================================================
+# Section 5 中的符号参数在这个可运行示例中的具体取值。
+DESTINATION = 10
+MAX_VELOCITY = 4
+MIN_ACCELERATION = -2
+MAX_ACCELERATION = 2
+# 论文把本次 T-ODE 推导所需的 d 作为外部批注，并未固定具体数值。这里暂时取
+# d=0，以单独检查零延迟下的推导；使用 Fraction 保证车辆 ODE 批注、phi_a 的
+# 一步预测和控制器 wait(d) 读取的是同一个精确有理数。该取值没有实际控制周期。
+CONTROL_PERIOD = Fraction(0, 1)
 
-def build_case() -> tuple[
-    dict[str, Any],
-    dict[str, Any],
-    dict[str, Any],
-    Any,
-    str,
-    Callable[[], Any],
-]:
-    """返回环境、源程序文本和延迟执行的 Process AST 构造函数。
+BRAKING_DISTANCE = 4  # vmax^2 / (-2*amin) = 16 / 4。
+BRAKING_FACTOR = 4  # -2*amin。
 
-    修改下面的环境、源文本和构造函数即可测试其他例子。当前案例是
-    ``ch!x; ch?x``：先从
-    ``ch`` 发送当前 ``x``，随后再从同一通道接收一个值并绑定为 ``x``。
 
-    Process 使用延迟构造，使 ``main()`` 能在 Assumption 2.1/2.2 报错之前
-    先打印完整输入。修改案例时，应同步修改 ``source_text`` 和
-    ``build_process()``。
+def velocity_safety(position: str, velocity: str) -> str:
+    """构造最大速度保护曲线 phi_v。
+
+    论文把到达终点、远离终点和接近终点描述为三个互斥位置区域；这里用
+    ``or`` 拼合三个区域。接近终点区域中的平方形式与论文的平方根上界等价，
+    但更适合项目当前的一阶逻辑/dL 表达式前端。
     """
 
-    # 第一个输出需要读取 x，因此必须在 Gamma 和初始状态中声明它。注意：
-    # Gamma 声明不会改变 process 层的自由/绑定变量集合；后面的 ch?x 仍会
-    # 按 Section 2.1/Assumption 2.1 把 x 记为绑定变量。
-    gamma = {
-        "x": BasicType.REAL,
-    }
-    theta = {
-        # 输入和输出使用同一个一槽 Real 通道；refinement=true，不额外限制值。
-        "ch": ChannelType(BasicType.REAL),
-    }
-
-    initial_state = {
-        "x": 0,
-    }
-    path_condition = "x == 0"
-
-    # 论文记法概要：
-    #   ch!x; ch?x
-    #
-    source_text = "ch!x; ch?x"
-
-    # 按当前项目保留的 Assumption 2.1：第一个 ch!x 自由使用 x，后一个 ch?x
-    # 又把 x 作为输入绑定变量，因此整个进程同时具有 x in fv(P) 和 x in bv(P)。
-    # 该交集非空，Sequence 构造时应直接报错，而不会生成行为类型。
-    def build_process() -> Any:
-        """在输入信息打印完成后构造当前手写 Process AST。"""
-
-        return Sequence.of(
-            OutputChannel("ch", "x"),
-            InputChannel("ch", "x"),
-        )
-
+    remaining = f"({DESTINATION} - ({position}))"
     return (
-        gamma,
-        theta,
-        initial_state,
-        path_condition,
-        source_text,
-        build_process,
+        f"((({position}) >= {DESTINATION} and ({velocity}) <= 0) or "
+        f"({remaining} >= {BRAKING_DISTANCE} and "
+        f"({velocity}) <= {MAX_VELOCITY}) or "
+        f"(0 < {remaining} and {remaining} < {BRAKING_DISTANCE} and "
+        f"(({velocity}) <= 0 or "
+        f"({velocity}) * ({velocity}) <= {BRAKING_FACTOR} * {remaining})))"
     )
 
 
-# ============================================================================
-#                            以下通常无需修改
-# ============================================================================
-def main() -> int:
-    """构造手写案例、调用公共检查入口并完整打印审计结果。"""
+def acceleration_safety(
+    position: str,
+    velocity: str,
+    acceleration: str,
+) -> str:
+    """构造一个控制周期之后仍位于速度保护曲线内的公式 phi_a。"""
 
-    # 详细报告可能包含论文/dL 常用的 Unicode 符号（例如 ¬、∧、≤）。Windows
-    # 终端继承的旧式 GBK 编码无法表示其中部分字符，因此在手动入口显式使用
-    # UTF-8；errors="backslashreplace" 保证极端终端环境下也不会因打印而丢报告。
+    predicted_position = (
+        f"(({position}) + ({velocity}) * {CONTROL_PERIOD} + "
+        f"({acceleration}) * {CONTROL_PERIOD} ** 2 / 2)"
+    )
+    predicted_velocity = (
+        f"(({velocity}) + ({acceleration}) * {CONTROL_PERIOD})"
+    )
+    return (
+        f"({velocity_safety(predicted_position, predicted_velocity)} and "
+        f"{MIN_ACCELERATION} <= ({acceleration}) and "
+        f"({acceleration}) <= {MAX_ACCELERATION})"
+    )
+
+
+POSITION_SAFETY = f"p <= {DESTINATION}"
+VELOCITY_SAFETY = velocity_safety("p", "v")
+ACCELERATION_SAFETY = acceleration_safety("p", "v", "a")
+ODE_SAFETY = f"({POSITION_SAFETY}) and ({VELOCITY_SAFETY})"
+LOOP_INVARIANT = (
+    f"({POSITION_SAFETY}) and "
+    f"({VELOCITY_SAFETY}) and "
+    f"({ACCELERATION_SAFETY})"
+)
+
+
+def build_vehicle() -> Process:
+    """构造 Section 5 的 Vehicle Process AST。"""
+
+    # 接收 a' 之后执行论文中的安全检查 phi_a{a'/a}。
+    received_acceleration_is_safe = acceleration_safety(
+        "p",
+        "v",
+        "new_acc",
+    )
+
+    # ch!(p,v) 之后，车辆在 dh?new_acc 与 stop? 之间作外部选择。
+    decision_wait = ODE(
+        [],
+        True,
+        EventChoice.of(
+            (
+                InputChannel("dh", "new_acc"),
+                Sequence.of(
+                    If(
+                        received_acceleration_is_safe,
+                        Assign("a", "new_acc"),
+                        Assign("a", MIN_ACCELERATION),
+                    ),
+                    Var("X"),
+                ),
+            ),
+            (InputChannel("stop", "stop_signal"), Skip()),
+        ),
+        annotation=ODEAnnotation(safety=ODE_SAFETY, delay=math.inf),
+    )
+
+    # 车辆动力学：p'=v, v'=a, a'=0；在一个控制周期内随时可输出 (p,v)。
+    continuous_motion = ODE(
+        [("p", "v"), ("v", "a"), ("a", 0)],
+        True,
+        EventChoice.of(
+            (OutputChannel("ch", ("p", "v")), decision_wait),
+        ),
+        annotation=ODEAnnotation(
+            safety=ODE_SAFETY,
+            delay=CONTROL_PERIOD,
+        ),
+    )
+
+    loop = Mu(
+        "X",
+        continuous_motion,
+        annotation=RecursionAnnotation(LOOP_INVARIANT),
+    )
+    return Sequence.of(
+        Assign("p", 0),
+        Assign("v", 0),
+        Assign("a", 0),
+        loop,
+    )
+
+
+def build_controller() -> Process:
+    """构造 Section 5 的 Controller Process AST。"""
+
+    # accelerate / coast / decelerate 三层控制策略。
+    choose_acceleration = If(
+        acceleration_safety("x", "y", str(MAX_ACCELERATION)),
+        Assign("command", MAX_ACCELERATION),
+        If(
+            acceleration_safety("x", "y", "0"),
+            Assign("command", 0),
+            Assign("command", MIN_ACCELERATION),
+        ),
+    )
+
+    body = Sequence.of(
+        InputChannel("ch", ("x", "y")),
+        If(
+            "y >= 0",
+            Sequence.of(
+                choose_acceleration,
+                OutputChannel("dh", "command"),
+                ODE.wait(CONTROL_PERIOD),
+                Var("Y"),
+            ),
+            OutputChannel("stop", 0),
+        ),
+    )
+    return Mu("Y", body, annotation=RecursionAnnotation(True))
+
+
+def main() -> int:
+    """构造 Process AST，经本机证明所有前提后打印 Type AST。"""
+
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
-    try:
-        (
-            gamma,
-            theta,
-            initial_state,
-            path_condition,
-            source_text,
-            process_builder,
-        ) = build_case()
-    except Exception as exc:  # 手动脚本需要把构造期拒绝直接展示给用户。
-        print("=== 手动案例定义失败 ===")
-        print(f"{type(exc).__name__}: {exc}")
+    vehicle = build_vehicle()
+    controller = build_controller()
+    system: HCSP = Parallel.of(vehicle, controller)
+
+    # Definition 4.1 中 (p,v,a): R>=0 -> (phi_p and phi_v)。Gamma 的 Python
+    # 映射仍按标量名索引，所以三个键登记同一个显式向量声明；只有 ODE 用户
+    # 左侧恰好为 (p,v,a) 时，T-ODE 才把该 phi 加入 dL 后置安全目标。隐式时钟
+    # t 由 ODE 自己追加，不属于这里的向量成员。
+    vehicle_trajectory = ContinuousType(
+        variables=("p", "v", "a"),
+        phi=ODE_SAFETY,
+    )
+    vehicle_gamma = {
+        "p": vehicle_trajectory,
+        "v": vehicle_trajectory,
+        "a": vehicle_trajectory,
+    }
+    controller_gamma = {"command": BasicType.REAL}
+    gamma = {**vehicle_gamma, **controller_gamma}
+    theta = {
+        "ch": ChannelType(
+            (BasicType.REAL, BasicType.REAL),
+            binders=("position", "velocity"),
+        ),
+        "dh": ChannelType(
+            BasicType.REAL,
+            refinement=(
+                f"{MIN_ACCELERATION} <= eta and "
+                f"eta <= {MAX_ACCELERATION}"
+            ),
+        ),
+        "stop": ChannelType(BasicType.INT, refinement="eta == 0"),
+    }
+
+    # T-parallel 分别检查两个局部配置，再组合成 ParallelType。
+    configurations = (
+        Configuration({}, vehicle, gamma=vehicle_gamma, name="Vehicle"),
+        Configuration(
+            {},
+            controller,
+            gamma=controller_gamma,
+            name="Controller",
+        ),
+    )
+
+    print("=== Section 5 Process AST ===")
+    print(f"Vehicle   : {vehicle!r}")
+    print(f"Controller: {controller!r}")
+    print(f"System    : {system!r}")
+
+    report = check_hcsp(
+        gamma=gamma,
+        theta=theta,
+        configurations=configurations,
+        path_condition=True,
+    )
+
+    print("\n=== Generated Type AST ===")
+    if report.inferred_type is None:
+        print("Type generation stopped because a premise was not proved.")
+        print()
+        print(report.format_detailed())
         return 1
 
-    print("=== 输入 ===")
-    print(f"HCSP source   : {source_text}")
-    print(f"Gamma         : {gamma!r}")
-    print(f"Theta         : {theta!r}")
-    print(f"Initial state : {initial_state!r}")
-    print(f"Path condition: {path_condition!r}")
-
-    try:
-        process = process_builder()
-    except Exception as exc:
-        print("Process AST   : <构造失败>")
-        print("\n=== Process AST 构造失败 ===")
-        print(f"{type(exc).__name__}: {exc}")
-        return 1
-
-    print(f"Process AST   : {process!r}")
-
-    try:
-        report = check_hcsp(
-            gamma=gamma,
-            theta=theta,
-            configurations=[Configuration(initial_state, process)],
-            path_condition=path_condition,
-        )
-    except Exception as exc:
-        print("\n=== 类型检查调用失败 ===")
-        print(f"{type(exc).__name__}: {exc}")
-        return 1
-
-    # CheckReport 统一负责详细展示，避免每个调用方各自遗漏规则轨迹、证明义务
-    # 或 unknown/false 的解释。结构化字段仍然可以用于程序化审计。
-    print()
-    print(report.format_detailed())
-
-    return 0 if report.passed else 1
+    print(repr(report.inferred_type))
+    print("\n=== Readable Type ===")
+    print(report.inferred_type)
+    return 0
 
 
 if __name__ == "__main__":

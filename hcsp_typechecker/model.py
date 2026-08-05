@@ -41,9 +41,12 @@ Section 4.1 的行为类型 ``T``、angelic type ``A`` 和 Section 4.2 的组合
 
 Definition 4.1 的 ``Gamma`` 同时描述值变量、递归变量和连续变量。本项目将其
 拆分：公开 ``TypingJudgment.gamma`` 用 ``BasicType`` 表示普通值变量，并用
-``ContinuousType`` 表示论文连续向量类型的逐标量投影；递归类型及边界不变量由
-``checker._Context.rec_env`` 和 ``Mu`` 批注保存。连续变量的向量场和 safety
-仍来自对应 ``ODE`` 节点，而变量类别本身不再由 ODE 左端临时猜测。``Theta``
+``ContinuousType`` 显式保存连续向量成员和轨迹必须持续满足的 ``phi``；由于
+Gamma 的 Python 映射仍按标量名索引，同一向量声明会登记在它的每个分量名下；
+递归类型及边界不变量由
+``checker._Context.rec_env`` 和 ``Mu`` 批注保存。连续变量的向量场仍来自对应
+``ODE`` 节点，T-ODE 会把节点 safety 与精确匹配该左侧向量的 Gamma 连续
+``phi`` 合并验证，而变量类别本身不再由 ODE 左端临时猜测。``Theta``
 则由 ``ChannelType`` 表示项目扩展后的 refinement type
 ``{(eta1:B1,...,etan:Bn) | phi}``；一槽情形退化为论文的
 ``{eta : B | phi}``。Table 2 的公式前提被记录为 ``ProofObligation``。
@@ -57,6 +60,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from .expressions import Expr, ExprLike, Literal, ensure_expr
 from .hcsp_type_ast import ConfigurationType as _ConfigurationType
 
 
@@ -187,25 +191,45 @@ def normalize_type(value: Any, *, subject: str = "Value type") -> BasicType:
 
 # --------------------------------------------------------------------------
 # 论文对应：Definition 4.1 的连续变量项
-#           ``underlined(v) : R_{>=0} partial-function R^|v|``。
+#           ``underlined(v) : R_{>=0} partial-function phi``。
 # 角色对应：在公开 Gamma 中显式区分连续实变量与同为 Real 的普通值变量。
-# 构造方式：ContinuousType() 或 ContinuousType(BasicType.REAL)。
-# 构造检查：当前 HCSP/dL 语义只允许实值连续轨迹，其他基础类型立即拒绝。
+# 构造方式：单变量写 ContinuousType()；非平凡轨迹性质写成
+#           ContinuousType(phi="x >= 0")；多变量向量写成
+#           ContinuousType(variables=("p", "v", "a"), phi=...)。
+# 构造检查：当前 HCSP/dL 语义只允许实值连续轨迹，其他基础类型立即拒绝；
+#           显式向量必须非空、成员互异且都是合法变量名；phi 在构造时立即转
+#           成项目 Expr，布尔类型和有效性只在左侧向量精确匹配的 T-ODE 检查。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ContinuousType:
-    """一个连续变量的轨迹类型及其当前值基础类型。
+    """一个连续向量的成员、当前值类型及持续性质 ``phi``。
 
     论文用一个向量项表示 ``v : R_{>=0} partial-function R^n``。项目的 Gamma
-    仍按标量变量名索引，因此把该向量类型逐分量表示为若干
-    ``name: ContinuousType()``。表达式读取变量时使用 ``value_type`` 所示的
-    当前值类型；T-ODE 则额外要求方程左端具有这个连续标记。
+    仍按标量变量名索引，因此同一个显式向量声明必须登记在它的每个成员名下。
+    例如 ``trajectory = ContinuousType(variables=("p", "v", "a"), phi=...)``
+    后，Gamma 的 ``p``、``v``、``a`` 三项都使用 ``trajectory``。省略
+    ``variables`` 时，声明表示由当前 Gamma 键确定的单元素向量，保留
+    ``{"x": ContinuousType(phi=...)}`` 的简洁写法。
+
+    表达式读取变量时使用 ``value_type`` 所示的当前 Real 值；T-ODE 额外要求
+    方程左端具有这个连续标记。只有 ODE 的用户方程左侧向量与 ``variables``
+    （或省略时的单元素向量）按顺序精确相等，``phi`` 才是该 ODE 必须验证的
+    轨迹条件。ODE 的隐式局部时钟不属于用户向量。构造 dL 义务时，匹配到的
+    ``phi`` 与节点 safety 一同进入后置目标，不能作为演化域中的已知假设。
     """
 
     value_type: BasicType = BasicType.REAL
+    variables: tuple[str, ...] | None = None
+    phi: Expr = Literal(True)
 
-    def __init__(self, value_type: Any = BasicType.REAL):
-        """建立连续实轨迹类型，并拒绝 Bool/离散数值轨迹。"""
+    def __init__(
+        self,
+        value_type: Any = BasicType.REAL,
+        *,
+        variables: Sequence[str] | None = None,
+        phi: ExprLike = True,
+    ):
+        """建立连续实向量类型，并规范化成员及全程状态性质 ``phi``。"""
 
         normalized = normalize_type(
             value_type,
@@ -217,11 +241,46 @@ class ContinuousType:
                 f"got {normalized}"
             )
         object.__setattr__(self, "value_type", normalized)
+        if variables is None:
+            normalized_variables = None
+        else:
+            if isinstance(variables, (str, bytes)):
+                raise TypeError(
+                    "Continuous vector variables must be a sequence of names, "
+                    "not one string"
+                )
+            normalized_variables = tuple(variables)
+            if not normalized_variables:
+                raise ValueError("Continuous vector variables must not be empty")
+            if any(
+                not isinstance(name, str) or not name.isidentifier()
+                for name in normalized_variables
+            ):
+                raise ValueError(
+                    "Continuous vector variables must be valid identifiers"
+                )
+            if len(set(normalized_variables)) != len(normalized_variables):
+                raise ValueError("Continuous vector variables must be distinct")
+        object.__setattr__(self, "variables", normalized_variables)
+        object.__setattr__(self, "phi", ensure_expr(phi))
+
+    def effective_variables(self, gamma_name: str) -> tuple[str, ...]:
+        """返回声明的正式向量；省略 ``variables`` 时使用当前 Gamma 键。"""
+
+        return self.variables if self.variables is not None else (gamma_name,)
 
     def __str__(self) -> str:
-        """按论文轨迹类型的标量形式显示连续变量声明。"""
+        """按 Definition 4.1 的 ``R>=0 -> phi`` 形式显示声明。"""
 
-        return "R>=0 ~> Real"
+        # phi=true 不增加约束，沿用已有的值域显示，避免详细报告把所有旧模型
+        # 误写成性质发生了变化；非平凡 phi 则显式展示 Definition 4.1 的性质。
+        if isinstance(self.phi, Literal) and self.phi.value is True:
+            rendered = "R>=0 ~> Real"
+        else:
+            rendered = f"R>=0 ~> ({self.phi})"
+        if self.variables is None:
+            return rendered
+        return rendered + " on (" + ", ".join(self.variables) + ")"
 
 
 # Gamma 项只允许普通基础类型或显式连续实轨迹类型。进程变量类型保存在
@@ -693,11 +752,13 @@ class CheckReport:
             "T-Out": "[T-Out]  phi => refinement{e/eta}",
             "T-ODE-safety": (
                 "[T-unrhd/T-unrhd-prime]  "
-                "(phi and t=0) => [ODE,t'=1](t<=d => safety)"
+                "(phi and t=0) => [ODE,t'=1]"
+                "(t<=d => (safety and GammaPhi))"
             ),
             "T-ODE-domain": "[T-unrhd]  phi => [ODE]B",
             "T-ODE-boundary": (
-                "[T-unrhd-prime]  (phi and t=0) => [ODE,t'=1]"
+                "[T-unrhd-prime]  (phi and t=0) => "
+                "[ODE,t'=1]"
                 "((t<d => B) and (t=d => not B))"
             ),
             "T-mu": "[T-mu]  phi => invariant",
@@ -738,11 +799,76 @@ class CheckReport:
         lines.append(f"     {label}:")
         lines.extend(f"       {line}" for line in formula_lines)
 
+    # 功能：按逻辑类别集中展示本次运行实际检查过的完整公式。
+    # 检查/模型关系：FOL 清单同时包含普通 Z3 有效性义务和 T-sigma 的状态
+    #                代入公式；dL 清单包含 ODE safety/domain/boundary。清单只
+    #                重排现有 ProofObligation，不重新化简、证明或改变 active。
+    def _append_formula_inventory(
+        self,
+        lines: list[str],
+        *,
+        title: str,
+        kinds: frozenset[str],
+        label: str,
+        empty_message: str,
+    ) -> None:
+        """把指定 proof kind 的证明器输入按 FOL/dL 类别显式列出。"""
+
+        selected = tuple(
+            (source_index, obligation)
+            for source_index, obligation in enumerate(
+                self.obligations,
+                start=1,
+            )
+            if obligation.kind in kinds
+        )
+        lines.extend(("", title, f"公式数量 : {len(selected)}"))
+        if not selected:
+            lines.append(empty_message)
+            return
+
+        status_labels = {
+            Verdict.TRUE: "已证明",
+            Verdict.FALSE: "未通过",
+            Verdict.UNKNOWN: "待证明",
+        }
+        for formula_index, (source_index, obligation) in enumerate(
+            selected,
+            start=1,
+        ):
+            activity = "有效" if obligation.active else "未选候选"
+            candidate = (
+                f" | candidate={obligation.candidate}"
+                if obligation.candidate
+                else ""
+            )
+            lines.extend(
+                (
+                    "",
+                    f"[{label}{formula_index:02d}] 对应 O{source_index:02d} | "
+                    f"{activity} | {status_labels[obligation.verdict]} | "
+                    f"{obligation.rule} | {obligation.kind.upper()}"
+                    f"{candidate}",
+                    f"     公式用途 : {obligation.description}",
+                    f"     判定后端 : {self._proof_backend(obligation.kind)}",
+                )
+            )
+            self._append_formula_block(
+                lines,
+                "实际检查公式",
+                (
+                    obligation.formula
+                    if obligation.proof_formula is None
+                    else obligation.proof_formula
+                ),
+            )
+            lines.append(f"     判定结果 : {obligation.verdict.value}")
+
     # 功能：把结构化轨迹、证明义务和诊断统一渲染为可直接阅读的中文报告。
     # 检查/模型关系：只读取已经冻结的证据，不重新运行规则或证明器，也不会
     #                把候选类型生成成功误写成全部证明义务为真。
     def format_detailed(self) -> str:
-        """生成包含原始公式、证明器输入和遗留义务的多行用户报告。"""
+        """生成包含 FOL/dL 清单、原始公式、证明器输入和遗留义务的报告。"""
 
         verdict_explanations = {
             Verdict.TRUE: "全部结构检查、静态类型前提和证明义务均已通过",
@@ -778,6 +904,25 @@ class CheckReport:
         unknown = sum(
             item.verdict == Verdict.UNKNOWN for item in active_obligations
         )
+
+        # 先按逻辑类别给出完整公式清单，使用户无需在混合的顺序证据中逐条
+        # 搜索 FOL 或 dL。后面的顺序记录仍保留规则原始公式、证明器输入和
+        # 证据说明，用于追溯每条公式在推导树中的确切出现位置。
+        self._append_formula_inventory(
+            lines,
+            title="=== 本次检查的一阶逻辑（FOL）公式 ===",
+            kinds=frozenset({"state", "fol"}),
+            label="FOL",
+            empty_message="(无一阶逻辑公式)",
+        )
+        self._append_formula_inventory(
+            lines,
+            title="=== 本次检查的微分动态逻辑（dL）公式 ===",
+            kinds=frozenset({"dl"}),
+            label="DL",
+            empty_message="(无 dL 公式)",
+        )
+
         lines.extend(
             (
                 "",

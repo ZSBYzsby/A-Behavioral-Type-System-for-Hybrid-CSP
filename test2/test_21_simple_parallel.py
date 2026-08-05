@@ -1,7 +1,7 @@
 """单样例 21：HCSP ``Parallel`` AST 到组合配置类型。
 
 测试内容：验证一个输出分量与一个输入分量的并行系统。
-预期结果：``ParallelType((left!.0, right?.0))``，分量次序保持不变。
+预期结果：显示为 ``(left!.(0)) | (right?.(0))``，分量次序保持不变。
 论文对应：Section 2.1 的 S parallel S' 与 Table 2 的 T-parallel。
 """
 

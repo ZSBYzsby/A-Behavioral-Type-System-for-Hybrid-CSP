@@ -1,7 +1,7 @@
 """单样例 04：输出通道 refinement 的成功路径。
 
 测试内容：验证路径条件能推出发送值满足通道的非负 refinement。
-预期结果：总体为 true，类型为 ``nonneg!.0``，并产生 T-Out 公式。
+预期结果：总体为 true，类型显示为 ``nonneg!.(0)``，并产生 T-Out 公式。
 论文对应：Table 2 的 T-Out refinement 替换前提。
 """
 

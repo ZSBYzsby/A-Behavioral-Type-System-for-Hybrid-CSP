@@ -15,7 +15,9 @@
 论文 Table 2 中与 ODE 有关的三个逻辑前提在这里分别表示为：
 
 ``safety``
-    ``pre_with_t=0 -> [{x'=f(x), t'=1}](t<=d -> safe)``。
+    ``pre_with_t=0 -> [{x'=f(x), t'=1}]``
+    ``(t<=d -> (safe and GammaPhi))``，其中 ``GammaPhi`` 只来自与用户 ODE
+    左侧向量精确匹配的连续声明，不含自动追加的局部时钟。
 ``domain``
     ``pre_with_t=0 -> [{x'=f(x), t'=1}]B``。
 ``boundary``
@@ -393,11 +395,12 @@ def safety_formula(
     """构造论文 Table 2 的 ODE 安全性 dL 前提。
 
     ``precondition`` 已包含当前 ODE 自动局部时钟的入口条件 ``t=0``，而
-    ``equations`` 已包含 ``t'=1``。Table 2 的安全前提对无演化域限制的动力学
-    ``{F}`` 建立不变性；不能把待验证的源演化域 ``B`` 放入程序后把证明范围
-    偷偷缩小。参数 ``domain`` 保留在公开构造器签名中，用于明确调用方已经
-    区分三类 ODE 前提，但本公式按论文不使用它。有限时延在后置条件中引用
-    同一个 ``clock``；无限时延仍保留该 ODE 固有的局部时钟方程。
+    ``equations`` 已包含 ``t'=1``。调用方传入的 ``safety`` 已经合取 ODE 节点
+    safety 与精确匹配的 Gamma 连续条件；两者都留在 box 的后置目标中接受验证，
+    不能作为 ODE 程序的演化域假设。HCSP 源演化域 ``B`` 仍由 Table 2 的其他 premise
+    验证；参数 ``domain`` 保留在签名中就是为了明确本安全公式不直接使用它。
+    有限时延在后置条件中引用同一个 ``clock``；无限时延仍保留该 ODE 固有的
+    局部时钟方程。
     """
 
     if z3 is not None and z3.is_true(z3.simplify(safety)):
@@ -407,7 +410,7 @@ def safety_formula(
     pre = printer.formula(precondition)
     post = printer.formula(safety)
     if infinite_duration:
-        program = _ode(printer, equations, domain=None)
+        program = _ode(printer, equations)
         source = f"({pre} -> [{program}]{post})"
         return _finish(printer, source, "safety")
     if duration is None:
@@ -417,7 +420,7 @@ def safety_formula(
 
     delay = printer.term(duration)
     clock_term = printer.term(clock)
-    program = _ode(printer, equations, domain=None)
+    program = _ode(printer, equations)
     source = (
         f"({pre} -> "
         f"[{program}]({clock_term}<={delay} -> {post}))"
@@ -436,9 +439,10 @@ def domain_formula(
 
     调用方传入的 pre/equations 已分别包含局部时钟的 ``t=0``/``t'=1``；若
     源演化域 B 使用保留名 ``t``，调用方也已把它翻译成这里的同一个时钟项。
-    B 是这条 premise 要证明的不变量，所以只出现在后置条件。若写成
-    ``[{F & B}]B``，dL 的演化域语义会使公式几乎按构造恒真，无法发现动力学
-    离开 B 的反例。
+    B 是这条 premise 要证明的不变量，所以只出现在后置条件。Gamma 连续条件
+    也不能放入程序域，因为它由独立的 safety 目标共同验证。若写成
+    ``[{F & B}]B`` 或 ``[{F & GammaPhi}]B``，dL 的演化域语义会预设待检查的
+    性质，无法发现动力学离开相应区域的反例。
     """
 
     if z3 is not None and z3.is_true(z3.simplify(domain)):
@@ -446,7 +450,7 @@ def domain_formula(
     printer = _Z3ToKeYmaeraX()
     pre = printer.formula(precondition)
     post = printer.formula(z3.simplify(z3.And(domain_definedness, domain)))
-    program = _ode(printer, equations, domain=None)
+    program = _ode(printer, equations)
     return _finish(
         printer,
         f"({pre} -> [{program}]{post})",
@@ -465,10 +469,10 @@ def boundary_formula(
 ) -> DLFormula:
     """构造新版 Table 2 的准确演化边界前提。
 
-    公式在不带演化域约束的动力学 ``{F,t'=1}`` 上证明：当局部时钟还满足
-    ``t<d`` 时 ``B`` 成立，而在 ``t=d`` 时 ``B`` 已经失效。这里不能把 ``B``
-    放入 dL 程序的演化域，否则第二个蕴含永远无法观察到边界外状态；也不再
-    使用旧实现的 box+diamond 近似编码。
+    公式在未预设 Gamma 连续条件的动力学 ``{F,t'=1}`` 上证明：当局部时钟
+    还满足 ``t<d`` 时 ``B`` 成立，而在 ``t=d`` 时 ``B`` 已经失效。这里不能
+    把待验证的 ``B`` 或 Gamma 连续条件放入 dL 程序的演化域，否则第二个蕴含
+    无法观察到真实反例；也不再使用旧实现的 box+diamond 近似编码。
     """
 
     printer = _Z3ToKeYmaeraX()
@@ -483,6 +487,6 @@ def boundary_formula(
             z3.Implies(clock == duration, outside_domain),
         )
     )
-    program = _ode(printer, equations, domain=None)
+    program = _ode(printer, equations)
     source = f"({pre} -> [{program}]{post})"
     return _finish(printer, source, "boundary")

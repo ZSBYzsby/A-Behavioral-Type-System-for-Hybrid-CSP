@@ -1,7 +1,7 @@
 """单样例 15：正无穷 delay 的类型规范化。
 
 测试内容：验证无限等待时不可达的超时 fallback 不保留在 Type AST 中。
-预期结果：只留下 ``alarm!.done!.0`` 的 angelic 通信行为。
+预期结果：只留下 ``alarm!.(done!.(0))`` 的 angelic 通信行为。
 论文对应：``A := delay(infinity) \\unrhd A \\triangleright bottom`` 定义式。
 """
 

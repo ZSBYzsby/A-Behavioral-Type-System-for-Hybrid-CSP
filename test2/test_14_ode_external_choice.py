@@ -28,7 +28,7 @@ class ODEExternalChoiceExample(unittest.TestCase):
     """检查多个 ODE 中断通信被规范为 angelic external choice。"""
 
     # 测试输入：x'=0、B=true、delay=2，事件分别为 left!0 和 right!0。
-    # 预期行为：两事件组成 A=left!.0 cap right!.0，有限超时后继为 bottom。
+    # 预期行为：两事件显示为 A=(left!.(0)) cap (right!.(0))，有限超时后继为 bottom。
     # 预期类型：CommunicationTimeoutType(
     #     2, ExternalChoiceType((OutputType("left", EndType()), OutputType("right", EndType()))))。
     # 检查内容：ExternalChoiceType 分支次序及外层 CommunicationTimeoutType。
