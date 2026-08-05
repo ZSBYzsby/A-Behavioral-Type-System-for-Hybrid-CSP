@@ -117,6 +117,7 @@ from .model import (
     DLCheckResult,
     Diagnostic,
     InferenceStep,
+    ParameterEnvironment,
     ProofObligation,
     TypingJudgment,
     Verdict,
@@ -125,6 +126,7 @@ from .model import (
     is_subtype,
     normalize_channel_type,
     normalize_gamma_type,
+    normalize_type,
 )
 
 
@@ -148,6 +150,9 @@ class _Context:
     """
 
     gamma: dict[str, GammaType]
+    parameters: dict[str, BasicType]
+    parameter_condition: Any
+    configuration_path: Any
     theta: dict[str, ChannelType]
     path: Any
     symbols: dict[str, Any]
@@ -159,6 +164,9 @@ class _Context:
         """复制分支局部状态；只共享只读使用的通道环境。"""
         return _Context(
             gamma=dict(self.gamma),
+            parameters=dict(self.parameters),
+            parameter_condition=self.parameter_condition,
+            configuration_path=self.configuration_path,
             theta=self.theta,
             path=self.path,
             symbols=dict(self.symbols),
@@ -420,6 +428,27 @@ class TypeChecker:
                 for name, value in judgment.gamma.items()
             }
             self._validate_continuous_vectors(gamma)
+            parameters = {
+                str(name): normalize_type(
+                    value,
+                    subject="Parameter declaration",
+                )
+                for name, value in judgment.parameters.declarations.items()
+            }
+            invalid_parameter_names = {
+                name for name in parameters if not name.isidentifier()
+            }
+            if invalid_parameter_names:
+                raise ValueError(
+                    "Invalid parameter names: "
+                    + ", ".join(sorted(invalid_parameter_names))
+                )
+            shared_names = set(gamma) & set(parameters)
+            if shared_names:
+                raise ValueError(
+                    "Gamma and the shared parameter environment overlap: "
+                    + ", ".join(sorted(shared_names))
+                )
             theta = {
                 self._channel_name(name): normalize_channel_type(value)
                 for name, value in judgment.theta.items()
@@ -428,11 +457,56 @@ class TypeChecker:
             self._diagnose(Verdict.FALSE, f"Invalid typing environment: {exc}", "environment")
             return self._report(None, ())
 
+        parameter_symbols: dict[str, Any] = {}
+        parameter_translator = ExpressionTranslator(
+            parameters,
+            parameter_symbols,
+            name_prefix="parameter__",
+        )
+        try:
+            for name, value_type in parameters.items():
+                parameter_translator.symbol(name, value_type)
+            parameter_constraint_result = parameter_translator.boolean_result(
+                judgment.parameters.constraint
+            )
+            parameter_condition = conjunction(
+                self._defined_term(parameter_constraint_result),
+                *(
+                    constraint
+                    for name, value_type in parameters.items()
+                    for constraint in self._type_domain_constraints(
+                        value_type,
+                        parameter_symbols[name],
+                    )
+                ),
+            )
+        except ExpressionError as exc:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Invalid shared parameter constraint: {exc}",
+                "parameters",
+            )
+            return self._report(None, ())
+
+        parameter_verdict, parameter_detail = self.proof_engine.satisfiable(
+            parameter_condition
+        )
+        if parameter_verdict is not Verdict.TRUE:
+            self._diagnose(
+                parameter_verdict,
+                "Shared parameter constraint must be satisfiable: "
+                + parameter_detail,
+                "parameters",
+            )
+            return self._report(None, ())
+
         environment_step = self._start_step(
             "environment",
             "judgment",
             "规范化类型环境 Gamma 与 Theta",
             gamma=gamma,
+            parameters=parameters,
+            parameter_constraint=judgment.parameters.constraint,
             theta=theta,
             path=judgment.path_condition,
         )
@@ -452,6 +526,10 @@ class TypeChecker:
             gamma,
             theta,
             judgment.path_condition,
+            parameters,
+            parameter_symbols,
+            parameter_condition,
+            judgment.parameters.constraint,
         )
         raw_component_types = self._solve_rule_expansion(parallel_expansion)
         # 内部失败状态绝不暴露为行为类型；公开报告用 None 保留失败分量的位置。
@@ -505,6 +583,10 @@ class TypeChecker:
         gamma: Mapping[str, GammaType],
         theta: Mapping[str, ChannelType],
         default_path: Any,
+        parameters: Mapping[str, BasicType],
+        parameter_symbols: Mapping[str, Any],
+        parameter_condition: Any,
+        parameter_constraint: Any,
     ) -> _RuleExpansion:
         """[T-||] 把顶层判断展开为各配置的显式子 judgment。
 
@@ -523,6 +605,8 @@ class TypeChecker:
             "judgment",
             f"检查 {len(configurations)} 个配置并建立状态变量分区",
             gamma=gamma,
+            parameters=parameters,
+            parameter_constraint=parameter_constraint,
             theta=theta,
             path=default_path,
         )
@@ -585,6 +669,8 @@ class TypeChecker:
                 gamma_is_valid = True
             else:
                 variables = self._process_vars(configuration.process) | set(configuration.state)
+                # 共享参数可被所有配置读取，但不属于任何分量的可变 Gamma。
+                variables -= set(parameters)
                 # 独立 ContinuousType 项只跟随真正含相应 ODE 的配置；标量成员
                 # 在 ODE 外仍是普通 Real，不会仅因读写其中一个成员就拖入整组。
                 variables = self._expand_continuous_vector_domain(
@@ -681,6 +767,9 @@ class TypeChecker:
             location = configuration.name or f"K{index}"
             context = self._initial_context(
                 component_gamma,
+                parameters,
+                parameter_symbols,
+                parameter_condition,
                 dict(theta),
                 default_path
                 if configuration.path_condition is None
@@ -741,6 +830,20 @@ class TypeChecker:
                 (),
                 lambda _children: _INFERENCE_FAILURE,
             )
+        assigned_parameters = set(judgment.state) & set(context.parameters)
+        if assigned_parameters:
+            self._diagnose(
+                Verdict.FALSE,
+                "Initial state cannot assign shared read-only parameters: "
+                + ", ".join(sorted(assigned_parameters)),
+                "T-sigma",
+                context.location,
+            )
+            return _RuleExpansion(
+                "T-sigma",
+                (),
+                lambda _children: _INFERENCE_FAILURE,
+            )
         value_gamma = self._value_gamma(context.gamma)
         undeclared_state_variables = set(judgment.state) - set(value_gamma)
         if undeclared_state_variables:
@@ -785,8 +888,14 @@ class TypeChecker:
             )
         state_premise = self._state_premise(
             "T-sigma",
-            f"Initial state of {context.location} satisfies its path condition",
-            context.path,
+            (
+                f"Every admissible shared-parameter assignment makes the "
+                f"initial state of {context.location} satisfy its path condition"
+            ),
+            implies(
+                context.parameter_condition,
+                context.configuration_path,
+            ),
             judgment.state,
             context.symbols,
         )
@@ -1090,6 +1199,10 @@ class TypeChecker:
         premises: list[_Premise] = []
         try:
             target = lvalue_name(node.target)
+            if target in context.parameters:
+                raise ExpressionError(
+                    f"Assignment target {target!r} is a shared read-only parameter"
+                )
             target_declaration = context.gamma.get(target)
             if target_declaration is None:
                 raise ExpressionError(f"Assignment target {target!r} is not declared in Gamma")
@@ -1273,6 +1386,10 @@ class TypeChecker:
                 start=1,
             ):
                 name = lvalue_name(variable)
+                if name in context.parameters:
+                    raise ExpressionError(
+                        f"Input target {name!r} is a shared read-only parameter"
+                    )
                 existing_entry = next_context.gamma.get(name)
                 if isinstance(existing_entry, ContinuousType):
                     raise ExpressionError(
@@ -2001,6 +2118,15 @@ class TypeChecker:
                 static_type_error = True
                 continue
             evolved.append(name)
+            if name in context.parameters:
+                self._diagnose(
+                    Verdict.FALSE,
+                    f"ODE variable {name!r} is a shared read-only parameter",
+                    "T-ODE",
+                    context.location,
+                )
+                static_type_error = True
+                continue
             gamma_entry = context.gamma.get(name)
             if gamma_entry is None:
                 self._diagnose(
@@ -2350,8 +2476,9 @@ class TypeChecker:
         self._fresh_counter += 1
         ode_symbols = dict(context.symbols)
         value_gamma = self._value_gamma(context.gamma)
+        value_environment = {**context.parameters, **value_gamma}
         snapshot_translator = ExpressionTranslator(
-            value_gamma,
+            value_environment,
             ode_symbols,
         )
         equalities: list[Any] = []
@@ -2391,7 +2518,7 @@ class TypeChecker:
         ode_local_symbols = {node.local_clock.name: clock}
 
         precondition = conjunction(context.path, *equalities)
-        translator = ExpressionTranslator(value_gamma, ode_symbols)
+        translator = ExpressionTranslator(value_environment, ode_symbols)
         translated_equations: list[tuple[Any, Any]] = []
         derivative_definedness: list[Any] = []
         for variable, derivative in node.eqs:
@@ -2581,9 +2708,12 @@ class TypeChecker:
                 condition = safety
             if post_clock is not None:
                 condition = conjunction(post_clock >= 0, condition)
-                post.path = z3.Exists([post_clock], condition)
+                post.path = conjunction(
+                    post.parameter_condition,
+                    z3.Exists([post_clock], condition),
+                )
             else:
-                post.path = condition
+                post.path = conjunction(post.parameter_condition, condition)
         except ExpressionError as exc:
             self._diagnose(Verdict.FALSE, str(exc), "T-ODE", context.location)
             return None
@@ -2790,6 +2920,9 @@ class TypeChecker:
     def _initial_context(
         self,
         gamma: Mapping[str, GammaType],
+        parameters: Mapping[str, BasicType],
+        parameter_symbols: Mapping[str, Any],
+        parameter_condition: Any,
         theta: dict[str, ChannelType],
         path_condition: Any,
         location: str,
@@ -2799,10 +2932,11 @@ class TypeChecker:
         名称前缀包含配置位置，确保并行分量中即使误用同名符号也不会在 Z3
         层意外合并。``Nat >= 0`` 等类型域事实在此统一加入路径条件。
         """
-        symbols: dict[str, Any] = {}
+        symbols: dict[str, Any] = dict(parameter_symbols)
         value_gamma = self._value_gamma(gamma)
+        value_environment = {**parameters, **value_gamma}
         translator = ExpressionTranslator(
-            value_gamma,
+            value_environment,
             symbols,
             name_prefix=f"{location}__",
         )
@@ -2814,11 +2948,12 @@ class TypeChecker:
                 self._diagnose(Verdict.FALSE, str(exc), "environment", location)
                 static_valid = False
         if not static_valid:
-            path = z3.BoolVal(False) if z3 is not None else False
+            configuration_path = z3.BoolVal(False) if z3 is not None else False
+            path = configuration_path
         else:
             try:
                 path_result = translator.boolean_result(path_condition)
-                path = conjunction(
+                configuration_path = conjunction(
                     self._defined_term(path_result),
                     *(
                         constraint
@@ -2829,12 +2964,17 @@ class TypeChecker:
                         )
                     ),
                 )
+                path = conjunction(parameter_condition, configuration_path)
             except ExpressionError as exc:
                 self._diagnose(Verdict.FALSE, str(exc), "environment", location)
+                configuration_path = z3.BoolVal(False) if z3 is not None else False
                 path = z3.BoolVal(False) if z3 is not None else False
                 static_valid = False
         return _Context(
             gamma=dict(gamma),
+            parameters=dict(parameters),
+            parameter_condition=parameter_condition,
+            configuration_path=configuration_path,
             theta=theta,
             path=path,
             symbols=symbols,
@@ -2854,18 +2994,22 @@ class TypeChecker:
         不变式；这正是循环不变式证明中“任意一次迭代”的抽象。
         """
         self._fresh_counter += 1
-        symbols: dict[str, Any] = {}
+        symbols: dict[str, Any] = {
+            name: context.symbols[name] for name in context.parameters
+        }
+        value_gamma = self._value_gamma(context.gamma)
+        value_environment = {**context.parameters, **value_gamma}
         translator = ExpressionTranslator(
-            self._value_gamma(context.gamma),
+            value_environment,
             symbols,
             name_prefix=f"{context.location}__rec{self._fresh_counter}__",
         )
-        value_gamma = self._value_gamma(context.gamma)
         for name, value_type in value_gamma.items():
             translator.symbol(name, value_type)
         try:
             path_result = translator.boolean_result(binding.invariant)
             path = conjunction(
+                context.parameter_condition,
                 self._defined_term(path_result),
                 *(
                     constraint
@@ -2883,6 +3027,9 @@ class TypeChecker:
         rec_env[binding.source_name] = binding
         return _Context(
             gamma=dict(context.gamma),
+            parameters=dict(context.parameters),
+            parameter_condition=context.parameter_condition,
+            configuration_path=self._defined_term(path_result),
             theta=context.theta,
             path=path,
             symbols=symbols,
@@ -2984,7 +3131,10 @@ class TypeChecker:
 
     def _translator(self, context: _Context) -> ExpressionTranslator:
         """创建读取并更新当前分支符号表的表达式翻译器。"""
-        return ExpressionTranslator(self._value_gamma(context.gamma), context.symbols)
+        return ExpressionTranslator(
+            {**context.parameters, **self._value_gamma(context.gamma)},
+            context.symbols,
+        )
 
     @staticmethod
     def _defined_term(result: ExprResult) -> Any:
@@ -3033,6 +3183,8 @@ class TypeChecker:
         *,
         context: _Context | None = None,
         gamma: Mapping[str, GammaType] | None = None,
+        parameters: Mapping[str, BasicType] | None = None,
+        parameter_constraint: Any = None,
         theta: Mapping[str, ChannelType] | None = None,
         path: Any = None,
         symbols: Mapping[str, Any] | None = None,
@@ -3040,6 +3192,14 @@ class TypeChecker:
         """按进入规则的先序顺序保存环境快照，并返回待补结果的列表下标。"""
 
         active_gamma = context.gamma if context is not None else (gamma or {})
+        active_parameters = (
+            context.parameters if context is not None else (parameters or {})
+        )
+        active_parameter_constraint = (
+            context.parameter_condition
+            if context is not None
+            else parameter_constraint
+        )
         active_theta = context.theta if context is not None else (theta or {})
         active_path = context.path if context is not None else path
         active_symbols = context.symbols if context is not None else (symbols or {})
@@ -3052,6 +3212,15 @@ class TypeChecker:
                 (name, str(value_type))
                 for name, value_type in sorted(active_gamma.items())
             ),
+            parameters=tuple(
+                (name, str(value_type))
+                for name, value_type in sorted(active_parameters.items())
+            ),
+            parameter_constraint=(
+                ""
+                if active_parameter_constraint is None
+                else self._display_term(active_parameter_constraint)
+            ),
             theta=tuple(
                 (name, str(channel_type))
                 for name, channel_type in sorted(active_theta.items())
@@ -3062,6 +3231,7 @@ class TypeChecker:
             symbolic_state=tuple(
                 (name, self._display_term(term))
                 for name, term in sorted(active_symbols.items())
+                if name not in active_parameters
             ),
         )
         self.steps.append(step)
@@ -3622,6 +3792,7 @@ def check_hcsp(
     theta: Mapping[str, ChannelType | Any] | None,
     configurations: Sequence[Configuration | tuple[Mapping[str, Any], Any] | Any],
     path_condition: Any = True,
+    parameters: ParameterEnvironment | Mapping[str, Any] | None = None,
     expected_types: Sequence[ConfigurationType] | None = None,
     dl_checker: DLChecker | None = None,
     keymaerax_config: KeYmaeraXConfig | None = None,
@@ -3631,6 +3802,8 @@ def check_hcsp(
 
     该函数负责构造 :class:`TypingJudgment` 和一次性 :class:`TypeChecker`。需要
     重用 ODE 配置或自定义检查流程时，可直接实例化 ``TypeChecker``。
+    ``parameters`` 可传入 :class:`ParameterEnvironment`；只传声明映射时
+    约束默认为 ``True``。
     """
 
     judgment = TypingJudgment(
@@ -3638,6 +3811,7 @@ def check_hcsp(
         theta=theta,
         configurations=configurations,
         path_condition=path_condition,
+        parameters=parameters,
         expected_types=expected_types,
     )
     return TypeChecker(

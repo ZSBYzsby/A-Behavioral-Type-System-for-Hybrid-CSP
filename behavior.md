@@ -20,12 +20,13 @@
 一次检查请求可以抽象写成：
 
 \[
-(\Gamma,\Theta,\Phi,K),
+(\Gamma,\Pi,\Theta,\Phi,K),
 \]
 
 其中：
 
 - \(\Gamma\) 是变量声明环境；
+- \(\Pi=(\Delta,H)\) 是共享只读参数声明及其合法预赋值约束；
 - \(\Theta\) 是通道 refinement 环境；
 - \(\Phi\) 是当前路径条件；
 - \(K\) 是一个或多个 `Configuration(state, process)`；
@@ -71,7 +72,7 @@
 
 ---
 
-## 3. Gamma、Theta 和符号状态
+## 3. Gamma、共享参数、Theta 和符号状态
 
 ### 3.1 Gamma
 
@@ -130,7 +131,25 @@ trajectory = ContinuousType(
 ODE 的左端分量、导数右端参数、演化域和 safety 中的 Real 量都统一使用
 `BasicType.REAL`。未参与任何 ODE 的 Real 无需额外的连续声明。
 
-### 3.2 Theta
+### 3.2 共享只读参数环境
+
+`ParameterEnvironment(declarations, constraint)` 构成独立于 Gamma 的参数
+环境 \(\Pi=(\Delta,H)\)：
+
+- \(\Delta\) 只能声明 `BasicType`参数；
+- \(H\) 只能引用 \(\Delta\) 中声明的名称；
+- 检查器先验证 \(H\land TypeDomain(\Delta)\) 可满足，防止矛盾假设
+  造成真空证明；
+- 参数在所有并行 configuration 中使用同一组 Z3 符号，不参与
+  Gamma 的局部投影、互斥性和并集覆盖检查；
+- 参数可在路径、表达式、通道 refinement、递归不变式和 ODE
+  公式中读取，但不能出现在 state 赋值、赋值左端、输入目标或
+  ODE 左端。
+
+Gamma 和 \(\Delta\) 的名称域必须不相交。参数由用户在 HCSP 执行前一次性
+选定，类型检查结果覆盖所有满足 \(H\) 的选择，不保存某组具体参数值。
+
+### 3.3 Theta
 
 对通道 `ch`，`ChannelType` 保存：
 
@@ -148,31 +167,34 @@ ODE 的左端分量、导数右端参数、演化域和 safety 中的 Real 量�
 `OutputType`。因此两个具有相同通道名、但 Theta 签名不同的通信，在 Type AST
 层只显示相同的 `ch?` 或 `ch!` 前缀。
 
-### 3.3 每条控制流路径上的 Context
+### 3.4 每条控制流路径上的 Context
 
 转换器内部为每条控制流路径维护：
 
 \[
-C=(\Gamma,\Theta,\Phi,\rho,\mathcal R,location,valid),
+C=(\Gamma,\Delta,H,\Theta,\Phi,\rho,\mathcal R,location,valid),
 \]
 
 其中：
 
-- `gamma`、`theta` 是当前局部环境；
+- `gamma`是当前局部状态环境，`parameters`、`parameter_condition`分别是
+  共享的 \(\Delta\) 和 \(H\)，`theta` 是共享通道环境；
 - `path` 是 Z3 布尔公式 \(\Phi\)；
 - `symbols` 是符号状态 \(\rho\)，把变量名映射到当前 Z3 项；
 - `rec_env` 是递归进程变量到类型变量、不变量的绑定；
 - `location` 用于报告分支位置；
 - `static_valid` 表示初始环境和路径是否成功建立。
 
-建立初始 Context 时，只有 Gamma 中的 `BasicType` 值变量获得带 configuration
-前缀的新鲜符号。其 Z3 sort 为：
+建立整个判断时，参数先获得一组共享符号。建立各初始 Context 时，
+Gamma 中的 `BasicType` 值变量再获得带 configuration 前缀的新鲜符号。
+两者的 Z3 sort 均为：
 
 - `Bool` -> Z3 Bool；
 - `Nat`、`Int` -> Z3 Int；
 - `Rational`、`Real` -> Z3 Real。
 
-`ContinuousType` 声明不建立 Z3 符号。
+`ContinuousType` 声明不建立 Z3 符号。各配置的初始路径实际是
+\(H\land\Phi_i\)。
 
 代码还把类型固有条件加入路径。目前只有 `Nat` 额外产生 \(x\ge 0\)。
 
@@ -269,8 +291,9 @@ premise 只有两类：
 
 ### 6.1 环境规范化
 
-`TypeChecker.check` 首先统一规范化 Gamma 和 Theta。非法变量类型、非法通道名、
-非法通道签名都会在进入 Process 规则以前得到 `Diagnostic(FALSE)`。
+`TypeChecker.check` 首先统一规范化 Gamma、共享参数和 Theta。非法变量类型、
+非法参数约束、Gamma/参数名称重叠、非法通道名和非法通道签名都会在
+进入 Process 规则以前得到失败诊断。不可满足的参数约束也会直接被拒绝。
 
 ### 6.2 顶层多个 Configuration
 
@@ -282,7 +305,7 @@ premise 只有两类：
 
 \[
 \Gamma_i=\Gamma\restriction
-(vars(P_i)\cup dom(\sigma_i)).
+((vars(P_i)\cup dom(\sigma_i))\setminus dom(\Delta)).
 \]
 
 输入动作绑定的目标允许不预先出现在 Gamma；除此之外，进程使用但 Gamma 未
@@ -298,6 +321,7 @@ premise 只有两类：
 自动并行分区先按各配置实际使用的值变量分配 `BasicType` 项；只有某个配置的
 process 真正包含已登记 ODE 时，匹配的独立 `ContinuousType` 声明项才归该配置。
 普通 Real 的读写不会凭空拖入一个未出现的 ODE 向量声明。
+参数环境不做局部投影：每个分量都读取同一个完整 \(\Delta,H\)。
 
 局部路径条件要么所有 configuration 都提供，要么都不提供。若使用局部路径，
 外层路径必须是默认 `true`。
@@ -321,24 +345,27 @@ dom(\sigma)\subseteq dom(\Gamma_{value}),
 \]
 
 其中 \(\Gamma_{value}\) 只包含 `BasicType` 项，不包含独立的 ODE 向量声明。
+参数不属于 \(\Gamma_{value}\)，因此 \(dom(\sigma)\cap dom(\Delta)\) 必须为空。
 
 state 可以只是 Gamma 值变量的子集。随后代码把 state 中的具体值代入路径公式：
 
 \[
-\Phi[\sigma].
+H\Rightarrow\Phi[\sigma].
 \]
 
-若还有未赋值的 Gamma 值变量，它们保留为自由 Z3 常量；证明器检查剩余公式是否
-有效，效果相当于对这些未指定变量作全称检查，而不是任选一个值使公式成立。
+若还有未赋值的 Gamma 值变量，它们保留为自由 Z3 常量；参数符号也保留
+在含件公式中。证明器通过有效性检查，对所有满足 \(H\) 的参数预赋值和所有
+未指定状态值作全称检查，而不是任选一组值使公式成立。
 
 state 通过后，才进入 system/process 子 judgment。
 
 ### 6.4 `Parallel` AST 便捷入口
 
-`Configuration({}, Parallel(...))` 只允许在空 Gamma、空 state、路径为 true
+`Configuration({}, Parallel(...))` 只允许在空 Gamma、空 state、完整路径为 true
 时使用。代码递归推导左右系统并构造 `ParallelType`。
 
-有状态并行不能通过这一入口处理，必须拆成多个显式 `Configuration`。
+有状态并行或带非平凡参数约束的并行不能通过这一入口处理，必须拆成
+多个显式 `Configuration`，使 T-|| 对局部 Gamma 和共享参数分别建模。
 
 ---
 
@@ -388,7 +415,7 @@ Gamma、路径条件和符号状态全部保持不变，不生成 Type AST 前�
 
 代码执行以下操作：
 
-1. 要求 `x` 已在 Gamma 声明；
+1. 要求 `x` 不是共享参数，并且已在 Gamma 声明；
 2. 在赋值前符号状态 \(\rho\) 中求值
    \(\llbracket e\rrbracket_\rho=(u,B_e,D_e)\)；
 3. 检查 \(B_e <: base(\Gamma(x))\)；
@@ -416,7 +443,8 @@ Gamma、路径条件和符号状态全部保持不变，不生成 Type AST 前�
 
 赋值成功后用 \((\Phi,\rho')\) 推导 `P`，最终类型仍是 `P` 的类型，没有
 `AssignType` 节点。赋值目标必须是 `BasicType` 值变量；独立的
-`ContinuousType` 声明没有当前值，不能被赋值。
+`ContinuousType` 声明没有当前值，不能被赋值；共享参数即使具有值类型，
+也因为在 HCSP 执行前已预赋值而禁止作为赋值目标。
 
 ### 7.5 `ch?(x1,...,xn); P`
 
@@ -428,7 +456,7 @@ Gamma、路径条件和符号状态全部保持不变，不生成 Type AST 前�
 
 实际步骤为：
 
-1. 检查通道存在且输入元数等于 Theta 元数；
+1. 检查通道存在且输入元数等于 Theta 元数，并拒绝把共享参数作为输入目标；
 2. 对已存在的目标变量，代码要求它的基础类型与槽位类型在数值子类型链上
    可比较，即实际条件是
 
@@ -592,7 +620,7 @@ communication; P; ODE 外层 tail
 代码首先检查：
 
 1. ODE 左端变量不得重复；
-2. 每个左端变量必须在 Gamma 中声明；
+2. 每个左端变量不得是共享只读参数，并且必须在 Gamma 中声明；
 3. 每个左端变量必须是 `BasicType.REAL`；
 4. 非空左侧变量集合必须由独立 `ContinuousType` 项精确登记；
 5. 每个导数表达式必须是数值类型；
@@ -624,7 +652,7 @@ x_i^0=\rho(x_i).
 \dot\tau=1.
 \]
 
-于是 dL 前置条件是：
+于是 dL 前置条件是（其中当前路径 \(\Phi\) 已包含 \(H\)）：
 
 \[
 Pre=\Phi\land\bigwedge_i(x_i^0=\rho(x_i))\land(\tau=0).
@@ -674,7 +702,8 @@ Pre\Rightarrow[F^*](D_F\land D_B\land D_S\land S).
 \]
 
 注意待验证的源演化域 `B` 不会进入 dL 程序域；它只通过有定义性间接出现在
-safety 后置条件中。Gamma 只在静态阶段核对演化向量，不进入逻辑公式。
+safety 后置条件中。Gamma 只在静态阶段核对演化向量；参数约束 \(H\) 作为路径
+的一部分进入 dL 前件，参数本身不进入演化向量。
 
 若规则层用于捷径判断的公式
 \(D_F\land D_S\land S\) 语法化简为 true，则该义务直接记为 true，不调用
@@ -838,7 +867,7 @@ X -> (TypeVar("t1"), invariant I)
 新鲜符号，并把递归体入口路径替换为：
 
 \[
-I\land Def(I)\land TypeDomain(\Gamma).
+H\land I\land Def(I)\land TypeDomain(\Gamma).
 \]
 
 因此递归体表示“任意一次满足不变量的迭代入口”，不会继承进入 `Mu` 前变量的
@@ -903,9 +932,10 @@ Delay、内部选择和并行本身不算通信守卫；只有输入/输出类�
 
 ### 12.1 State premise
 
-将具体 state 代入路径公式后检查有效性。state 中未知的 Gamma 值变量或 ODE
-向量声明名都会被拒绝；Gamma 值变量中未出现在 state 的项保留并按全称有效性
-检查。
+对 T-sigma，将具体 state 代入局部路径，然后检查
+\(H\Rightarrow\Phi[\sigma]\) 的有效性。state 中未知的 Gamma 值变量、ODE 向量声明名或
+共享参数名都会被拒绝；Gamma 值变量中未出现在 state 的项保留，并与参数一起
+按全称有效性检查。
 
 ### 12.2 FOL premise
 

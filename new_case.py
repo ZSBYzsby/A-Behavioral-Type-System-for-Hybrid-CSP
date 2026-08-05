@@ -1,33 +1,22 @@
-r"""用新共享参数架构复现论文 Section 5 原始 case study。
+r"""对一般物理参数推导 Section 5 Vehicle 的行为 Type AST。
 
-本文件构造完整的 Vehicle/Controller HCSP AST，然后调用
-``check_hcsp`` 尝试生成 Type AST。它特意保留论文原始的
-``phi_a``：
-
-    phi_a(p,v,a) :=
-        amin <= a <= amax
-        and phi_v(p + v*d + a*d^2/2, v + a*d)
-
-它不包含 ``new_case.py`` 中后来增加的周期终点位置检查和
-区间内转向点检查。因此两个文件的对照关系是：
-
-* ``case.py``：论文原始 ``phi_a``，用来复现 dL 前提无法证明的情况；
-* ``new_case.py``：加强后的 ``phi_a``，同一类型架构下可完成推导。
-
-``end``、``vmax``、``amin``、``amax`` 位于独立于状态 Gamma
-的 ``ParameterEnvironment`` 中，不做数值实例化。类型检查对所有
-满足以下条件的参数预赋值建立证明义务：
+``end``、``vmax``、``amin``、``amax`` 在本文件中属于独立的共享参数环境，
+不属于任一并行分量的状态 Gamma，也没有被替换成任何具体数值。参数环境的
+统一约束是：
 
     end >= 0 and vmax >= 0 and amin < 0 and amax >= 0
 
-``d`` 仍是 ODE 批注要求的具体正有理数，默认为 1：
+类型检查器会把该约束自动加入所有配置、递归体和 ODE 证明前件，生成的一阶
+逻辑和 dL premise 对四个参数作全称有效性判断。``d`` 不属于上述符号参数；
+它按照论文的 ODE 批注要求，在每次运行时
+取一个具体的正有理数，默认值为 1：
 
-    python -B case.py
-    python -B case.py --d 3/2
+    python -B new_case.py
+    python -B new_case.py --d 3/2
 
-脚本会打印完整 HCSP AST、已生成的部分 Type AST、规则推导报告和
-首条 ``unknown`` dL 义务。KeYmaera X 中间文件保存在被 Git 忽略的
-``tmp/paper-case-unknown-artifacts`` 目录，便于人工审计。
+本例同时推导 Vehicle 和 Controller 两个配置。二者拥有互不相交的状态 Gamma，
+但读取同一个共享参数预赋值；Vehicle 在接收新加速度后自行检查 ``phi_a``，
+不安全时回退到共享参数 ``amin``。
 """
 
 from __future__ import annotations
@@ -61,44 +50,43 @@ from hcsp_typechecker import (
     Sequence,
     Skip,
     Var,
-    Verdict,
     check_hcsp,
 )
 
 
+# 这些名字是证明中的自由 Real 参数，不是 Python 数值。
 PARAMETER_NAMES = ("end", "vmax", "amin", "amax")
 PARAMETER_ASSUMPTIONS = (
     "end >= 0 and vmax >= 0 and amin < 0 and amax >= 0"
 )
-PROJECT_ROOT = Path(__file__).resolve().parent
 ARTIFACTS_DIRECTORY = (
-    PROJECT_ROOT / "tmp" / "paper-case-unknown-artifacts"
+    Path(__file__).resolve().parent / "tmp" / "general-case-keymaerax-artifacts"
 )
 KEYMAERAX_HOME_DIRECTORY = (
-    PROJECT_ROOT / "tmp" / "paper-case-unknown-home"
+    Path(__file__).resolve().parent / "tmp" / "general-case-keymaerax-home"
 )
 
 
 def _number_text(value: Fraction) -> str:
-    """把具体正有理数批注 d 写成表达式文本。"""
+    """把批注使用的具体正有理数 d 写成精确表达式文本。"""
 
     if value.denominator == 1:
         return str(value.numerator)
     return f"({value.numerator}/{value.denominator})"
 
 
-def phi_p(position: str) -> str:
-    """返回论文的位置不变量 ``phi_p(position)``。"""
+def position_safety(position: str) -> str:
+    """返回一般参数下的 ``phi_p(position)``。"""
 
     return f"({position}) <= end"
 
 
-def phi_v(position: str, velocity: str) -> str:
-    r"""返回论文的三段式速度不变量 ``phi_v``。
+def velocity_safety(position: str, velocity: str) -> str:
+    r"""返回一般参数下、无除法形式的三段式 ``phi_v``。
 
-    论文记号 ``sb=vmax^2/(-2*amin)`` 通过 ``amin<0`` 等价消去
-    除法，以避免 dL 公式中无关的有定义性干扰。这一改写不改变
-    ``phi_v`` 的数学含义。
+    原定义中的 ``sb=vmax^2/(-2*amin)`` 在 ``amin<0`` 下等价改写为比较
+    ``(-2*amin)*(end-p)`` 与 ``vmax^2``。这样 ``end``、``vmax`` 和
+    ``amin`` 始终保持为符号参数，同时避免在证明义务中引入除法。
     """
 
     remaining = f"(end - ({position}))"
@@ -115,17 +103,13 @@ def phi_v(position: str, velocity: str) -> str:
     )
 
 
-def phi_a(
+def acceleration_safety(
     position: str,
     velocity: str,
     acceleration: str,
     period: Fraction,
 ) -> str:
-    r"""返回论文原始的一步预测加速度不变量。
-
-    这里故意不加 ``phi_p(p_d)`` 也不检查 ``0..d`` 内部的速度为零
-    转向点；这正是需要复现的原始 case study 定义。
-    """
+    r"""构造对一般物理参数成立的加强版 ``phi_a``。"""
 
     duration = _number_text(period)
     predicted_position = (
@@ -135,43 +119,48 @@ def phi_a(
     predicted_velocity = (
         f"(({velocity}) + ({acceleration}) * {duration})"
     )
+    turning_point_safe = (
+        f"(({acceleration}) >= 0 or "
+        f"({velocity}) <= 0 or "
+        f"({predicted_velocity}) > 0 or "
+        f"({velocity}) * ({velocity}) <= "
+        f"-2 * ({acceleration}) * (end - ({position})))"
+    )
     return (
         f"(amin <= ({acceleration}) and "
         f"({acceleration}) <= amax and "
-        f"{phi_v(predicted_position, predicted_velocity)})"
+        f"{position_safety(predicted_position)} and "
+        f"{velocity_safety(predicted_position, predicted_velocity)} and "
+        f"{turning_point_safe})"
     )
 
 
 def invariant_formulas(period: Fraction) -> tuple[str, str, str, str, str]:
-    """构造论文原始的 ``phi_p``、``phi_v``、``phi_a`` 及循环不变式。"""
+    """返回一般参数公式；参数约束由共享参数环境自动提供。"""
 
-    position_invariant = phi_p("p")
-    velocity_invariant = phi_v("p", "v")
-    acceleration_invariant = phi_a("p", "v", "a", period)
-    ode_safety = f"({position_invariant}) and ({velocity_invariant})"
-    loop_invariant = f"({ode_safety}) and ({acceleration_invariant})"
-    return (
-        position_invariant,
-        velocity_invariant,
-        acceleration_invariant,
-        ode_safety,
-        loop_invariant,
-    )
+    phi_p = position_safety("p")
+    phi_v = velocity_safety("p", "v")
+    phi_a = acceleration_safety("p", "v", "a", period)
+    state_safety = f"({phi_p}) and ({phi_v})"
+
+    # H 不再重复写入每个不变量。ParameterEnvironment 会把 H 作为不可变的
+    # 共享背景条件加入 T-sigma、递归和 dL 前件。
+    ode_safety = state_safety
+    loop_invariant = f"({state_safety}) and ({phi_a})"
+    return phi_p, phi_v, phi_a, ode_safety, loop_invariant
 
 
 def build_vehicle(period: Fraction) -> Process:
-    """按论文 Section 5 构造 Vehicle Process AST。"""
+    """构造未实例化四个物理参数的 Vehicle HCSP AST。"""
 
     _, _, _, ode_safety, loop_invariant = invariant_formulas(period)
-    received_acceleration_is_safe = phi_a(
+    received_acceleration_is_safe = acceleration_safety(
         "p",
         "v",
         "new_acc",
         period,
     )
 
-    # 论文在 ch!(p,v) 之后等待 dh? 或 stop?。项目 AST 使用无用户
-    # 方程的无限等待 ODE 承载这个外部事件选择。
     decision_wait = ODE(
         [],
         True,
@@ -218,13 +207,13 @@ def build_vehicle(period: Fraction) -> Process:
 
 
 def build_controller(period: Fraction) -> Process:
-    """按论文 Section 5 构造 Controller Process AST。"""
+    """构造读取同一共享参数环境的 Controller HCSP AST。"""
 
     choose_acceleration = If(
-        phi_a("x", "y", "amax", period),
+        acceleration_safety("x", "y", "amax", period),
         Assign("command", "amax"),
         If(
-            phi_a("x", "y", "0", period),
+            acceleration_safety("x", "y", "0", period),
             Assign("command", 0),
             Assign("command", "amin"),
         ),
@@ -252,7 +241,7 @@ def build_typing_input(period: Fraction) -> tuple[
     ParameterEnvironment,
     tuple[Process, Process],
 ]:
-    """构造独立共享参数、两个局部 Gamma 和顶层 T-parallel 输入。"""
+    """建立共享参数、分离状态 Gamma 和两个并行配置。"""
 
     vehicle = build_vehicle(period)
     controller = build_controller(period)
@@ -279,7 +268,6 @@ def build_typing_input(period: Fraction) -> tuple[
             BasicType.REAL,
             refinement="amin <= eta and eta <= amax",
         ),
-        # 项目的通信 AST 要求至少一个标量，用 0 表示论文的 unit stop。
         "stop": ChannelType(BasicType.INT, refinement="eta == 0"),
     }
     configurations = (
@@ -304,61 +292,35 @@ def _positive_fraction(value: str) -> Fraction:
 
 
 def parse_period(argv: Sequence[str] | None = None) -> Fraction:
-    """只接收具体批注 d；四个物理参数始终保持符号化。"""
+    """只读取具体批注 d；四个物理参数没有数值入口。"""
 
     parser = argparse.ArgumentParser(
         description=(
-            "Reproduce the original Section 5 dL issue for all admissible "
-            "end/vmax/amin/amax; only annotation d is concrete."
+            "Derive a Type AST for all admissible end/vmax/amin/amax; "
+            "only the annotation delay d is concrete."
         ),
     )
     parser.add_argument("--d", type=_positive_fraction, default=Fraction(1, 1))
     return parser.parse_args(argv).d
 
 
-def _print_unknown_dl_obligations(report: object) -> int:
-    """打印活跃的 unknown dL 义务，并返回数量。"""
-
-    obligations = getattr(report, "obligations", ())
-    unknown_items = [
-        item
-        for item in obligations
-        if item.active
-        and item.kind == "dl"
-        and item.verdict is Verdict.UNKNOWN
-    ]
-    if not unknown_items:
-        return 0
-
-    print("\n=== Active unknown dL obligations ===")
-    for index, item in enumerate(unknown_items, start=1):
-        print(f"[{index}] rule        : {item.rule}")
-        print(f"    description : {item.description}")
-        print(f"    formula     : {item.formula}")
-        print(f"    prover input: {item.proof_formula}")
-        print(f"    detail      : {item.detail}")
-    return len(unknown_items)
-
-
 def main(argv: Sequence[str] | None = None) -> int:
-    """尝试从论文原始 HCSP AST 生成 Type AST，并展示停止的 dL 前提。"""
+    """执行一般参数 HCSP AST 到 Type AST 的完整推导。"""
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
     period = parse_period(argv)
-    position_invariant, velocity_invariant, acceleration_invariant, _, loop_invariant = (
-        invariant_formulas(period)
-    )
+    phi_p, phi_v, phi_a, _, loop_invariant = invariant_formulas(period)
     gamma, theta, configurations, parameters, processes = build_typing_input(period)
 
-    print("=== Original-paper Section 5 case under shared parameters ===")
+    print("=== General-parameter Section 5 case ===")
     print("symbolic parameters : end, vmax, amin, amax : Real")
     print(f"parameter premise   : {PARAMETER_ASSUMPTIONS}")
     print(f"concrete annotation d: {period}")
-    print(f"phi_p               : {position_invariant}")
-    print(f"phi_v               : {velocity_invariant}")
-    print(f"original phi_a      : {acceleration_invariant}")
+    print(f"phi_p               : {phi_p}")
+    print(f"phi_v               : {phi_v}")
+    print(f"phi_a               : {phi_a}")
     print(f"loop invariant      : {loop_invariant}")
 
     print("\n=== HCSP AST ===")
@@ -366,7 +328,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Controller: {processes[1]!r}")
 
     base_config = KeYmaeraXConfig.from_environment()
-    # KeYmaera X 需要可写的用户目录。仅影响当前脚本及其证明器子进程。
+    # KeYmaera X 自身也读取同名环境变量来选择可写缓存目录；仅设置 Java
+    # user.home 不会覆盖这一层。该修改只影响当前脚本及其证明器子进程。
     os.environ["KEYMAERAX_HOME"] = str(KEYMAERAX_HOME_DIRECTORY)
     prover_config = replace(
         base_config,
@@ -384,10 +347,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         keymaerax_config=prover_config,
     )
 
-    print("\n=== Type AST conversion result ===")
+    print("\n=== Type AST ===")
     if report.inferred_type is None:
-        print("No complete Type AST: derivation stopped at an unproved premise.")
-        print("Component types:", report.component_types)
+        print("(none: at least one general premise was not proved)")
     else:
         print(repr(report.inferred_type))
         print("\n=== Readable Type ===")
@@ -395,27 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print("\n=== Full derivation report ===")
     print(report.format_detailed())
-    unknown_count = _print_unknown_dl_obligations(report)
-
-    print("\n=== Conclusion ===")
-    if unknown_count:
-        print(
-            "Reproduced: the original phi_a leaves an active dL premise unknown, "
-            "so HCSP AST to Type AST conversion cannot complete."
-        )
-        # 本文件是问题复现器；复现 unknown 即表示运行达到预期结果。
-        return 0
-    if report.inferred_type is not None:
-        print(
-            "The full Type AST was generated; this prover/run did not reproduce "
-            "the expected unknown result."
-        )
-        return 1
-    print(
-        "The derivation failed without an active unknown dL obligation; inspect "
-        "the diagnostics above."
-    )
-    return 1
+    return 0 if report.inferred_type is not None else 1
 
 
 if __name__ == "__main__":

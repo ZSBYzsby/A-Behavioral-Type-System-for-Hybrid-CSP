@@ -615,6 +615,23 @@ class Z3ProofEngine:
             return Verdict.FALSE, f"counterexample: {solver.model()}"
         return Verdict.UNKNOWN, solver.reason_unknown() or "Z3 returned unknown"
 
+    def satisfiable(self, formula: Any) -> tuple[Verdict, str]:
+        """判定共享参数约束是否至少存在一个合法预赋值。"""
+
+        if z3 is None:
+            return Verdict.UNKNOWN, "z3-solver is not installed"
+        if not z3.is_bool(formula):
+            return Verdict.FALSE, f"parameter constraint is not Boolean: {formula}"
+        solver = z3.Solver()
+        solver.set(timeout=self.timeout_ms)
+        solver.add(z3.simplify(formula))
+        result = solver.check()
+        if result == z3.sat:
+            return Verdict.TRUE, "constraint has at least one admissible assignment"
+        if result == z3.unsat:
+            return Verdict.FALSE, "constraint is unsatisfiable"
+        return Verdict.UNKNOWN, solver.reason_unknown() or "Z3 returned unknown"
+
     def state_satisfies(
         self,
         formula: Any,

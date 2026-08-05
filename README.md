@@ -350,10 +350,42 @@ print(report.format_detailed())  # 原始公式、证明器输入、证据和遗
 `check_hcsp(...)` 的环境输入为：
 
 1. `gamma`：普通变量类型和允许出现的 ODE 演化向量环境；
-2. `theta`：通道 refinement 类型环境；
-3. `path_condition`：默认 `True`；
-4. `configurations`：进程或 `(state, process)` 列表；
-5. `expected_types`：可选的 HCSP 行为类型列表。
+2. `parameters`：可选的共享只读参数声明及合法预赋值约束；
+3. `theta`：通道 refinement 类型环境；
+4. `path_condition`：默认 `True`；
+5. `configurations`：进程或 `(state, process)` 列表；
+6. `expected_types`：可选的 HCSP 行为类型列表。
+
+共享参数在 HCSP 执行前由用户选定，所有合法选择必须满足同一个约束。它们
+不属于任一分量的状态 Gamma，可以被所有并行配置、通道 refinement、递归
+不变量和 ODE 公式读取，但不能被初始 state、赋值、输入动作或 ODE 左端修改：
+
+```python
+parameters = ParameterEnvironment(
+    {
+        "end": BasicType.REAL,
+        "vmax": BasicType.REAL,
+        "amin": BasicType.REAL,
+        "amax": BasicType.REAL,
+    },
+    constraint=(
+        "end >= 0 and vmax >= 0 and "
+        "amin < 0 and amax >= 0"
+    ),
+)
+
+report = check_hcsp(
+    gamma=gamma,                 # 只含可变状态和 ODE 向量声明
+    theta=theta,
+    configurations=configurations,
+    parameters=parameters,
+)
+```
+
+若参数约束记为 `H`，配置局部路径记为 `phi`，T-sigma 实际检查
+`H -> phi[sigma]`；后续规则在背景条件 `H and phi` 下推导。因此结果表示
+“对每一个满足 H 的预赋值，类型推导均成立”，而不是只检查某一组参数实例。
+检查器还会先验证 `H` 可满足，拒绝用矛盾约束得到真空证明。
 
 并行的有状态系统应按 Table 2 写成多个 `Configuration(state, process, gamma=...,
 path_condition=...)`：局部 Gamma 必须两两不交、类型与全局 Gamma 一致，并且
@@ -372,7 +404,6 @@ Gamma 显式区分“具有当前值的标量变量”和“允许出现的 ODE 
 ```python
 gamma = {
     "mode": BasicType.INT,      # 普通离散状态
-    "gain": BasicType.REAL,     # 普通实数参数
     "x": BasicType.REAL,        # x 的当前值是 Real
     "ode_x": ContinuousType(("x",)),  # process 中允许出现 ODE vector {x}
 }

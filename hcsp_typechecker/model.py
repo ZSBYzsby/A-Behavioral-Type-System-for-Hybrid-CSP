@@ -418,6 +418,41 @@ def normalize_channel_type(value: Any) -> ChannelType:
 
 
 # --------------------------------------------------------------------------
+# 项目扩展：共享只读参数环境 Delta ::= x:B,... | H。
+# 功能：声明在 HCSP 执行前由用户选定、在所有并行配置间共享且执行中不可修改
+#       的参数，并给出所有合法预赋值必须满足的约束 H。
+# 检查/模型关系：本类只冻结公开输入；名称、基础类型、约束的 Bool 类型、约束
+#                可满足性以及与 Gamma 的不相交性由 TypeChecker 统一检查。
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ParameterEnvironment:
+    """所有配置共享的预赋值、只读参数声明及其合法性约束。
+
+    ``declarations`` 的每个值最终必须规范化为 ``BasicType``。``constraint``
+    只能引用这些参数，表示用户选择参数值时必须满足的性质。类型检查证明的是
+    对每一个满足该约束的参数赋值，Table 2 推导均成立；参数不属于状态 Gamma，
+    因而不参与并行状态空间分区。
+    """
+
+    declarations: Mapping[str, Any]
+    constraint: Any = True
+
+    def __init__(
+        self,
+        declarations: Mapping[str, Any] | None = None,
+        constraint: Any = True,
+    ):
+        """复制声明映射，隔离调用方后续修改。"""
+
+        object.__setattr__(
+            self,
+            "declarations",
+            {} if declarations is None else dict(declarations),
+        )
+        object.__setattr__(self, "constraint", constraint)
+
+
+# --------------------------------------------------------------------------
 # 论文对应：Section 4.2 组合配置判断中的单个 ``(sigma, P)``；Table 2
 #           [T-sigma] 由 ``Gamma·Theta·phi |- P :: T`` 和 ``|= phi[sigma]``
 #           得到 ``Gamma·Theta·phi |- (sigma, P) :: T``。
@@ -486,8 +521,9 @@ class Configuration:
 class TypingJudgment:
     """一次完整的类型检查请求。
 
-    对应 ``Gamma; Theta |- configurations : types``。``expected_types`` 可选：
-    提供时额外校验推导结果，未提供时仅返回推导出的行为类型。
+    对应 ``Gamma; Pi; Theta |- configurations : types``，其中 ``Pi``
+    是可选的共享只读参数环境。``expected_types`` 可选：提供时
+    额外校验推导结果，未提供时仅返回推导出的行为类型。
     """
 
     gamma: Mapping[str, GammaType]
@@ -495,6 +531,7 @@ class TypingJudgment:
     configurations: tuple[Configuration, ...]
     path_condition: Any = True
     expected_types: tuple[_ConfigurationType, ...] | None = None
+    parameters: ParameterEnvironment = ParameterEnvironment()
 
     # 功能：把公开 API 的多种配置写法规范化成不可变 Configuration 元组。
     # 检查/模型关系：不按 expected_types 反推类型；它只在推导完成后用于比较。
@@ -505,6 +542,7 @@ class TypingJudgment:
         configurations: Sequence[Configuration | tuple[Mapping[str, Any], Any] | Any],
         path_condition: Any = True,
         expected_types: Sequence[_ConfigurationType] | None = None,
+        parameters: ParameterEnvironment | Mapping[str, Any] | None = None,
     ):
         """规范化环境与配置的多种便捷输入形式。"""
         normalized_configs: list[Configuration] = []
@@ -519,6 +557,17 @@ class TypingJudgment:
         object.__setattr__(self, "theta", {} if theta is None else dict(theta))
         object.__setattr__(self, "configurations", tuple(normalized_configs))
         object.__setattr__(self, "path_condition", path_condition)
+        if parameters is None:
+            parameter_environment = ParameterEnvironment()
+        elif isinstance(parameters, ParameterEnvironment):
+            parameter_environment = parameters
+        elif isinstance(parameters, Mapping):
+            parameter_environment = ParameterEnvironment(parameters)
+        else:
+            raise TypeError(
+                "parameters must be a ParameterEnvironment, mapping, or None"
+            )
+        object.__setattr__(self, "parameters", parameter_environment)
         object.__setattr__(
             self,
             "expected_types",
@@ -640,6 +689,8 @@ class InferenceStep:
     location: str
     subject: str
     gamma: tuple[tuple[str, str], ...] = ()
+    parameters: tuple[tuple[str, str], ...] = ()
+    parameter_constraint: str = ""
     theta: tuple[tuple[str, str], ...] = ()
     path_condition: str = ""
     symbolic_state: tuple[tuple[str, str], ...] = ()
@@ -712,7 +763,7 @@ class CheckReport:
         """返回证明义务在论文规则中的简写形状或表达式侧条件说明。"""
 
         exact_shapes = {
-            "T-sigma": "[T-sigma]  |= phi[sigma]",
+            "T-sigma": "[T-sigma-param]  H => phi[sigma]",
             "T-Assert": "[T-Assert]  phi => B",
             "T-Assign-post": "[T-Assign]  phi => phi'{e/x}",
             "T-Out": "[T-Out]  phi => refinement{e/eta}",
@@ -1004,6 +1055,18 @@ class CheckReport:
                 )
             else:
                 lines.append("     Gamma    : {}")
+            if step.parameters:
+                lines.append(
+                    "     Parameters: "
+                    + ", ".join(
+                        f"{name}:{value_type}"
+                        for name, value_type in step.parameters
+                    )
+                )
+                lines.append(
+                    "     参数约束 : "
+                    + (step.parameter_constraint or "True")
+                )
             if step.theta:
                 lines.append(
                     "     Theta    : "
@@ -1035,6 +1098,12 @@ class CheckReport:
             (
                 "",
                 "=== 汇总 ===",
+                "简洁类型 : "
+                + (
+                    str(self.inferred_type)
+                    if self.inferred_type is not None
+                    else "(none)"
+                ),
                 f"规则步骤 : {len(self.steps)}",
                 f"证明记录 : {len(self.obligations)}",
                 f"有效义务 : {len(active_obligations)} "

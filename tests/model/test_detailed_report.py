@@ -137,6 +137,8 @@ class DetailedReportTests(unittest.TestCase):
             "(无；所有已生成证明义务均已证明)",
             "Proof @ T-Out",
             "=== 诊断信息 ===",
+            "=== 汇总 ===",
+            "简洁类型 : ch?.(ch!.(0))",
             "规则步骤 : 8",
             "证明记录 : 2",
             "有效义务 : 2 (true=2, false=0, unknown=0)",
@@ -174,6 +176,7 @@ class DetailedReportTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.UNKNOWN)
         self.assertIsNone(report.inferred_type)
         expected_fragments = (
+            "简洁类型 : (none)",
             "未选候选 : 2",
             "candidate=communication-only",
             "candidate=natural-timeout",
