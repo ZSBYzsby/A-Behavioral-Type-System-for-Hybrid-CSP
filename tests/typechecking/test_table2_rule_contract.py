@@ -280,7 +280,7 @@ class Table2RuleContractTests(unittest.TestCase):
         )
         report = _check_one(
             process,
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"left": integer_channel, "right": integer_channel},
             state={"x": 0},
         )
@@ -322,7 +322,7 @@ class Table2RuleContractTests(unittest.TestCase):
         )
         report = _check_one(
             process,
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             state={"x": 0},
             path="x == 0",
             dl_checker=_select_boundary_rule,

@@ -4,7 +4,8 @@
 “词汇表”：
 
 * :class:`BasicType`、:class:`ContinuousType`、:class:`ChannelType` 描述变量
-  环境 ``Gamma`` 与通道环境 ``Theta`` 中允许出现的类型；
+  环境 ``Gamma`` 与通道环境 ``Theta`` 中允许出现的声明；其中 ``BasicType``
+  项给标量值变量定型，连续项则独立登记 process 中允许出现的 ODE 演化向量；
 * :class:`TypingJudgment` 是检查器的输入；
 * :class:`InferenceStep`、:class:`ProofObligation`、:class:`Diagnostic` 和
   :class:`CheckReport` 是检查器输出的可审计证据。
@@ -22,8 +23,8 @@ HCSP 进程语法由 ``hcsp_process_ast.py`` 独立定义，行为类型语法�
 
 本文件中的定义按检查过程分为三层：
 
-* ``BasicType`` 表示普通值变量类型和每个表达式的结果类型，
-  ``ContinuousType`` 显式标记 ``Gamma`` 中的连续实变量，``ChannelType`` 表示
+* ``BasicType`` 表示标量值变量类型和每个表达式的结果类型，
+  ``ContinuousType`` 是 ``Gamma`` 中独立的 ODE 向量声明，``ChannelType`` 表示
   承载一个或多个独立 ``BasicType`` 槽位的 ``Theta`` 项；
 * ``Configuration``、``TypingJudgment`` 表示一次检查请求；
 * ``InferenceStep``、``ProofObligation``、``Diagnostic``、``CheckReport``
@@ -39,14 +40,14 @@ HCSP 进程语法由 ``hcsp_process_ast.py`` 独立定义，行为类型语法�
 Section 4.1 的行为类型 ``T``、angelic type ``A`` 和 Section 4.2 的组合类型
 ``mathcal T`` 已全部移入 ``hcsp_type_ast.py``，该文件同时保存逐节点论文对照。
 
-Definition 4.1 的 ``Gamma`` 同时描述值变量、递归变量和连续变量。本项目将其
-拆分：公开 ``TypingJudgment.gamma`` 用 ``BasicType`` 表示普通值变量，并用
-``ContinuousType`` 显式保存连续向量成员和轨迹必须持续满足的 ``phi``；由于
-Gamma 的 Python 映射仍按标量名索引，同一向量声明会登记在它的每个分量名下；
+Definition 4.1 的 ``Gamma`` 同时描述值变量、递归变量和连续演化项。本项目将其
+拆分：公开 ``TypingJudgment.gamma`` 用 ``BasicType`` 表示包括 ODE 分量在内的
+所有标量值变量，并用单独命名的 ``ContinuousType`` 项保存允许出现的 ODE
+向量成员；
 递归类型及边界不变量由
-``checker._Context.rec_env`` 和 ``Mu`` 批注保存。连续变量的向量场仍来自对应
-``ODE`` 节点，T-ODE 会把节点 safety 与精确匹配该左侧向量的 Gamma 连续
-``phi`` 合并验证，而变量类别本身不再由 ODE 左端临时猜测。``Theta``
+``checker._Context.rec_env`` 和 ``Mu`` 批注保存。连续演化项的向量场仍来自对应
+``ODE`` 节点，T-ODE 要求节点左侧的完整变量集合已由 Gamma 登记；连续演化中
+必须恒成立的 ``phi`` 只来自 ODE 节点的 safety 批注。``Theta``
 则由 ``ChannelType`` 表示项目扩展后的 refinement type
 ``{(eta1:B1,...,etan:Bn) | phi}``；一槽情形退化为论文的
 ``{eta : B | phi}``。Table 2 的公式前提被记录为 ``ProofObligation``。
@@ -154,8 +155,9 @@ def normalize_type(value: Any, *, subject: str = "Value type") -> BasicType:
 
     调用方可以传入枚举、Python 类型对象或字符串别名。论文未要求积类型，
     因此 tuple/list 不能表示一个普通值的类型。表达式结果、Theta 通信签名中
-    的每个独立槽位以及 Gamma 中的普通变量都使用 ``BasicType``；Gamma 中的
-    连续变量由 ``ContinuousType`` 额外包装。完整的多槽 Theta 项由
+    的每个独立槽位以及 Gamma 中包括 ODE 分量在内的值变量都使用
+    ``BasicType``；独立的 ODE 演化向量声明使用 ``ContinuousType``。完整的
+    多槽 Theta 项由
     ``ChannelType`` 逐槽调用本函数构造。
     """
     if isinstance(value, BasicType):
@@ -190,106 +192,69 @@ def normalize_type(value: Any, *, subject: str = "Value type") -> BasicType:
 
 
 # --------------------------------------------------------------------------
-# 论文对应：Definition 4.1 的连续变量项
-#           ``underlined(v) : R_{>=0} partial-function phi``。
-# 角色对应：在公开 Gamma 中显式区分连续实变量与同为 Real 的普通值变量。
-# 构造方式：单变量写 ContinuousType()；非平凡轨迹性质写成
-#           ContinuousType(phi="x >= 0")；多变量向量写成
-#           ContinuousType(variables=("p", "v", "a"), phi=...)。
-# 构造检查：当前 HCSP/dL 语义只允许实值连续轨迹，其他基础类型立即拒绝；
-#           显式向量必须非空、成员互异且都是合法变量名；phi 在构造时立即转
-#           成项目 Expr，布尔类型和有效性只在左侧向量精确匹配的 T-ODE 检查。
+# 论文对应：退化后的连续演化向量项
+#           ``underlined(v) : R_{>=0} partial-function R^n``。
+# 角色对应：作为公开 Gamma 中独立命名的声明，登记 process 允许出现的完整
+#           ODE 演化变量集合；其成员本身仍分别声明为 BasicType.REAL。
+# 构造方式：ContinuousType(variables=("p", "v", "a"))。
+# 构造检查：向量必须非空、成员互异且都是合法变量名；成员顺序不构成语义，
+#           构造器会按名称规范化，以便 T-ODE 按集合匹配。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ContinuousType:
-    """一个连续向量的成员、当前值类型及持续性质 ``phi``。
+    """Gamma 中一个独立命名的、允许出现的 ODE 演化向量声明。
 
-    论文用一个向量项表示 ``v : R_{>=0} partial-function R^n``。项目的 Gamma
-    仍按标量变量名索引，因此同一个显式向量声明必须登记在它的每个成员名下。
-    例如 ``trajectory = ContinuousType(variables=("p", "v", "a"), phi=...)``
-    后，Gamma 的 ``p``、``v``、``a`` 三项都使用 ``trajectory``。省略
-    ``variables`` 时，声明表示由当前 Gamma 键确定的单元素向量，保留
-    ``{"x": ContinuousType(phi=...)}`` 的简洁写法。
+    连续项退化为 ``v : R_{>=0} partial-function R^n``，不再携带状态性质。
+    连续演化中需要恒成立的 ``phi`` 只由对应 ODE 的 ``annotation.safety``
+    定义，从而避免 Gamma 与 ODE 重复声明同一性质。它不是 ``p``、``v``、``a``
+    等标量变量的值类型：这些成员必须各自以 ``BasicType.REAL`` 出现在 Gamma，
+    而另一个声明名（例如 ``vehicle_ode``）映射到本对象。
 
-    表达式读取变量时使用 ``value_type`` 所示的当前 Real 值；T-ODE 额外要求
-    方程左端具有这个连续标记。只有 ODE 的用户方程左侧向量与 ``variables``
-    （或省略时的单元素向量）按顺序精确相等，``phi`` 才是该 ODE 必须验证的
-    轨迹条件。ODE 的隐式局部时钟不属于用户向量。构造 dL 义务时，匹配到的
-    ``phi`` 与节点 safety 一同进入后置目标，不能作为演化域中的已知假设。
+    ``variables`` 按集合解释并规范化排序，因此 ODE 左端方程的书写顺序不影响
+    匹配。ODE 的隐式局部时钟不属于用户向量，也不需要在 Gamma 中登记；没有
+    用户方程的 ``ODE.wait(d)`` 同样不需要连续向量声明。
     """
 
-    value_type: BasicType = BasicType.REAL
-    variables: tuple[str, ...] | None = None
-    phi: Expr = Literal(True)
+    variables: tuple[str, ...]
 
     def __init__(
         self,
-        value_type: Any = BasicType.REAL,
-        *,
-        variables: Sequence[str] | None = None,
-        phi: ExprLike = True,
+        variables: Sequence[str],
     ):
-        """建立连续实向量类型，并规范化成员及全程状态性质 ``phi``。"""
+        """建立按成员集合解释的 ``R^n`` ODE 演化向量声明。"""
 
-        normalized = normalize_type(
-            value_type,
-            subject="Continuous variable value type",
-        )
-        if normalized != BasicType.REAL:
+        if isinstance(variables, (str, bytes)):
             raise TypeError(
-                "Continuous variables must have current value type Real, "
-                f"got {normalized}"
+                "Continuous vector variables must be a sequence of names, "
+                "not one string"
             )
-        object.__setattr__(self, "value_type", normalized)
-        if variables is None:
-            normalized_variables = None
-        else:
-            if isinstance(variables, (str, bytes)):
-                raise TypeError(
-                    "Continuous vector variables must be a sequence of names, "
-                    "not one string"
-                )
-            normalized_variables = tuple(variables)
-            if not normalized_variables:
-                raise ValueError("Continuous vector variables must not be empty")
-            if any(
-                not isinstance(name, str) or not name.isidentifier()
-                for name in normalized_variables
-            ):
-                raise ValueError(
-                    "Continuous vector variables must be valid identifiers"
-                )
-            if len(set(normalized_variables)) != len(normalized_variables):
-                raise ValueError("Continuous vector variables must be distinct")
-        object.__setattr__(self, "variables", normalized_variables)
-        object.__setattr__(self, "phi", ensure_expr(phi))
-
-    def effective_variables(self, gamma_name: str) -> tuple[str, ...]:
-        """返回声明的正式向量；省略 ``variables`` 时使用当前 Gamma 键。"""
-
-        return self.variables if self.variables is not None else (gamma_name,)
+        normalized_variables = tuple(variables)
+        if not normalized_variables:
+            raise ValueError("Continuous vector variables must not be empty")
+        if any(
+            not isinstance(name, str) or not name.isidentifier()
+            for name in normalized_variables
+        ):
+            raise ValueError("Continuous vector variables must be valid identifiers")
+        if len(set(normalized_variables)) != len(normalized_variables):
+            raise ValueError("Continuous vector variables must be distinct")
+        object.__setattr__(self, "variables", tuple(sorted(normalized_variables)))
 
     def __str__(self) -> str:
-        """按 Definition 4.1 的 ``R>=0 -> phi`` 形式显示声明。"""
+        """按 ``R>=0 ~> R^n`` 形式显示演化向量声明。"""
 
-        # phi=true 不增加约束，沿用已有的值域显示，避免详细报告把所有旧模型
-        # 误写成性质发生了变化；非平凡 phi 则显式展示 Definition 4.1 的性质。
-        if isinstance(self.phi, Literal) and self.phi.value is True:
-            rendered = "R>=0 ~> Real"
-        else:
-            rendered = f"R>=0 ~> ({self.phi})"
-        if self.variables is None:
-            return rendered
+        dimension = len(self.variables)
+        rendered = "R>=0 ~> Real" if dimension == 1 else f"R>=0 ~> R^{dimension}"
         return rendered + " on (" + ", ".join(self.variables) + ")"
 
 
-# Gamma 项只允许普通基础类型或显式连续实轨迹类型。进程变量类型保存在
+# Gamma 项只允许标量基础类型或独立的 ODE 演化向量声明。进程变量类型保存在
 # checker 的递归环境中，不与 Python 字符串键上的值变量混用。
 GammaType = BasicType | ContinuousType
 
 
 def normalize_gamma_type(value: Any, *, subject: str = "Gamma entry") -> GammaType:
-    """规范化 Gamma 项，同时保留普通 Real 与连续 Real 的类别差异。"""
+    """规范化 Gamma 的标量值类型或独立 ODE 向量声明。"""
 
     if isinstance(value, ContinuousType):
         return value
@@ -302,14 +267,14 @@ def normalize_gamma_type(value: Any, *, subject: str = "Gamma entry") -> GammaTy
 
 
 def gamma_value_type(value: Any, *, subject: str = "Gamma entry") -> BasicType:
-    """返回 Gamma 变量在普通表达式中读取当前值时使用的基础类型。"""
+    """返回 Gamma 标量变量的基础类型，并拒绝把 ODE 向量当作值。"""
 
     normalized = normalize_gamma_type(value, subject=subject)
-    return (
-        normalized.value_type
-        if isinstance(normalized, ContinuousType)
-        else normalized
-    )
+    if isinstance(normalized, ContinuousType):
+        raise TypeError(
+            f"{subject} is an ODE vector declaration, not a scalar value type"
+        )
+    return normalized
 
 
 # 论文对应：服务于 Table 2 的 [T-Assign]、[T-In]、[T-Out] 表达式类型前提；
@@ -470,9 +435,10 @@ class Configuration:
     Gamma 同型且并集恰为全局 Gamma。若使用局部路径，则所有并行叶子都必须
     提供，外层默认 ``true`` 仅表示最终路径由这些局部路径的合取产生。
 
-    ``state`` 是 Gamma 所声明状态空间上的部分赋值：允许
-    ``dom(state)`` 是局部 ``dom(Gamma)`` 的真子集，未赋值变量留给
-    ``|= phi[state]`` 的有效性检查；但 state 不得引入 Gamma 未声明的变量。
+    ``state`` 是 Gamma 中 ``BasicType`` 值变量上的部分赋值：允许
+    ``dom(state)`` 是局部值变量定义域的真子集，未赋值变量留给
+    ``|= phi[state]`` 的有效性检查；独立 ``ContinuousType`` 声明没有状态值，
+    不能作为 state 键。
 
     严格的论文配置叶子只接受 ``Process``。项目为无状态协议保留
     ``Configuration({}, Parallel(...))`` 便捷写法；只要 Gamma、state 或路径
@@ -753,7 +719,7 @@ class CheckReport:
             "T-ODE-safety": (
                 "[T-unrhd/T-unrhd-prime]  "
                 "(phi and t=0) => [ODE,t'=1]"
-                "(t<=d => (safety and GammaPhi))"
+                "(t<=d => safety)"
             ),
             "T-ODE-domain": "[T-unrhd]  phi => [ODE]B",
             "T-ODE-boundary": (

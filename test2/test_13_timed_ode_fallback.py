@@ -46,7 +46,7 @@ class TimedODEFallbackExample(unittest.TestCase):
         integer = ChannelType(BasicType.INT)
         report = check_process(
             process,
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": integer, "done": integer},
             state={"x": 0},
             path_condition="x == 0",

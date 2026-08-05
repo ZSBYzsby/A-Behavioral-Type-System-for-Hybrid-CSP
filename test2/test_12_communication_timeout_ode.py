@@ -42,7 +42,7 @@ class CommunicationTimeoutODEExample(unittest.TestCase):
         )
         report = check_process(
             process,
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"tick": ChannelType(BasicType.INT)},
         )
         expected = CommunicationTimeoutType(2, OutputType("tick", EndType()))

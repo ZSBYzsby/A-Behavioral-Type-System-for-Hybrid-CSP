@@ -163,7 +163,7 @@ class DetailedReportTests(unittest.TestCase):
             Skip(),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",

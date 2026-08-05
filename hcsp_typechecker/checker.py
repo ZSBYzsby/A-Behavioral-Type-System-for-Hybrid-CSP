@@ -192,12 +192,12 @@ class _LazyAssignmentPostState:
 class _ODEDLTerms:
     """一条 ODE 在入口符号快照下生成 dL 公式所需的 Z3 中间项。
 
-    ``precondition`` 额外包含新鲜连续变量与赋值后当前值之间的等式，以及
+    ``precondition`` 额外包含新鲜 ODE 分量与赋值后当前值之间的等式，以及
     当前 ODE 局部时钟的初始化等式 ``t=0``。``equations`` 则在用户方程后附加
     该时钟的 ``t'=1``；``clock`` 保存同一个 Z3 Real 项，供用户 ODE 公式、
     有限安全性和准确边界公式共同引用。``safety`` 保存 ODE 节点批注的安全
-    目标与 Gamma 中精确匹配左侧向量的 ``ContinuousType.phi`` 合取：二者都是
-    当前 ODE 必须证明的轨迹性质，不能作为 dL 连续程序的演化域假设。
+    目标；这是当前 ODE 必须证明的唯一轨迹性质，不能作为 dL 连续程序的演化域
+    假设。Gamma 只登记允许出现的演化向量，不再提供第二份安全性质。
     ``domain`` 保留论文中的原始 ``B``，``domain_definedness`` 单独保存向量场
     和 B 的有定义条件，
     防止边界公式把“B 无定义”误当成合法的 ``not B``。这样时钟既真正属于
@@ -585,10 +585,13 @@ class TypeChecker:
                 gamma_is_valid = True
             else:
                 variables = self._process_vars(configuration.process) | set(configuration.state)
-                # 连续向量是一个不可拆分的 Gamma 状态单元。某个分量使用其中
-                # 任一成员时，自动分区把完整向量交给该分量；若两个并行分量
-                # 分别使用同一向量的不同成员，随后的不交检查会正确拒绝它们。
-                variables = self._expand_continuous_vector_domain(gamma, variables)
+                # 独立 ContinuousType 项只跟随真正含相应 ODE 的配置；标量成员
+                # 在 ODE 外仍是普通 Real，不会仅因读写其中一个成员就拖入整组。
+                variables = self._expand_continuous_vector_domain(
+                    gamma,
+                    variables,
+                    self._process_ode_vectors(configuration.process),
+                )
                 component_gamma = {
                     name: value_type for name, value_type in gamma.items() if name in variables
                 }
@@ -738,7 +741,8 @@ class TypeChecker:
                 (),
                 lambda _children: _INFERENCE_FAILURE,
             )
-        undeclared_state_variables = set(judgment.state) - set(context.gamma)
+        value_gamma = self._value_gamma(context.gamma)
+        undeclared_state_variables = set(judgment.state) - set(value_gamma)
         if undeclared_state_variables:
             names = ", ".join(
                 repr(name)
@@ -1086,12 +1090,18 @@ class TypeChecker:
         premises: list[_Premise] = []
         try:
             target = lvalue_name(node.target)
-            if target not in context.gamma:
+            target_declaration = context.gamma.get(target)
+            if target_declaration is None:
                 raise ExpressionError(f"Assignment target {target!r} is not declared in Gamma")
+            if not isinstance(target_declaration, BasicType):
+                raise ExpressionError(
+                    f"Assignment target {target!r} names an ODE vector declaration, "
+                    "not a scalar variable"
+                )
             # 右值必须完全在赋值前状态中求值；尤其 x := x + 1 的右侧 x 不能
             # 被误读成赋值后的 x。
             result = self._translator(context).translate(node.expression)
-            expected = gamma_value_type(context.gamma[target])
+            expected = target_declaration
             if not is_subtype(result.value_type, expected):
                 self._diagnose(
                     Verdict.FALSE,
@@ -1264,6 +1274,11 @@ class TypeChecker:
             ):
                 name = lvalue_name(variable)
                 existing_entry = next_context.gamma.get(name)
+                if isinstance(existing_entry, ContinuousType):
+                    raise ExpressionError(
+                        f"Input target {name!r} names an ODE vector declaration, "
+                        "not a scalar variable"
+                    )
                 existing = (
                     None
                     if existing_entry is None
@@ -1294,8 +1309,7 @@ class TypeChecker:
             ):
                 name = lvalue_name(variable)
                 existing_entry = next_context.gamma.get(name)
-                # 新输入变量是普通值变量；若目标已显式声明为连续变量，通信
-                # 只更新其当前值，不得丢失 ContinuousType 类别标记。
+                # 输入只建立或更新标量值项；独立 ODE 向量声明不会被通信改写。
                 next_context.gamma[name] = (
                     value_type if existing_entry is None else existing_entry
                 )
@@ -1851,74 +1865,75 @@ class TypeChecker:
 
     @staticmethod
     def _validate_continuous_vectors(gamma: Mapping[str, GammaType]) -> None:
-        """验证逐标量 Gamma 对一个显式连续向量给出完整且一致的登记。
+        """验证每个独立 ODE 向量声明的成员都是已声明 Real 标量。
 
-        ``ContinuousType(variables=(x1,...,xn), phi=...)`` 必须出现在所有
-        ``xi`` 键下，而且这些键的完整声明（成员顺序、值类型和 phi）必须相同。
-        这样检查器才能区分联合向量与若干恰好拥有相同 phi 的单元素向量。
-        省略 ``variables`` 的声明由所在 Gamma 键确定，天然是完整单元素向量。
+        ``ContinuousType`` 所在的 Gamma 键只是向量声明名，不是状态变量。
+        声明中的每个成员必须在另一个 Gamma 项中具有 ``BasicType.REAL``；不再
+        把同一个 ContinuousType 复制到各标量键。多个向量声明可以共享成员。
         """
 
-        for gamma_name, declaration in gamma.items():
+        for declaration_name, declaration in gamma.items():
             if not isinstance(declaration, ContinuousType):
                 continue
-            if declaration.variables is None:
-                continue
-            if gamma_name not in declaration.variables:
-                raise ValueError(
-                    f"Gamma entry {gamma_name!r} stores continuous vector "
-                    f"{declaration.variables!r} but is not one of its members"
-                )
             for member in declaration.variables:
                 member_declaration = gamma.get(member)
                 if member_declaration is None:
                     raise ValueError(
-                        f"Continuous vector {declaration.variables!r} is missing "
-                        f"Gamma member {member!r}"
+                        f"ODE vector declaration {declaration_name!r} references "
+                        f"missing Gamma scalar {member!r}"
                     )
-                if member_declaration != declaration:
+                if member_declaration is not BasicType.REAL:
                     raise ValueError(
-                        f"Continuous vector {declaration.variables!r} has "
-                        f"inconsistent Gamma declaration at {member!r}"
+                        f"ODE vector declaration {declaration_name!r} requires "
+                        f"member {member!r} to have BasicType.REAL, got "
+                        f"{member_declaration}"
                     )
+
+    @staticmethod
+    def _value_gamma(gamma: Mapping[str, GammaType]) -> dict[str, BasicType]:
+        """投影 Gamma 中真正具有当前标量值的 BasicType 项。"""
+
+        return {
+            name: declaration
+            for name, declaration in gamma.items()
+            if isinstance(declaration, BasicType)
+        }
 
     @staticmethod
     def _expand_continuous_vector_domain(
         gamma: Mapping[str, GammaType],
         names: set[str],
+        ode_vectors: set[frozenset[str]],
     ) -> set[str]:
-        """把自动并行分区中的任一连续分量扩展为它的完整显式向量。"""
+        """把当前配置实际使用的 ODE 向量声明加入自动 Gamma 分区。"""
 
         expanded = set(names)
-        for name in tuple(names):
-            declaration = gamma.get(name)
-            if isinstance(declaration, ContinuousType):
-                expanded.update(declaration.effective_variables(name))
+        for declaration_name, declaration in gamma.items():
+            if not isinstance(declaration, ContinuousType):
+                continue
+            members = frozenset(declaration.variables)
+            if members in ode_vectors:
+                expanded.add(declaration_name)
         return expanded
 
     @staticmethod
-    def _continuous_phis(
-        context: _Context,
+    def _declares_continuous_vector(
+        gamma: Mapping[str, GammaType],
         evolved: Sequence[str],
-    ) -> tuple[Any, ...]:
-        """返回与当前 ODE 用户左侧向量精确匹配的 Gamma 轨迹性质。
+    ) -> bool:
+        """判断 Gamma 是否登记了当前 ODE 的完整演化变量集合。
 
-        Definition 4.1 的 ``underlined(v): R>=0 -> phi`` 把 phi 绑定到完整
-        向量，而不是它的任意子集或超集。``evolved`` 只来自 ``node.eqs``，不含
-        随后追加到 dL 程序中的隐式局部时钟。显式向量声明会在每个 Gamma 分量
-        下重复登记，所以最后仍按表达式结构去重。
+        ``evolved`` 只来自用户写出的 ``node.eqs``，不含随后追加到 dL 程序的
+        隐式局部时钟。方程顺序不构成向量声明语义，重复左端变量已由 T-ODE
+        的独立静态检查拒绝。
         """
 
-        ode_vector = tuple(evolved)
-        properties: list[Any] = []
-        for name, declaration in context.gamma.items():
-            if not isinstance(declaration, ContinuousType):
-                continue
-            if declaration.effective_variables(name) != ode_vector:
-                continue
-            if declaration.phi not in properties:
-                properties.append(declaration.phi)
-        return tuple(properties)
+        ode_vector = frozenset(evolved)
+        return any(
+            isinstance(declaration, ContinuousType)
+            and frozenset(declaration.variables) == ode_vector
+            for declaration in gamma.values()
+        )
 
     def rule_t_ode(
         self,
@@ -1931,22 +1946,23 @@ class TypeChecker:
         Section 4.3 的两个额外输入只从 ``node.annotation`` 读取。延迟 ``d``
         与推导出的 ``A/T`` 由 ``make_timed_type`` 规范成 PureDelay、通信超时或
         有限定时外部选择。``d=infinity`` 没有超时迁移，其 fallback 固定为空行为
-        ``bottom`` 并按论文缩写化为 ``A``。dL 安全目标同时检查节点 safety
-        与左侧用户向量精确匹配的 ``ContinuousType.phi``；Gamma 连续性质是
-        当前 ODE 必须建立的轨迹条件，不能预先放入连续程序的演化域。子集、
-        超集或成员顺序不同都不触发该 phi，隐式局部时钟不参与向量比较。
+        ``bottom`` 并按论文缩写化为 ``A``。dL 安全目标只检查节点自己的
+        ``annotation.safety``。Gamma 中的 ODE 分量本身声明为普通 ``Real``，另
+        由一个独立 ``ContinuousType`` 项登记允许出现的完整演化变量集合；用户
+        左侧必须与其中一个集合精确相等，但方程书写顺序不影响匹配。隐式局部
+        时钟不参与向量比较。
 
         没有后继时使用纯通信中断规则；有非终端后继时使用带 fallback
         规则。唯一重叠形状 ``ODE; skip`` 由外层顺序选择器两条规则都试用，
         本方法的 ``candidate`` 参数只在该隔离尝试中指定当前规则。
 
         ``node.local_clock`` 由 ODE 构造器自动建立，不要求用户放入 Gamma 或
-        初始状态。ODE 方程右端、演化域、节点 safety 和已匹配 Gamma 连续
-        ``phi`` 中的 ``t`` 在局部作用域内绑定到这个时钟。生成 dL 前提时，它
+        初始状态。ODE 方程右端、演化域和节点 safety 中的 ``t`` 在局部作用域
+        内绑定到这个时钟。生成 dL 前提时，它
         被实体化为本 ODE 独占的新鲜 Real：
         入口自动加入 ``t=0``，连续方程自动加入 ``t'=1``；离开 ODE 后即被丢弃。
-        用户演化变量、导数、演化域或 safety 的静态类型失败时，不生成任何
-        时延类型；只有静态前提成立后才建立 dL 证明义务。
+        用户演化向量未登记，或导数、演化域、safety 的静态类型失败时，不生成
+        任何时延类型；只有静态前提成立后才建立 dL 证明义务。
         """
 
         node = judgment.nodes[0]
@@ -1972,7 +1988,7 @@ class TypeChecker:
         )
         derivative_definedness: list[Any] = []
         static_type_error = False
-        # 每个演化变量只能出现一次，并且必须在 Gamma 中显式声明为连续 Real。
+        # 每个演化变量只能出现一次，并且其当前值必须在 Gamma 中声明为 Real。
         for variable, derivative in equations:
             name = str(variable)
             if name in evolved:
@@ -1994,11 +2010,11 @@ class TypeChecker:
                     context.location,
                 )
                 static_type_error = True
-            elif not isinstance(gamma_entry, ContinuousType):
+            elif gamma_entry is not BasicType.REAL:
                 self._diagnose(
                     Verdict.FALSE,
-                    f"ODE variable {name!r} must have ContinuousType, "
-                    f"got ordinary {gamma_entry}",
+                    f"ODE variable {name!r} must have BasicType.REAL, "
+                    f"got {gamma_entry}",
                     "T-ODE",
                     context.location,
                 )
@@ -2021,7 +2037,19 @@ class TypeChecker:
                 self._diagnose(Verdict.FALSE, str(exc), "T-ODE", context.location)
                 static_type_error = True
 
-        continuous_phis = self._continuous_phis(context, evolved)
+        if (
+            evolved
+            and not static_type_error
+            and not self._declares_continuous_vector(context.gamma, evolved)
+        ):
+            self._diagnose(
+                Verdict.FALSE,
+                "ODE evolution vector "
+                f"{tuple(evolved)!r} is not declared by any ContinuousType in Gamma",
+                "T-ODE",
+                context.location,
+            )
+            static_type_error = True
         try:
             domain_result = translator.boolean_result(
                 node.constraint,
@@ -2031,16 +2059,8 @@ class TypeChecker:
                 annotation.safety,
                 local_symbols=ode_local_symbols,
             )
-            continuous_phi_results = tuple(
-                translator.boolean_result(
-                    phi,
-                    local_symbols=ode_local_symbols,
-                )
-                for phi in continuous_phis
-            )
             # 偏函数侧条件按其来源保存：源演化域和向量场的侧条件仍由相应
-            # Table 2 前提检查；节点 safety 与精确匹配 Gamma 连续 phi 的侧条件
-            # 都属于当前 ODE 的待证安全目标。
+            # Table 2 前提检查；节点 safety 的侧条件属于当前 ODE 的待证安全目标。
             domain = conjunction(
                 *derivative_definedness,
                 *domain_result.definedness,
@@ -2050,11 +2070,6 @@ class TypeChecker:
                 *derivative_definedness,
                 *safety_result.definedness,
                 safety_result.term,
-                *(
-                    item
-                    for result in continuous_phi_results
-                    for item in (*result.definedness, result.term)
-                ),
             )
         except ExpressionError as exc:
             self._diagnose(Verdict.FALSE, str(exc), "T-ODE", context.location)
@@ -2109,8 +2124,8 @@ class TypeChecker:
             dl_terms = None
             dl_term_error = str(exc)
 
-        # 只有“节点批注 safety 与已匹配 Gamma 连续 phi”的完整合取为 true 时
-        # 才可本地直接通过；任何非平凡匹配条件都必须交给 dL 后端证明。
+        # 只有节点批注 safety（连同导数有定义条件）为 true 时才可本地直接通过；
+        # Gamma 只登记向量，不再向这条逻辑目标追加性质。
         if self._is_true(safety):
             safety_problem: DLFormula | UntranslatedDLFormula = DLFormula(
                 "true",
@@ -2138,16 +2153,15 @@ class TypeChecker:
         premises: list[_Premise] = [
             self._dl_premise(
                 "T-ODE-safety",
-                "The ODE preserves both its annotated safety and Gamma "
-                "continuous condition until delay d",
+                "The ODE preserves its annotated safety until delay d",
                 safety_problem,
                 automatically_true=self._is_true(safety),
             )
         ]
 
         # 没有顺序后继时采用只含通信中断的规则；无限 delay 即使写有 tail，
-        # 自然超时也永远不会发生。Table 2 在这两种情况下要求在未把 B 或
-        # Gamma 连续条件预设为真的动力系统中证明 B 保持，即 ``pre -> [F]B``；
+        # 自然超时也永远不会发生。Table 2 在这两种情况下要求在未把 B 预设为
+        # 真的动力系统中证明 B 保持，即 ``pre -> [F]B``；
         # 若把待验证的性质写进程序域，证明义务会被错误削弱。
         if communication_rule:
             # ``ODE.wait(d)`` 的表面 constraint 是 true，但其真正 dL 演化域还
@@ -2335,8 +2349,9 @@ class TypeChecker:
 
         self._fresh_counter += 1
         ode_symbols = dict(context.symbols)
+        value_gamma = self._value_gamma(context.gamma)
         snapshot_translator = ExpressionTranslator(
-            context.gamma,
+            value_gamma,
             ode_symbols,
         )
         equalities: list[Any] = []
@@ -2344,20 +2359,20 @@ class TypeChecker:
         # ``evolved`` 可能因前面的结构错误含重复名；dL 公式只为每个名字建一次
         # 快照，结构错误本身已经由 T-ODE 诊断为 FALSE。
         for name in dict.fromkeys(evolved):
-            if name not in context.gamma:
+            if name not in value_gamma:
                 raise DLTranslationError(
                     f"cannot build dL formula for undeclared ODE variable {name!r}"
                 )
-            if not isinstance(context.gamma[name], ContinuousType):
+            if value_gamma[name] is not BasicType.REAL:
                 raise DLTranslationError(
-                    f"dL ODE variable {name!r} is not declared as ContinuousType"
+                    f"dL ODE variable {name!r} is not declared as BasicType.REAL"
                 )
             old_value = ode_symbols.get(name)
             if old_value is None:
-                old_value = snapshot_translator.symbol(name, context.gamma[name])
+                old_value = snapshot_translator.symbol(name, value_gamma[name])
             fresh_value = snapshot_translator.fresh_symbol(
                 name,
-                context.gamma[name],
+                value_gamma[name],
                 f"__dlentry{self._fresh_counter}",
             )
             ode_symbols[name] = fresh_value
@@ -2376,7 +2391,7 @@ class TypeChecker:
         ode_local_symbols = {node.local_clock.name: clock}
 
         precondition = conjunction(context.path, *equalities)
-        translator = ExpressionTranslator(context.gamma, ode_symbols)
+        translator = ExpressionTranslator(value_gamma, ode_symbols)
         translated_equations: list[tuple[Any, Any]] = []
         derivative_definedness: list[Any] = []
         for variable, derivative in node.eqs:
@@ -2384,7 +2399,7 @@ class TypeChecker:
             # 重复和无效变量已在结构层诊断；这里拒绝生成可能含歧义的公式。
             if (
                 name not in ode_symbols
-                or not isinstance(context.gamma.get(name), ContinuousType)
+                or value_gamma.get(name) is not BasicType.REAL
             ):
                 raise DLTranslationError(
                     f"cannot materialize dL equation for {name!r}"
@@ -2432,23 +2447,10 @@ class TypeChecker:
             node.annotation.safety,
             local_symbols=ode_local_symbols,
         )
-        continuous_phis = self._continuous_phis(context, evolved)
-        continuous_phi_results = tuple(
-            translator.boolean_result(
-                phi,
-                local_symbols=ode_local_symbols,
-            )
-            for phi in continuous_phis
-        )
         safety = conjunction(
             domain_definedness,
             *safety_result.definedness,
             safety_result.term,
-            *(
-                item
-                for result in continuous_phi_results
-                for item in (*result.definedness, result.term)
-            ),
         )
         delay = node.annotation.delay
         if isinstance(delay, float) and delay == inf:
@@ -2499,8 +2501,7 @@ class TypeChecker:
         自然结束后继使用 ``not B & safety``。调用方必须显式选择其中一种，避免
         用单个布尔开关混淆两个不同规则。
 
-        后继路径同时获得两类已证事实：节点 safety，以及精确匹配当前左侧向量
-        的 ``ContinuousType.phi`` 在中断/结束时刻的实例。若 domain 或这组性质
+        后继路径获得节点 safety 在中断/结束时刻的实例。若 domain 或 safety
         使用了局部 ``t``，离开 ODE 时不能把这个名字泄漏到 Gamma。
         这里用一个新鲜 Real 翻译它，并以 ``exists t>=0`` 投影掉局部时钟；所得
         条件仍是实际 ODE 后状态的保守后置事实。事件 continuation 或顺序后继中
@@ -2519,17 +2520,8 @@ class TypeChecker:
                 )
         translator = self._translator(post)
         try:
-            continuous_phis = tuple(
-                phi
-                for phi in self._continuous_phis(context, evolved)
-                if phi != node.annotation.safety
-            )
             uses_local_clock = (
                 node.local_clock.name in node.annotation.safety.get_vars()
-                or any(
-                    node.local_clock.name in phi.get_vars()
-                    for phi in continuous_phis
-                )
                 or (
                     assumption != _ODEPostAssumption.SAFETY
                     and (
@@ -2553,20 +2545,7 @@ class TypeChecker:
                 node.annotation.safety,
                 local_symbols=local_symbols,
             )
-            continuous_phi_results = tuple(
-                translator.boolean_result(
-                    phi,
-                    local_symbols=local_symbols,
-                )
-                for phi in continuous_phis
-            )
-            safety = conjunction(
-                self._defined_term(safety_result),
-                *(
-                    self._defined_term(result)
-                    for result in continuous_phi_results
-                ),
-            )
+            safety = self._defined_term(safety_result)
             if assumption != _ODEPostAssumption.SAFETY:
                 domain_result = translator.boolean_result(
                     node.constraint,
@@ -2821,9 +2800,14 @@ class TypeChecker:
         层意外合并。``Nat >= 0`` 等类型域事实在此统一加入路径条件。
         """
         symbols: dict[str, Any] = {}
-        translator = ExpressionTranslator(gamma, symbols, name_prefix=f"{location}__")
+        value_gamma = self._value_gamma(gamma)
+        translator = ExpressionTranslator(
+            value_gamma,
+            symbols,
+            name_prefix=f"{location}__",
+        )
         static_valid = True
-        for name, value_type in gamma.items():
+        for name, value_type in value_gamma.items():
             try:
                 translator.symbol(name, value_type)
             except ExpressionError as exc:
@@ -2838,7 +2822,7 @@ class TypeChecker:
                     self._defined_term(path_result),
                     *(
                         constraint
-                        for name, value_type in gamma.items()
+                        for name, value_type in value_gamma.items()
                         for constraint in self._type_domain_constraints(
                             value_type,
                             symbols[name],
@@ -2872,11 +2856,12 @@ class TypeChecker:
         self._fresh_counter += 1
         symbols: dict[str, Any] = {}
         translator = ExpressionTranslator(
-            context.gamma,
+            self._value_gamma(context.gamma),
             symbols,
             name_prefix=f"{context.location}__rec{self._fresh_counter}__",
         )
-        for name, value_type in context.gamma.items():
+        value_gamma = self._value_gamma(context.gamma)
+        for name, value_type in value_gamma.items():
             translator.symbol(name, value_type)
         try:
             path_result = translator.boolean_result(binding.invariant)
@@ -2884,7 +2869,7 @@ class TypeChecker:
                 self._defined_term(path_result),
                 *(
                     constraint
-                    for name, value_type in context.gamma.items()
+                    for name, value_type in value_gamma.items()
                     for constraint in self._type_domain_constraints(
                         value_type,
                         symbols[name],
@@ -2999,7 +2984,7 @@ class TypeChecker:
 
     def _translator(self, context: _Context) -> ExpressionTranslator:
         """创建读取并更新当前分支符号表的表达式翻译器。"""
-        return ExpressionTranslator(context.gamma, context.symbols)
+        return ExpressionTranslator(self._value_gamma(context.gamma), context.symbols)
 
     @staticmethod
     def _defined_term(result: ExprResult) -> Any:
@@ -3165,7 +3150,10 @@ class TypeChecker:
                 "把三元内部选择节点的公共 continuation 分别交给"
                 "两个子 judgment，再组合两个完整分支类型。"
             ),
-            "T-ODE": "检查连续变量并生成 safety、domain、boundary 的 dL 义务。",
+            "T-ODE": (
+                "核对 Gamma 已登记完整 ODE 演化向量，并仅用节点 safety "
+                "生成 safety、domain、boundary 的 dL 义务。"
+            ),
             "T-mu": "引入递归类型变量和边界不变量，再检查递归体。",
             "T-X": "检查递归回边的边界不变量，并返回对应类型变量。",
             "structural": "当前对象不属于项目定义的 HCSP 进程节点。",
@@ -3577,6 +3565,49 @@ class TypeChecker:
         if not isinstance(process, HCSP):
             return set()
         return process.get_vars()
+
+    def _process_ode_vectors(self, process: Any) -> set[frozenset[str]]:
+        """收集进程树中真正出现的非空 ODE 左端变量集合。"""
+
+        if isinstance(process, ODE):
+            current = (
+                {frozenset(name for name, _derivative in process.eqs)}
+                if process.eqs
+                else set()
+            )
+            return current | self._event_ode_vectors(process.interrupts)
+        if isinstance(process, SequenceHP):
+            return self._process_ode_vectors(process.first) | self._process_ode_vectors(
+                process.second
+            )
+        if isinstance(process, If):
+            return self._process_ode_vectors(
+                process.then_branch
+            ) | self._process_ode_vectors(process.else_branch)
+        if isinstance(process, InternalChoice):
+            return (
+                self._process_ode_vectors(process.left)
+                | self._process_ode_vectors(process.right)
+                | self._process_ode_vectors(process.continuation)
+            )
+        if isinstance(process, Mu):
+            return self._process_ode_vectors(process.body)
+        if isinstance(process, Parallel):
+            return self._process_ode_vectors(process.left) | self._process_ode_vectors(
+                process.right
+            )
+        return set()
+
+    def _event_ode_vectors(self, reaction: EventReaction) -> set[frozenset[str]]:
+        """收集 ODE 中断事件各 continuation 内嵌的 ODE 向量。"""
+
+        if isinstance(reaction, EmptyEvent):
+            return set()
+        if isinstance(reaction, EventChoice):
+            return self._process_ode_vectors(
+                reaction.continuation
+            ) | self._event_ode_vectors(reaction.alternative)
+        return set()
 
     def _input_bound_vars(self, process: Any) -> set[str]:
         """收集输入写入的目标；这些变量可以不预先出现在 Gamma。"""

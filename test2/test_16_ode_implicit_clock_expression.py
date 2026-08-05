@@ -25,7 +25,7 @@ from test2._support import assert_conversion, check_process
 class ODEImplicitClockExpressionExample(unittest.TestCase):
     """检查保留名 t 在单个 ODE 内的局部读取语义。"""
 
-    # 测试输入：仅声明 x:ContinuousType；ODE 为 x'=2*t、x<1、safety x<=1。
+    # 测试输入：声明 x:Real 和 ODE vector {x}；ODE 为 x'=2*t、x<1。
     # 预期行为：t 被解释为本 ODE 的隐藏时钟，类型显示为 delay(1).(done!.(0))。
     # 预期类型：PureDelayType(1, OutputType("done", EndType()))。
     # 检查内容：不声明 t 仍可转换，并生成 safety/boundary 两类 dL 义务。
@@ -40,7 +40,7 @@ class ODEImplicitClockExpressionExample(unittest.TestCase):
         )
         report = check_process(
             Sequence.of(evolution, OutputChannel("done", 0)),
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"done": ChannelType(BasicType.INT)},
             state={"x": 0},
             path_condition="x == 0",

@@ -95,7 +95,7 @@ class DerivationShortCircuitTests(unittest.TestCase):
             InputChannel("missing", "received"),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             dl_checker=lambda _obligation: None,

@@ -6,6 +6,7 @@ HCSP 语法，并把 Section 4.2/4.3 要求的安全、时延和递归不变量�
 一同输入：
 
 - 输入 `Gamma`、`Theta`、路径条件、若干 `(state, HCSP process)`，以及可选的期望类型；
+- Gamma 的连续项只登记允许出现的完整 ODE 演化向量；轨迹 `phi` 只由 ODE safety 定义；
 - 把待检查对象表示成 configuration、system、process 或 event conclusion judgment；
 - 每个 `rule_t_*` 只返回显式 `RuleExpansion(premises, conclude)`，不在规则内递归；
 - `T-Assign` 在规则展开时确定性地生成惰性最强后置状态，不把未知 `phi'` 留给证明器综合；
@@ -157,9 +158,9 @@ assert ode.local_clock.derivative == Literal(1)
 ```
 
 在一个 ODE 的方程右端、演化域和 `safety` 中，保留名 `t` 直接表示该 ODE
-隐式时钟的当前值；上例的 Gamma 只需声明 `x: ContinuousType()`，不需要声明
-或初始化 `t`。匹配 Gamma 连续向量时只读取用户写在 `ODE.eqs` 左侧的变量，
-自动添加的 `t` 不属于该向量。
+隐式时钟的当前值；上例的 Gamma 把 `x` 声明成普通 `Real`，再用另一个键登记
+`ode_x: ContinuousType(("x",))`，不需要声明或初始化 `t`。核对 Gamma 中的 ODE
+向量时只读取用户写在 `ODE.eqs` 左侧的变量，自动添加的 `t` 不属于该向量。
 这个默认例子的 domain/safety 都是 `true`，所以纯通信中断、无自然后继的
 ODE 可直接生成 type `delay(5).(\bot)`。若 ODE 后还有顺序后继，则会按论文
 生成精确 boundary 义务，未配置 KeYmaera X 时总体判定保守显示 `unknown`。
@@ -348,7 +349,7 @@ print(report.format_detailed())  # 原始公式、证明器输入、证据和遗
 
 `check_hcsp(...)` 的环境输入为：
 
-1. `gamma`：普通变量和连续变量的类型环境；
+1. `gamma`：普通变量类型和允许出现的 ODE 演化向量环境；
 2. `theta`：通道 refinement 类型环境；
 3. `path_condition`：默认 `True`；
 4. `configurations`：进程或 `(state, process)` 列表；
@@ -364,38 +365,42 @@ path_condition=...)`：局部 Gamma 必须两两不交、类型与全局 Gamma �
 ODE 与递归批注不再通过第二个映射覆盖，而是直接位于
 `Configuration.process` 的 AST 中。这保证审计时一个进程只有一份批注来源。
 
-Gamma 显式区分普通标量变量和连续向量的标量分量：普通变量写成
-``BasicType``，单元素连续向量写成 ``ContinuousType()``。例如：
+Gamma 显式区分“具有当前值的标量变量”和“允许出现的 ODE 演化向量声明”。
+包括 ODE 分量在内的标量都写成 ``BasicType``；``ContinuousType`` 放在独立键
+下，只保存一个 ODE 的变量集合。例如：
 
 ```python
 gamma = {
     "mode": BasicType.INT,      # 普通离散状态
-    "gain": BasicType.REAL,     # 普通实数参数，不能作为 ODE 方程左端
-    "x": ContinuousType(),      # 连续状态，可以出现在 x'=e 的左端
+    "gain": BasicType.REAL,     # 普通实数参数
+    "x": BasicType.REAL,        # x 的当前值是 Real
+    "ode_x": ContinuousType(("x",)),  # process 中允许出现 ODE vector {x}
 }
 ```
 
-多分量连续向量必须显式声明成员，并把同一个声明登记到每个标量键：
+多分量 ODE 向量同样只登记一次；例如车辆的 `p`、`v`、`a` 各自仍是普通
+`Real` 变量：
 
 ```python
 vehicle_trajectory = ContinuousType(
     variables=("p", "v", "a"),
-    phi="p <= destination and v <= vmax",
 )
 gamma = {
-    "p": vehicle_trajectory,
-    "v": vehicle_trajectory,
-    "a": vehicle_trajectory,
+    "p": BasicType.REAL,
+    "v": BasicType.REAL,
+    "a": BasicType.REAL,
+    "vehicle_ode": vehicle_trajectory,
 }
 ```
 
-``ContinuousType`` 不是普通值的另一种数值精度，也不是 tuple 值。读取、赋值
-或通信更新一个分量时，其当前值仍按 ``Real`` 检查，并且完整连续声明被保留；
-只有 ODE 方程左端额外要求连续标记。声明中的 ``phi`` 仅在 ODE 用户方程左侧
-向量与 ``variables`` 按顺序精确相等时进入 dL 安全目标：子集、超集和不同顺序
-都不触发该性质。普通 ``BasicType.REAL`` 参数仍可出现在导数右端、演化域和
-safety 中。ODE 的隐藏局部时钟 ``t`` 由节点自行管理，不进入 Gamma，也不参与
-连续向量匹配。
+``ContinuousType`` 不是普通值的另一种数值精度，也不是 tuple 值。它只在 Gamma
+中登记 process 允许出现的完整 ODE 演化向量，语义为从非负时间到 ``R^n`` 的
+轨迹；它本身没有可读取、赋值或通信更新的标量值。ODE 用户方程左侧的变量
+集合必须与一个已登记的 ``variables`` 集合相等，方程排列顺序没有语义差异；
+真子集和真超集仍会被静态拒绝。没有显式方程的 ``ODE.wait(d)`` 对应空集合，
+无需 ``ContinuousType`` 声明。连续演化中需要恒成立的 ``phi`` 只写在对应 ODE
+的 ``annotation.safety`` 中，不再由 Gamma 重复定义。ODE 的隐藏局部时钟 ``t``
+由节点自行管理，不进入 Gamma，也不参与向量匹配。
 
 返回 `CheckReport`：
 
@@ -456,7 +461,7 @@ hp = Sequence.of(
     Assert(CompareExpr((Variable("x"), Literal(0)), (">=",))),
 )
 
-# 普通表达式结果都是标量基础类型；Gamma 另用 ContinuousType 标记连续量。
+# 普通表达式结果都是标量基础类型；Gamma 另用 ContinuousType 登记 ODE 集合。
 scalar_value = ensure_expr("x + 1")
 multi_channel = ChannelType(
     (BasicType.INT, BasicType.BOOL),
@@ -472,8 +477,9 @@ multi_output = OutputChannel("data", ("x", "ready"))
 表达式层只支持标量字面量、变量、算术、比较、布尔连接和简单函数调用。
 论文未要求普通积类型，因此项目不定义 tuple 表达式或 ``TupleType``；字符串形式
 和 Python tuple/list 对象都会在普通表达式构造边界被拒绝。表达式结果对应
-单个 ``BasicType``；Gamma 项为 ``BasicType`` 或 ``ContinuousType``，但每个
-变量的当前值仍是一个标量。``ChannelType`` 保存一个非空的
+单个 ``BasicType``。Gamma 的 ``BasicType`` 项才有当前标量值；
+``ContinuousType`` 项只是独立的 ODE 向量声明，不能用于表达式。
+``ChannelType`` 保存一个非空的
 ``BasicType`` 槽位序列；``InputChannel`` 和 ``OutputChannel`` 保存同元数的目标变量
 或载荷表达式序列。这里的 Python tuple 只是通信参数列表，不是可赋给变量或由表达式
 求值得到的 tuple 值。每个载荷表达式都独立产生一个标量值，refinement 可以同时引用
@@ -506,7 +512,10 @@ program = Sequence.of(
 )
 
 report = check_hcsp(
-    gamma={"x": ContinuousType()},
+    gamma={
+        "x": BasicType.REAL,
+        "ode_x": ContinuousType(("x",)),
+    },
     theta={"done": ChannelType((BasicType.INT,))},
     path_condition="x == 0",
     configurations=[Configuration({"x": 0}, program)],

@@ -3,7 +3,7 @@ r"""HCSP ODE 证明义务到正式 dL 公式的翻译测试。
 这些测试不模拟连续数值轨迹，而是检查送入 KeYmaera X 前的语义边界：
 
 * safety、domain、boundary 三类公式是否使用新版 Table 2 的正确 box 模态；
-* Gamma 连续性质是否作为待证条件进入模态后置目标，而非混入演化域；
+* Gamma 是否只登记 ODE 演化向量，安全目标是否唯一来自 ODE 批注；
 * 每个 ODE 的隐藏局部时钟是否以 t=0、t'=1 进入正式 dL；
 * ODE 前的赋值是否通过入口快照等式保留下来；
 * Z3 内部名称是否全部替换成 KeYmaera X 合法名称；
@@ -88,11 +88,11 @@ def _local_clock_name(test: unittest.TestCase, formula: DLFormula) -> str:
 class DLFormulaGenerationTests(unittest.TestCase):
     """覆盖论文三类 ODE 公式前提及关键组合场景。"""
 
-    # 测试输入：Gamma 以 x>=0 约束连续轨迹；ODE 在 x'=t+1、源域和 safety
+    # 测试输入：Gamma 登记单元素向量 (x)；ODE 在 x'=t+1、源域和 safety
     #           中直接读取局部 t。
     # 预期行为：生成 safety/domain DLFormula，且不生成自然结束 boundary。
-    # 检查内容：核对两处 t 指向同一时钟，两个模态均不把 Gamma 的 x>=0
-    #           当作演化域；x>=0 只进入 safety 目标，源 B 只进入 domain 目标。
+    # 检查内容：核对两处 t 指向同一时钟，ODE safety 只进入 safety 目标，
+    #           源 B 只进入 domain 目标，Gamma 不追加第二份性质。
     # 论文对应：Table 2 的纯通信中断 T-ODE-safety/T-ODE-domain 前提。
     def test_safety_and_domain_are_formal_box_modalities(self) -> None:
         """同一 ODE 的 safety/domain 公式都应显式包含自动局部时钟。"""
@@ -104,7 +104,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             annotation=ODEAnnotation(safety="x >= t and t <= 2", delay=2),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType(phi="x >= 0")},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -135,10 +135,8 @@ class DLFormulaGenerationTests(unittest.TestCase):
         self.assertIn("}](", safety.source)
         safety_program = safety.source.split("}]", 1)[0]
         domain_program = domain.source.split("}]", 1)[0]
-        self.assertNotRegex(safety_program, r"0 <= kxv\d+")
-        self.assertNotRegex(domain_program, r"0 <= kxv\d+")
         safety_post = safety.source.split("}]", 1)[1]
-        self.assertRegex(safety_post, r"0 <= kxv\d+")
+        self.assertIn(" >= ", safety_post)
         self.assertNotRegex(domain.source, r"0 <= kxv\d+")
         self.assertNotIn("10 >=", safety_program)
         self.assertNotIn("10 >=", domain_program)
@@ -155,10 +153,10 @@ class DLFormulaGenerationTests(unittest.TestCase):
         self.assertNotIn("T-ODE-boundary", formulas)
 
     # 测试输入：delay=1 的 ODE 后接 done 输出，因而具有 fallback。
-    # 预期行为：boundary 公式在不预设 Gamma 条件的单个 box 中分别检查
+    # 预期行为：boundary 公式在无额外 Gamma 性质的单个 box 中分别检查
     #           t<d -> B 和 t=d -> not B，不加入 diamond 可达性条件。
-    # 检查内容：查验严格时钟比较、边界等式、否定域；ODE 程序中既没有 Gamma
-    #           的 x>=0，也没有待验证的源 B，即 x<1。
+    # 检查内容：查验严格时钟比较、边界等式、否定域；ODE 程序中没有待验证的
+    #           源 B，即 x<1，Gamma 仅负责确认向量 (x) 已登记。
     # 论文对应：新版 Table 2 带自然后继规则的精确边界 dL 前提。
     def test_boundary_uses_strict_before_and_not_domain_at_deadline(self) -> None:
         """带 fallback 的 ODE 应按 Table 2 证明 d 前在 B、d 时离开 B。"""
@@ -173,7 +171,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             OutputChannel("done", 0),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType(phi="x >= 0")},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -190,7 +188,6 @@ class DLFormulaGenerationTests(unittest.TestCase):
         self.assertIn("[{", boundary.source)
         self.assertNotIn("<{", boundary.source)
         boundary_program = boundary.source.split("}]", 1)[0]
-        self.assertNotRegex(boundary_program, r"0 <= kxv\d+")
         self.assertNotIn("1 >", boundary_program)
         self.assertIn(f"1 > {clock}", boundary.source)
         self.assertIn(f"1 = {clock}", boundary.source)
@@ -216,7 +213,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             OutputChannel("done", 0),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -251,7 +248,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             ),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -287,7 +284,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             annotation=ODEAnnotation(safety="x >= 0", delay=inf),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x >= 0",
@@ -308,7 +305,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             or f"0 = {clock}" in safety.source
         )
 
-    # 测试输入：没有任何用户连续变量或 Gamma 声明的 ``ODE.wait(1)``。
+    # 测试输入：没有任何用户 ODE 分量或向量声明的 ``ODE.wait(1)``。
     # 预期行为：dL 可构造；自动局部时钟是 ODE 模态中的唯一微分方程。
     # 检查内容：要求公式含 t=0、t'=1、t<1 -> B 和 t=1 -> not B；其中
     #           wait 的 B 正是隐藏的严格边界 t<1。
@@ -359,7 +356,11 @@ class DLFormulaGenerationTests(unittest.TestCase):
             OutputChannel("done", 0),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType(), "y": BasicType.REAL},
+            gamma={
+                "x": BasicType.REAL,
+                "y": BasicType.REAL,
+                "ode_x": ContinuousType(("x",)),
+            },
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0, "y": 0}, process)],
             path_condition="x == 0 and y == 0",
@@ -389,7 +390,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             annotation=ODEAnnotation(safety="x >= 0", delay=1),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -417,7 +418,11 @@ class DLFormulaGenerationTests(unittest.TestCase):
             annotation=ODEAnnotation(safety="x >= 0", delay=1),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType(), "flag": BasicType.BOOL},
+            gamma={
+                "x": BasicType.REAL,
+                "flag": BasicType.BOOL,
+                "ode_x": ContinuousType(("x",)),
+            },
             theta={},
             configurations=[Configuration({"x": 0, "flag": True}, process)],
             path_condition="flag and x == 0",

@@ -91,49 +91,44 @@ BasicType.RATIONAL
 BasicType.REAL
 ```
 
-ODE 左端可演化变量必须使用：
+ODE 左端变量本身仍是普通 Real 值变量：
 
 ```python
-ContinuousType()
+"p": BasicType.REAL
+"v": BasicType.REAL
+"a": BasicType.REAL
 ```
 
-Definition 4.1 中连续类型还带有轨迹性质 \(\phi\)。非平凡性质使用：
+另用一个独立命名的连续项登记 process 中允许出现的 ODE 演化向量，语义退化为
+\(\mathbb R_{\ge0}\rightharpoonup\mathbb R^n\)，不再携带轨迹性质 \(\phi\)。
+连续演化期间必须恒成立的 \(\phi\) 统一写在对应 ODE 的 safety 批注中。
 
-```python
-ContinuousType(phi="x >= 0")
-```
-
-若一个连续向量由多个标量组成，例如 \((p,v,a)\)，必须显式记录有序成员。项目
-仍按标量名索引 Gamma，所以把同一个不可变声明登记到每个分量键：
+若一个演化向量由多个标量组成，例如 \(\{p,v,a\}\)，显式记录它的成员集合：
 
 ```python
 trajectory = ContinuousType(
     variables=("p", "v", "a"),
-    phi="phi_p and phi_v",
 )
 {
-    "p": trajectory,
-    "v": trajectory,
-    "a": trajectory,
+    "p": BasicType.REAL,
+    "v": BasicType.REAL,
+    "a": BasicType.REAL,
+    "vehicle_ode": trajectory,
 }
 ```
 
-环境规范化要求显式向量的所有成员都存在并保存完全相同的声明，缺少成员或
-成员顺序/`phi` 不一致都会直接报错。T-ODE 只在用户写出的 ODE 左侧向量与
-`variables` 按顺序精确相等时验证该 `phi`；子集、超集和不同顺序均不触发。
-匹配到的性质不会进入 dL 连续程序的演化域充当假设，而是与 ODE 节点自己的
-safety 一同出现在后置安全目标中。
+环境规范化要求向量声明的所有成员都作为 `BasicType.REAL` 标量存在。T-ODE
+要求用户写出的 ODE 左侧变量集合与 Gamma 中某个 `variables` 集合精确相等；
+成员顺序不同仍是同一个集合，只有真子集或真超集会在建立 dL 义务前静态失败。
 
-`ContinuousType()` 与 `BasicType.REAL` 在 Gamma 中不相等，但连续变量的当前值
-仍翻译为实数。换句话说，它在代码中同时承担四项信息：
+`ContinuousType` 所在的键没有当前值，不能出现在表达式、state、赋值目标或
+通信输入目标中。它只承担两项信息：
 
-- 当前值的基础类型是 `Real`；
-- 该变量有资格出现在 ODE 方程左端；
-- `variables` 标识性质所属的完整连续向量；
-- `phi` 是该完整向量精确参与一次 ODE 时必须始终满足的状态空间性质。
+- process 中允许出现相应的 ODE 演化向量；
+- `variables` 标识这个向量的完整成员集合。
 
-普通 `BasicType.REAL` 可以出现在 ODE 导数右端、演化域和 safety 中，但不能
-出现在 ODE 左端。
+ODE 的左端分量、导数右端参数、演化域和 safety 中的 Real 量都统一使用
+`BasicType.REAL`。未参与任何 ODE 的 Real 无需额外的连续声明。
 
 ### 3.2 Theta
 
@@ -170,12 +165,14 @@ C=(\Gamma,\Theta,\Phi,\rho,\mathcal R,location,valid),
 - `location` 用于报告分支位置；
 - `static_valid` 表示初始环境和路径是否成功建立。
 
-建立初始 Context 时，每个 Gamma 变量获得一个带 configuration 前缀的新鲜符号。
-其 Z3 sort 为：
+建立初始 Context 时，只有 Gamma 中的 `BasicType` 值变量获得带 configuration
+前缀的新鲜符号。其 Z3 sort 为：
 
 - `Bool` -> Z3 Bool；
 - `Nat`、`Int` -> Z3 Int；
-- `Rational`、`Real`、`ContinuousType()` -> Z3 Real。
+- `Rational`、`Real` -> Z3 Real。
+
+`ContinuousType` 声明不建立 Z3 符号。
 
 代码还把类型固有条件加入路径。目前只有 `Nat` 额外产生 \(x\ge 0\)。
 
@@ -200,7 +197,7 @@ C=(\Gamma,\Theta,\Phi,\rho,\mathcal R,location,valid),
 - `x / y` 会生成除数 \(y\ne0\)；
 - `sqrt(x)` 会生成 \(x\ge0\)；
 - `%` 只接受 `Nat/Int`；
-- 连续变量 `x:ContinuousType()` 的读取结果类型仍是 `Real`。
+- ODE 分量 `x:BasicType.REAL` 的读取结果类型是 `Real`；向量声明名不可读取。
 
 数值子类型关系为：
 
@@ -294,13 +291,13 @@ premise 只有两类：
 若显式提供局部 Gamma，则代码要求：
 
 1. 局部名称必须来自全局 Gamma；
-2. 同名项必须与全局项完全相等，包括普通 `Real` 与 `ContinuousType()` 的区别；
+2. 同名项必须与全局项完全相等，包括值变量项与 ODE 向量声明项的区别；
 3. 任意两个分量的 Gamma 定义域不相交；
 4. 全部局部 Gamma 的定义域并集精确覆盖全局 Gamma。
 
-显式连续向量在自动并行分区中是不可拆分的状态单元：某个配置使用任一成员时，
-完整向量都归该配置所有。两个并行配置分别使用同一向量的不同成员会因 Gamma
-重叠而被拒绝。
+自动并行分区先按各配置实际使用的值变量分配 `BasicType` 项；只有某个配置的
+process 真正包含已登记 ODE 时，匹配的独立 `ContinuousType` 声明项才归该配置。
+普通 Real 的读写不会凭空拖入一个未出现的 ODE 向量声明。
 
 局部路径条件要么所有 configuration 都提供，要么都不提供。若使用局部路径，
 外层路径必须是默认 `true`。
@@ -320,16 +317,18 @@ premise 只有两类：
 对 configuration \((\sigma,P)\)，代码先要求：
 
 \[
-dom(\sigma)\subseteq dom(\Gamma).
+dom(\sigma)\subseteq dom(\Gamma_{value}),
 \]
 
-state 可以只是 Gamma 变量的子集。随后代码把 state 中的具体值代入路径公式：
+其中 \(\Gamma_{value}\) 只包含 `BasicType` 项，不包含独立的 ODE 向量声明。
+
+state 可以只是 Gamma 值变量的子集。随后代码把 state 中的具体值代入路径公式：
 
 \[
 \Phi[\sigma].
 \]
 
-若还有未赋值的 Gamma 变量，它们保留为自由 Z3 常量；证明器检查剩余公式是否
+若还有未赋值的 Gamma 值变量，它们保留为自由 Z3 常量；证明器检查剩余公式是否
 有效，效果相当于对这些未指定变量作全称检查，而不是任选一个值使公式成立。
 
 state 通过后，才进入 system/process 子 judgment。
@@ -416,8 +415,8 @@ Gamma、路径条件和符号状态全部保持不变，不生成 Type AST 前�
 映射确定”这一事实，不搜索未知谓词 \(\Phi'\)。
 
 赋值成功后用 \((\Phi,\rho')\) 推导 `P`，最终类型仍是 `P` 的类型，没有
-`AssignType` 节点。若 `x` 是 `ContinuousType()`，赋值只更新当前值，不删除其
-连续变量标记。
+`AssignType` 节点。赋值目标必须是 `BasicType` 值变量；独立的
+`ContinuousType` 声明没有当前值，不能被赋值。
 
 ### 7.5 `ch?(x1,...,xn); P`
 
@@ -439,7 +438,7 @@ existing_i <: B_i\quad\lor\quad B_i <: existing_i.
 
    这是一项双向“可比较性”检查，不是单向赋值检查；
 3. 新目标加入局部 Gamma，类型取对应的 \(B_i\)；
-4. 已存在目标保留原 Gamma 项；连续变量因此仍保持 `ContinuousType()`；
+4. 已存在目标保留原 `BasicType` 项；独立 ODE 向量声明不受通信更新影响；
 5. 为每个槽建立新鲜接收符号 \(r_i\)，并更新
 
 \[
@@ -594,16 +593,16 @@ communication; P; ODE 外层 tail
 
 1. ODE 左端变量不得重复；
 2. 每个左端变量必须在 Gamma 中声明；
-3. 每个左端变量必须是 `ContinuousType()`，普通 `BasicType.REAL` 不够；
-4. 每个导数表达式必须是数值类型；
-5. 演化域 `B` 必须是 Bool；
-6. safety `S` 必须是 Bool；
-7. 与 ODE 用户左侧向量精确匹配的 `ContinuousType.phi` 必须是 Bool；
-8. 导数、`B`、`S` 和匹配连续 `phi` 的偏表达式有定义条件被收集。
+3. 每个左端变量必须是 `BasicType.REAL`；
+4. 非空左侧变量集合必须由独立 `ContinuousType` 项精确登记；
+5. 每个导数表达式必须是数值类型；
+6. 演化域 `B` 必须是 Bool；
+7. ODE 自身的 safety `S` 必须是 Bool；
+8. 导数、`B` 和 `S` 的偏表达式有定义条件被收集。
 
 源表达式中的名字 `t` 在本 ODE 的导数右端、`B` 和 `S` 中被局部时钟遮蔽，
 不会读取同名 Gamma 项。该时钟只在 dL 动力系统构造阶段追加，不进入上述
-连续向量精确匹配。
+连续向量精确登记检查。
 
 任一静态检查失败时，不生成 dL 义务，也不生成任何时延 Type AST。
 
@@ -637,23 +636,17 @@ Pre=\Phi\land\bigwedge_i(x_i^0=\rho(x_i))\land(\tau=0).
 F^*=\{\dot x_1^0=e_1,\ldots,\dot x_n^0=e_n,\dot\tau=1\}.
 \]
 
-令 ODE 用户方程左侧的有序向量为
+令 ODE 用户方程左侧的变量集合为
 
 \[
-V_{ODE}=(x_1,\ldots,x_n).
+V_{ODE}=\{x_1,\ldots,x_n\}.
 \]
 
-检查器在 Gamma 中寻找 `variables`（省略时为所在键的单元素向量）恰好等于
-\(V_{ODE}\) 的 `ContinuousType` 声明。设匹配声明的互异性质合取为
-\(\Phi_\Gamma\)，其有定义条件为 \(D_\Gamma\)；没有精确匹配时二者均为
-`true`。当前 ODE 必须验证的 Gamma 连续条件为
-
-\[
-G_\Gamma=D_\Gamma\land\Phi_\Gamma.
-\]
-
-\(G_\Gamma\) 不进入 dL 程序域。dL 连续程序始终使用上面的无假设动力系统
-\(F^*\)，以免把待验证的连续条件预先假定为真。
+检查器要求 Gamma 中存在 `variables` 恰好等于 \(V_{ODE}\) 的独立
+`ContinuousType` 声明。没有精确匹配时 T-ODE 静态失败；匹配
+成功只表示这个 ODE 演化向量允许在 process 中出现，不会向 dL 公式添加性质。
+没有用户方程的 `ODE.wait(d)` 使用空向量，不需要 Gamma 声明。dL 连续程序始终
+使用上面的无假设动力系统 \(F^*\)。
 
 普通 ODE 的 delay 批注不会自动添加到演化域。只有 `ODE.wait(d)` 的私有
 `local_clock_deadline` 会把实际域扩展为：
@@ -665,26 +658,26 @@ B^*=B\land\tau<d.
 ### 9.3 safety dL 义务
 
 记 \(D_F,D_B,D_S\) 分别为导数、源演化域表达式和节点 safety 的有定义条件。
-Gamma 连续条件与节点 safety 在同一条 dL 义务中共同接受检查。
+节点 safety 是连续演化中恒成立性质的唯一来源。
 
 在没有走本地恒真捷径时，有限 delay 实际生成：
 
 \[
 Pre\Rightarrow[F^*]
-(\tau\le d\Rightarrow(D_F\land D_B\land D_S\land S\land G_\Gamma)).
+(\tau\le d\Rightarrow(D_F\land D_B\land D_S\land S)).
 \]
 
 在没有走本地恒真捷径时，无限 delay 实际生成：
 
 \[
-Pre\Rightarrow[F^*](D_F\land D_B\land D_S\land S\land G_\Gamma).
+Pre\Rightarrow[F^*](D_F\land D_B\land D_S\land S).
 \]
 
-注意 Gamma 连续条件和待验证的源演化域 `B` 都不会进入 dL 程序域；前者作为
-安全目标接受证明，后者只通过其有定义性间接出现在 safety 后置条件中。
+注意待验证的源演化域 `B` 不会进入 dL 程序域；它只通过有定义性间接出现在
+safety 后置条件中。Gamma 只在静态阶段核对演化向量，不进入逻辑公式。
 
 若规则层用于捷径判断的公式
-\(D_F\land D_S\land S\land G_\Gamma\) 语法化简为 true，则该义务直接记为 true，不调用
+\(D_F\land D_S\land S\) 语法化简为 true，则该义务直接记为 true，不调用
 KeYmaera X；这一步的捷径判断没有包含 \(D_B\)。只有未走捷径、真正建立 dL
 公式时，后置条件才按上式包含 \(D_B\)。无法翻译为受支持 dL 子集时，保存
 `UntranslatedDLFormula`，通常由后端产生 unknown。
@@ -729,11 +722,11 @@ ODE 的 dL 证明义务不直接计算解析解。离开 ODE 时，代码把每�
 \[
 \widehat B=Def(B(post))\land B(post),
 \qquad
-\widehat S=Def(S(post))\land S(post)\land G_\Gamma(post).
+\widehat S=Def(S(post))\land S(post).
 \]
 
-这里把已经由同一条 dL 安全义务证明的节点 safety 与 Gamma 连续条件在 ODE
-结束/中断时刻的实例一起交给后继；二者都不是未经检查的路径假设。
+这里把已经由同一条 dL 安全义务证明的节点 safety 在 ODE 结束/中断时刻的
+实例交给后继；它不是未经检查的路径假设。
 
 三种情况分别为：
 
@@ -841,7 +834,7 @@ unknown 诊断并停止。
 X -> (TypeVar("t1"), invariant I)
 ```
 
-递归体不是在当前具体符号状态下直接检查。代码为 Gamma 中所有变量重新建立
+递归体不是在当前具体符号状态下直接检查。代码为 Gamma 中所有值变量重新建立
 新鲜符号，并把递归体入口路径替换为：
 
 \[
@@ -910,8 +903,9 @@ Delay、内部选择和并行本身不算通信守卫；只有输入/输出类�
 
 ### 12.1 State premise
 
-将具体 state 代入路径公式后检查有效性。state 中未知 Gamma 变量会被拒绝；
-Gamma 中未出现在 state 的变量保留并按全称有效性检查。
+将具体 state 代入路径公式后检查有效性。state 中未知的 Gamma 值变量或 ODE
+向量声明名都会被拒绝；Gamma 值变量中未出现在 state 的项保留并按全称有效性
+检查。
 
 ### 12.2 FOL premise
 

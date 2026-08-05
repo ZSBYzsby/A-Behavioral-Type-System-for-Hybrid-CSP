@@ -254,7 +254,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                     OutputType("stop", EndType()),
                 )
             ),
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"sense": integer, "stop": integer},
             obligation_rules=("T-ODE-domain",),
         ),
@@ -308,7 +308,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 1,
                 OutputType("done", EndType()),
             ),
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"done": integer},
             dl_checker=_true_dl,
             obligation_rules=("T-ODE-boundary",),
@@ -393,7 +393,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 2,
                 OutputType("tick", EndType()),
             ),
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"tick": integer},
             dl_checker=_true_dl,
             obligation_rules=("T-ODE-domain",),
@@ -411,7 +411,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 ),
                 OutputType("done", EndType()),
             ),
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": integer, "done": integer},
             state={"x": 0},
             path="x == 0",
@@ -427,7 +427,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 "alarm",
                 OutputType("done", EndType()),
             ),
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": integer, "done": integer},
             state={"x": 0},
             obligation_rules=("T-ODE-domain",),
@@ -524,13 +524,13 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N06_ODE_VARIABLE_NOT_REAL",
-            "用户 ODE 状态变量未显式声明为连续类型时拒绝；隐藏时钟不需要 Gamma 声明",
+            "用户 ODE 状态变量不是 Real 时拒绝；隐藏时钟不需要 Gamma 声明",
             ordinary_ode_variable,
             Verdict.FALSE,
             None,
             gamma={"x": BasicType.INT},
             dl_checker=_true_dl,
-            diagnostic_contains=("must have ContinuousType",),
+            diagnostic_contains=("must have BasicType.REAL",),
         ),
         ConversionScenario(
             "N07_ODE_WITHOUT_DL_BACKEND",
@@ -538,7 +538,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Sequence.of(unknown_ode, Skip()),
             Verdict.UNKNOWN,
             None,
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             state={"x": 0},
             path="x == 0",
             diagnostic_contains=("stopped at an unknown premise",),
@@ -583,7 +583,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             ),
             Verdict.FALSE,
             None,
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             state={"x": 0},
             diagnostic_contains=("derivative of x must be numeric",),
         ),
@@ -753,7 +753,7 @@ class InferenceFailureSeparationTests(unittest.TestCase):
         )
 
         formal_bottom_report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[
                 Configuration(

@@ -77,7 +77,7 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
             annotation=ODEAnnotation(safety=True, delay=1),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
@@ -102,7 +102,7 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
             annotation=ODEAnnotation(safety=True, delay=1),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={
                 "alarm": ChannelType(BasicType.INT),
                 "done": ChannelType(BasicType.INT),
@@ -136,7 +136,7 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
             Assert("x >= 1"),
         )
         report = check_hcsp(
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",

@@ -52,7 +52,7 @@ class ODEInputOutputEventsExample(unittest.TestCase):
         real = ChannelType(BasicType.REAL)
         report = check_process(
             Sequence.of(evolution, OutputChannel("done", "x")),
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"reset": real, "alarm": real, "done": real},
             state={"x": 0},
             path_condition="x == 0",

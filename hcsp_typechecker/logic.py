@@ -105,10 +105,15 @@ class ExpressionTranslator:
         *,
         name_prefix: str = "",
     ):
-        """建立规范化变量环境，并可复用调用方提供的符号表。"""
-        self.gamma = {
+        """建立标量值环境，并忽略不具有表达式值的 ODE 向量声明。"""
+        normalized_gamma = {
             str(name): normalize_gamma_type(value, subject="Gamma entry")
             for name, value in gamma.items()
+        }
+        self.gamma = {
+            name: value
+            for name, value in normalized_gamma.items()
+            if isinstance(value, BasicType)
         }
         self.symbols: MutableMapping[str, Any] = {} if symbols is None else symbols
         self.name_prefix = name_prefix

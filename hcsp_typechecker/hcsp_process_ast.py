@@ -1534,7 +1534,8 @@ class Parallel(HCSP):
 class _Assumption21Info:
     """一个 HCSP 子树的 Assumption 2.1 静态集合摘要。
 
-    ``free/bound_value_variables`` 保存 Gamma 中的状态/连续变量；
+    ``free/bound_value_variables`` 保存 Gamma 中具有标量值的状态变量（包括 ODE
+    分量）；
     ``free/bound_process_variables`` 保存 ``Var``/``Mu`` 名称。两类变量不会互相
     冲突，但在各自命名空间内都必须满足 ``fv ∩ bv = empty``，并分别参与并行
     分量的 V 分离检查。最后两个字段直接对应论文的 ``iCh`` 与 ``oCh``。

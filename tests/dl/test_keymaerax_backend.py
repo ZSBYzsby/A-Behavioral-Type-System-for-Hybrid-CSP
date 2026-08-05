@@ -532,7 +532,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             return_value=completed,
         ) as run:
             report = check_hcsp(
-                gamma={"x": ContinuousType()},
+                gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
                 theta={"done": ChannelType(BasicType.INT)},
                 path_condition="x >= 0",
                 configurations=[Configuration({"x": 0}, process)],

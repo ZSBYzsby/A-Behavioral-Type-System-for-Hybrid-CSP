@@ -220,18 +220,17 @@ def main() -> int:
     controller = build_controller()
     system: HCSP = Parallel.of(vehicle, controller)
 
-    # Definition 4.1 中 (p,v,a): R>=0 -> (phi_p and phi_v)。Gamma 的 Python
-    # 映射仍按标量名索引，所以三个键登记同一个显式向量声明；只有 ODE 用户
-    # 左侧恰好为 (p,v,a) 时，T-ODE 才把该 phi 加入 dL 后置安全目标。隐式时钟
-    # t 由 ODE 自己追加，不属于这里的向量成员。
+    # Gamma 把 process 中出现的完整 ODE 演化向量登记为
+    # (p,v,a): R>=0 -> R^3。轨迹性质只由 ODE 节点自身的 safety 定义；隐式
+    # 时钟 t 由 ODE 自己追加，不属于这里的向量成员。
     vehicle_trajectory = ContinuousType(
         variables=("p", "v", "a"),
-        phi=ODE_SAFETY,
     )
     vehicle_gamma = {
-        "p": vehicle_trajectory,
-        "v": vehicle_trajectory,
-        "a": vehicle_trajectory,
+        "p": BasicType.REAL,
+        "v": BasicType.REAL,
+        "a": BasicType.REAL,
+        "vehicle_ode": vehicle_trajectory,
     }
     controller_gamma = {"command": BasicType.REAL}
     gamma = {**vehicle_gamma, **controller_gamma}

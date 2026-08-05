@@ -48,7 +48,7 @@ class ODEExternalChoiceExample(unittest.TestCase):
         integer = ChannelType(BasicType.INT)
         report = check_process(
             process,
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"left": integer, "right": integer},
         )
         choices = ExternalChoiceType(

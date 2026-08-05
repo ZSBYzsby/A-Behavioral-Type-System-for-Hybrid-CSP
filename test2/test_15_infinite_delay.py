@@ -44,7 +44,7 @@ class InfiniteDelayExample(unittest.TestCase):
         integer = ChannelType(BasicType.INT)
         report = check_process(
             Sequence.of(evolution, OutputChannel("done", 0)),
-            gamma={"x": ContinuousType()},
+            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": integer, "done": integer},
             state={"x": 0},
         )
