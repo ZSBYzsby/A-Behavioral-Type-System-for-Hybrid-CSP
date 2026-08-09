@@ -27,7 +27,7 @@ from fractions import Fraction
 from math import inf, nan
 import unittest
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     AngelicType,
     BehavioralType,
     BottomType,
@@ -96,24 +96,51 @@ class AngelicTypeNormalizationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             ExternalChoiceType((input_branch, EndType()))  # type: ignore[arg-type]
 
-    # 测试输入：合法 ASCII/Unicode 通道标识符及空白、标点、数字开头的非法名称。
+    # 测试输入：合法 ASCII 通道标识符及 Unicode、空白、标点、数字开头名称。
     # 预期行为：InputType/OutputType 接受合法名称并统一拒绝非法名称。
     # 检查内容：防止直接构造 type AST 时绕过 process Channel 的词法边界。
     # 论文对应：A 中的 ch?.T/ch!.T 与 process 层的 ch 使用同一通道命名空间。
     def test_communication_type_channels_are_identifiers(self) -> None:
         """行为类型中的通道名遵循与 process AST 相同的标识符规则。"""
 
-        for name in ("channel", "channel_1", "_private", "通道_1"):
+        for name in ("channel", "channel_1", "_private", "Channel2"):
             with self.subTest(valid=name):
                 self.assertEqual(InputType(name, EndType()).channel, name)
                 self.assertEqual(OutputType(name, EndType()).channel, name)
 
-        for name in ("", " ", " channel", "channel ", "1channel", "a-b", "a\nb"):
+        for name in (
+            "",
+            " ",
+            " channel",
+            "channel ",
+            "1channel",
+            "a-b",
+            "a\nb",
+            "通道_1",
+            "ｃｈ",
+            "K",
+        ):
             with self.subTest(invalid=repr(name)):
                 with self.assertRaises(ValueError):
                     InputType(name, EndType())
                 with self.assertRaises(ValueError):
                     OutputType(name, EndType())
+
+    # 测试输入：ASCII 与 Unicode/NFKC 兼容形式的 TypeVar 和 MuType 绑定名。
+    # 预期行为：ASCII 名称通过，非 ASCII 名称在直接 Type AST 构造时拒绝。
+    # 检查内容：保证推导生成类型和手工类型使用同一递归名称词法边界。
+    # 论文对应：过程类型变量 t 与 mu t.T 的绑定器共享统一 ASCII IDENT。
+    def test_recursive_type_names_use_ascii_ident(self) -> None:
+        """类型变量引用与递归绑定名必须满足项目 ASCII IDENT。"""
+
+        self.assertEqual(TypeVar("t_1").name, "t_1")
+        self.assertEqual(MuType("t_1", EndType()).variable, "t_1")
+        for name in ("类型", "ｔ", "K"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    TypeVar(name)
+                with self.assertRaises(ValueError):
+                    MuType(name, EndType())
 
 
 class TimedTypeNormalizationTests(unittest.TestCase):

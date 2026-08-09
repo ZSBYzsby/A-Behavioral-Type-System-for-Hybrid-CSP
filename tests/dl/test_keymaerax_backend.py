@@ -30,7 +30,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     BasicType,
     ChannelType,
     Configuration,
@@ -131,7 +131,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             "KEYMAERAX_ARITHMETIC_TOOL": "Z3",
         }
         with patch.dict(
-            "hcsp_typechecker.keymaerax.os.environ",
+            "hcsp_typechecker.typechecking.keymaerax.os.environ",
             environment,
             clear=True,
         ):
@@ -163,11 +163,11 @@ class KeYmaeraXBackendTests(unittest.TestCase):
         backend = KeYmaeraXBackend(KeYmaeraXConfig())
 
         with patch.dict(
-            "hcsp_typechecker.keymaerax.os.environ",
+            "hcsp_typechecker.typechecking.keymaerax.os.environ",
             {"JAVA_HOME": str(self.runtime / "jdk")},
             clear=True,
         ), patch(
-            "hcsp_typechecker.keymaerax.shutil.which",
+            "hcsp_typechecker.typechecking.keymaerax.shutil.which",
             return_value=None,
         ):
             resolved = backend._java_executable()
@@ -213,7 +213,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             UntranslatedDLFormula("safety", "unsupported function"),
             kind="dl",
         )
-        with patch("hcsp_typechecker.keymaerax.subprocess.run") as run:
+        with patch("hcsp_typechecker.typechecking.keymaerax.subprocess.run") as run:
             result = backend.check(obligation)
 
         self.assertEqual(result.verdict, Verdict.UNKNOWN)
@@ -244,7 +244,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             )
 
         with patch(
-            "hcsp_typechecker.keymaerax.subprocess.run",
+            "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             side_effect=successful_run,
         ) as run:
             result = backend.check(obligation)
@@ -270,7 +270,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             "",
         )
         with patch(
-            "hcsp_typechecker.keymaerax.subprocess.run",
+            "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             return_value=completed,
         ):
             result = backend.check(obligation)
@@ -295,7 +295,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
                     "",
                 )
                 with patch(
-                    "hcsp_typechecker.keymaerax.subprocess.run",
+                    "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
                     return_value=completed,
                 ):
                     result = backend.check(obligation)
@@ -310,7 +310,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
 
         backend, obligation = self._fixture(self.runtime)
         with patch(
-            "hcsp_typechecker.keymaerax.subprocess.run",
+            "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             side_effect=subprocess.TimeoutExpired(["java"], 3),
         ):
             result = backend.check(obligation)
@@ -342,7 +342,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             "",
         )
         with patch(
-            "hcsp_typechecker.keymaerax.subprocess.run",
+            "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             side_effect=(legacy_error, modern_success),
         ) as run:
             result = backend.check(obligation)
@@ -376,7 +376,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             "",
         )
         with patch(
-            "hcsp_typechecker.keymaerax.subprocess.run",
+            "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             side_effect=(legacy_error, modern_success),
         ) as run:
             result = backend.check(obligation)
@@ -401,7 +401,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, "PROVED", "")
 
         with patch(
-            "hcsp_typechecker.keymaerax.subprocess.run",
+            "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             side_effect=record_archive,
         ):
             first = backend.check(obligation)
@@ -423,7 +423,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
         blocked = self.runtime / "artifacts"
         blocked.write_text("not a directory", encoding="utf-8")
 
-        with patch("hcsp_typechecker.keymaerax.subprocess.run") as run:
+        with patch("hcsp_typechecker.typechecking.keymaerax.subprocess.run") as run:
             result = backend.check(obligation)
 
         self.assertEqual(result.verdict, Verdict.UNKNOWN)
@@ -459,10 +459,10 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             "",
         )
         with patch(
-            "hcsp_typechecker.keymaerax.tempfile.TemporaryDirectory",
+            "hcsp_typechecker.typechecking.keymaerax.tempfile.TemporaryDirectory",
             return_value=FailingCleanup(),
         ), patch(
-            "hcsp_typechecker.keymaerax.subprocess.run",
+            "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             return_value=completed,
         ):
             result = backend.check(obligation)
@@ -496,7 +496,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             "",
         )
         with patch(
-            "hcsp_typechecker.keymaerax.subprocess.run",
+            "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             return_value=completed,
         ):
             result = backend.check(obligation)
@@ -505,11 +505,11 @@ class KeYmaeraXBackendTests(unittest.TestCase):
         self.assertIn("proof-search timeout", result.detail)
 
     # 测试输入：带有限 delay/safety 的 ODE#done!0 和显式后端配置。
-    # 预期行为：公开 API 返回 true，并调用后端两次。
+    # 预期行为：内部检查入口返回 true，并调用后端两次。
     # 检查内容：核对送出的 dL 义务依次是 safety 与 boundary 且均通过。
     # 论文对应：Section 4.3 ODE 规则从进程推导到外部 dL 证明的完整链路。
     def test_check_hcsp_uses_configured_keymaerax_backend(self) -> None:
-        """公开 API 应把 ODE safety/boundary 义务一路交给内建后端。"""
+        """内部检查入口应把 ODE safety/boundary 义务一路交给内建后端。"""
 
         backend, _obligation = self._fixture(self.runtime)
         process = Sequence.of(
@@ -528,7 +528,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
         )
 
         with patch(
-            "hcsp_typechecker.keymaerax.subprocess.run",
+            "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             return_value=completed,
         ) as run:
             report = check_hcsp(

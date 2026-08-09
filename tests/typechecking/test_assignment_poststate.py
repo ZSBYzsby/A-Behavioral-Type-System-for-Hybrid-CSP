@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import unittest
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     Assert,
     Assign,
     BasicType,

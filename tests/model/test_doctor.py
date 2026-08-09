@@ -16,8 +16,8 @@ import shutil
 import unittest
 from unittest.mock import patch
 
-from hcsp_typechecker.doctor import collect_environment, format_environment
-from hcsp_typechecker.keymaerax import KeYmaeraXConfig
+from hcsp_typechecker.tooling.doctor import collect_environment, format_environment
+from hcsp_typechecker.typechecking.keymaerax import KeYmaeraXConfig
 
 
 class EnvironmentDoctorTests(unittest.TestCase):
@@ -56,7 +56,7 @@ class EnvironmentDoctorTests(unittest.TestCase):
         config = KeYmaeraXConfig(jar_path=jar, java_path=java)
 
         with patch(
-            "hcsp_typechecker.doctor._java_version",
+            "hcsp_typechecker.tooling.doctor._java_version",
             return_value='openjdk version "21"',
         ):
             checks = collect_environment(

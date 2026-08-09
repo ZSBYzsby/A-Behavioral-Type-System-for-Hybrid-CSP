@@ -29,7 +29,7 @@ from __future__ import annotations
 from math import inf
 import unittest
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     Assert,
     Assign,
     BasicType,

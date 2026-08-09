@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from math import inf
 from typing import Any, Callable, Mapping, get_args, get_type_hints
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     Assert,
     Assign,
     BasicType,
@@ -114,7 +114,7 @@ class ConversionScenario:
     step_rules: tuple[str, ...] = ()
 
     def run(self) -> CheckReport:
-        """调用公共入口并返回保留全部证明证据的检查报告。"""
+        """调用内部检查器入口并返回保留全部证明证据的检查报告。"""
 
         return check_hcsp(
             gamma=self.gamma,
@@ -860,6 +860,41 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
                 for diagnostic in report.diagnostics
             )
         )
+
+    # 测试输入：全局/局部 Gamma 分别使用 Unicode 与非字符串声明键。
+    # 预期行为：两者在任何规则执行前作为非法环境返回 false。
+    # 检查内容：确认环境入口不再把键经 str() 静默改名或接受 Python Unicode 名称。
+    # 论文对应：Definition 4.1 的 Gamma 定义域与 Process 状态变量使用同一 IDENT。
+    def test_gamma_names_use_the_same_ascii_ident_rule(self) -> None:
+        """全局和局部 Gamma 的键必须是原生 ASCII IDENT 字符串。"""
+
+        global_report = check_hcsp(
+            gamma={"变量": BasicType.INT},
+            theta={},
+            configurations=[Configuration({}, Skip())],
+        )
+        local_report = check_hcsp(
+            gamma={},
+            theta={},
+            configurations=[
+                Configuration(
+                    {},
+                    Skip(),
+                    gamma={1: BasicType.INT},  # type: ignore[dict-item]
+                )
+            ],
+        )
+
+        for report in (global_report, local_report):
+            with self.subTest(report=report):
+                self.assertEqual(report.verdict, Verdict.FALSE)
+                self.assertIsNone(report.inferred_type)
+                self.assertTrue(
+                    any(
+                        "Gamma names" in diagnostic.message
+                        for diagnostic in report.diagnostics
+                    )
+                )
 
 
 if __name__ == "__main__":

@@ -22,8 +22,14 @@ import inspect
 import unittest
 from typing import Any, get_type_hints
 
-import hcsp_typechecker.checker as checker_module
-from hcsp_typechecker import Configuration, ODE, TypeChecker, TypingJudgment, Verdict
+import hcsp_typechecker.typechecking.checker as checker_module
+from hcsp_typechecker._internal import (
+    Configuration,
+    ODE,
+    TypeChecker,
+    TypingJudgment,
+    Verdict,
+)
 
 
 class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):

@@ -1,0 +1,76 @@
+"""HCSP Process 语言层：表达式 AST 与 E/P/S 进程 AST。
+
+本子包不依赖输入解析器、行为类型 AST 或类型检查器。它属于项目内部实现层，
+导出集合只服务于逐节点审计和内部测试，不构成面向普通用户的兼容性承诺；
+稳定入口只位于包根 ``hcsp_typechecker``。
+"""
+
+from .ast import (
+    Assert,
+    Assign,
+    Channel,
+    EmptyEvent,
+    EventChoice,
+    EventReaction,
+    HCSP,
+    If,
+    InputChannel,
+    InternalChoice,
+    Mu,
+    ODE,
+    ODEAnnotation,
+    ODELocalClock,
+    OutputChannel,
+    Parallel,
+    Process,
+    RecursionAnnotation,
+    Sequence,
+    Skip,
+    Var,
+)
+from .expressions import (
+    BinaryExpr,
+    BooleanExpr,
+    CallExpr,
+    CompareExpr,
+    Expr,
+    Literal,
+    UnaryExpr,
+    Variable,
+    ensure_expr,
+    parse_expr,
+)
+
+__all__ = [
+    "Assert",
+    "Assign",
+    "BinaryExpr",
+    "BooleanExpr",
+    "CallExpr",
+    "Channel",
+    "CompareExpr",
+    "EmptyEvent",
+    "EventChoice",
+    "EventReaction",
+    "Expr",
+    "HCSP",
+    "If",
+    "InputChannel",
+    "InternalChoice",
+    "Literal",
+    "Mu",
+    "ODE",
+    "ODEAnnotation",
+    "ODELocalClock",
+    "OutputChannel",
+    "Parallel",
+    "Process",
+    "RecursionAnnotation",
+    "Sequence",
+    "Skip",
+    "UnaryExpr",
+    "Var",
+    "Variable",
+    "ensure_expr",
+    "parse_expr",
+]

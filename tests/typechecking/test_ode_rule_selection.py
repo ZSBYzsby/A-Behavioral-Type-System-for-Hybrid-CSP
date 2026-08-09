@@ -20,7 +20,7 @@ from __future__ import annotations
 import unittest
 from typing import Any, Callable
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     BottomType,
     Configuration,
     EndType,

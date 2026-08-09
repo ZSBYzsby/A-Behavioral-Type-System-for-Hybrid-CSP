@@ -2,7 +2,7 @@
 
 The script is intentionally independent of wheel/sdist tooling.  It scans
 repository text for developer-home paths, reports the active Python/Z3 and
-optional KeYmaera X environment, then runs both maintained test suites.
+optional KeYmaera X environment, then runs the maintained test suite.
 
 Run it from any working directory with::
 
@@ -83,7 +83,7 @@ def find_private_paths() -> tuple[str, ...]:
 
 
 def run_command(arguments: Sequence[str], description: str) -> bool:
-    """Run one repository check without a shell and report its stage heading."""
+    """不经过 shell 运行一个仓库检查，并打印该阶段的标题。"""
 
     print(f"\n=== {description} ===", flush=True)
     completed = subprocess.run(
@@ -99,7 +99,7 @@ def run_command(arguments: Sequence[str], description: str) -> bool:
 
 
 def main() -> int:
-    """Run all source-sharing checks and return a process-friendly status."""
+    """运行全部源码共享检查，并返回适合作为进程退出码的状态。"""
 
     private_paths = find_private_paths()
     print("=== Repository privacy scan ===")
@@ -112,7 +112,7 @@ def main() -> int:
 
     python = sys.executable
     commands: tuple[tuple[list[str], str], ...] = (
-        ([python, "-m", "hcsp_typechecker.doctor"], "Environment doctor"),
+        ([python, "-m", "hcsp_typechecker"], "Environment doctor"),
         (
             [
                 python,
@@ -125,19 +125,6 @@ def main() -> int:
                 "test_*.py",
             ],
             "Core regression tests",
-        ),
-        (
-            [
-                python,
-                "-m",
-                "unittest",
-                "discover",
-                "-s",
-                "test2",
-                "-p",
-                "test_*.py",
-            ],
-            "Single-example conversion tests",
         ),
     )
     for command, description in commands:

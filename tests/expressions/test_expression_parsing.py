@@ -25,7 +25,7 @@ import unittest
 from decimal import Decimal
 from fractions import Fraction
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     BinaryExpr,
     BooleanExpr,
     CallExpr,
@@ -36,6 +36,7 @@ from hcsp_typechecker import (
     Variable,
     ensure_expr,
     parse_expr,
+    parse_expression,
 )
 
 
@@ -113,6 +114,26 @@ class SupportedAtomicExpressionParsingTests(unittest.TestCase):
 
         self.assertEqual(parse_expr("velocity"), Variable("velocity"))
 
+    # 测试输入：普通 Unicode、全角兼容字符和会被 Python NFKC 改名的 Kelvin 符号。
+    # 预期行为：源码入口和直接 Expr 构造均拒绝，不发生静默 ASCII 改名。
+    # 检查内容：覆盖 Variable、CallExpr、parse_expr 与严格 parse_expression 的边界。
+    # 论文对应：Section 2.1 的变量 x 统一采用项目 ASCII IDENT 词法规则。
+    def test_identifiers_are_ascii_and_never_nfkc_normalized(self) -> None:
+        """Expr 的所有名称入口必须拒绝 Unicode 及其兼容归一化形式。"""
+
+        for name in ("变量", "π", "ｘ", "K"):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    Variable(name)
+                with self.assertRaises(ValueError):
+                    parse_expr(name)
+                with self.assertRaises(ValueError):
+                    parse_expression(name)
+        with self.assertRaises(ValueError):
+            CallExpr("ｆ", (Variable("x"),))
+        with self.assertRaises(ValueError):
+            parse_expr("ｆ(x)")
+
     # 测试输入：Decimal 和 Fraction 形式的精确数值。
     # 预期行为：两种数值都成为保存原值的 Literal。
     # 检查内容：确保非字符串精确数值入口不会丢失精度。
@@ -157,17 +178,38 @@ class SupportedOperatorExpressionParsingTests(unittest.TestCase):
                     BinaryExpr(operator, Variable("x"), Variable("y")),
                 )
 
-    # 测试输入：HCSP 风格乘方 ``x ^ 2``。
-    # 预期行为：内部统一为 BinaryExpr("**", x, 2)。
-    # 检查内容：确认兼容预处理不会把 ^ 保留成异或运算。
-    # 论文对应：为论文数学表达式中的幂运算提供明确内部表示。
-    def test_hcsp_caret_is_normalized_to_power(self) -> None:
-        """HCSP 的 ^ 乘方记号应统一保存为内部 **。"""
+    # 测试输入：链式 ^、与加法混合、左侧负号和负指数四种优先级边界。
+    # 预期行为：^ 在 Python 建树前成为 **，保持高优先级和右结合。
+    # 检查内容：精确比较树，并要求 parse_expr 与新前端 parse_expression 相同。
+    # 论文对应：数学乘方不能继承 Python 异或运算的低优先级和左结合性。
+    def test_caret_uses_power_precedence_and_right_associativity(self) -> None:
+        """^ 必须在所有组合位置与 ** 产生完全相同的 Expr 树。"""
 
-        self.assertEqual(
-            parse_expr("x ^ 2"),
-            BinaryExpr("**", Variable("x"), Literal(2)),
-        )
+        cases = {
+            "x ^ y ^ z": BinaryExpr(
+                "**",
+                Variable("x"),
+                BinaryExpr("**", Variable("y"), Variable("z")),
+            ),
+            "x + y ^ z": BinaryExpr(
+                "+",
+                Variable("x"),
+                BinaryExpr("**", Variable("y"), Variable("z")),
+            ),
+            "-x ^ 2": UnaryExpr(
+                "-",
+                BinaryExpr("**", Variable("x"), Literal(2)),
+            ),
+            "2 ^ -x": BinaryExpr(
+                "**",
+                Literal(2),
+                UnaryExpr("-", Variable("x")),
+            ),
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(parse_expr(source), expected)
+                self.assertEqual(parse_expression(source), expected)
 
     # 测试输入：``x + y * 2`` 与 ``(x + y) * 2``。
     # 预期行为：乘法优先和显式括号产生两棵不同且正确的 AST。

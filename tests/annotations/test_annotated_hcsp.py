@@ -30,7 +30,7 @@ from fractions import Fraction
 import math
 import unittest
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     Assign,
     BasicType,
     BottomType,
@@ -278,17 +278,18 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         self.assertEqual(len(safety_obligations), 1)
         self.assertEqual(safety_obligations[0].verdict, Verdict.TRUE)
 
-    # 测试输入：静止 ODE，批注明确给出 delay=3。
-    # 预期行为：可信 dL 后端批准域前提后，得到 PureDelayType(3, bottom)。
-    # 检查内容：比较完整类型；无自然后继时只登记 domain，不登记 boundary。
+    # 测试输入：静止 ODE，批注明确给出精确有理 delay=1/2。
+    # 预期行为：可信 dL 后端批准域前提后，得到 PureDelayType(1/2, bottom)。
+    # 检查内容：比较完整类型与精确 duration；无自然后继时只登记 domain，
+    #           不登记 boundary，也不生成多余的 T-ODE-delay 义务。
     # 论文对应：Section 4.3 纯通信中断形式的外部时延批注。
     def test_delay_annotation_appears_in_the_inferred_type(self) -> None:
-        """有限 d 必须原样形成 delay(d)，而不是由检查器重新计算。"""
+        """有限有理 d 必须精确形成 delay(d)，而不是由检查器重新计算。"""
 
         process = ODE(
             [("x", 0)],
             True,
-            annotation=ODEAnnotation(delay=3),
+            annotation=ODEAnnotation(delay="1 / 2"),
         )
         report = check_hcsp(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
@@ -296,12 +297,15 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             configurations=[Configuration({"x": 0}, process)],
             dl_checker=_approve_dl,
         )
-        expected = PureDelayType(3, BottomType())
+        expected = PureDelayType(Fraction(1, 2), BottomType())
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(types_equivalent(report.inferred_type, expected))
+        self.assertIsInstance(report.inferred_type, PureDelayType)
+        self.assertEqual(report.inferred_type.duration, Fraction(1, 2))
         rules = {item.rule for item in report.obligations}
         self.assertIn("T-ODE-domain", rules)
         self.assertNotIn("T-ODE-boundary", rules)
+        self.assertNotIn("T-ODE-delay", rules)
 
     # 测试输入：x'=1、域 x<=10、安全式 x<=8、delay=2。
     # 预期行为：可信 mock 后端批准后结果为 true。
@@ -326,34 +330,6 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         rules = {item.rule for item in report.obligations}
         self.assertIn("T-ODE-safety", rules)
         self.assertIn("T-ODE-domain", rules)
-
-    # 测试输入：delay 源码 ``1 / 2`` 的静止 ODE。
-    # 预期行为：PureDelayType.duration 为精确 Fraction(1,2)，不混入 Expr。
-    # 检查内容：确认合法 d 不产生冗余 T-ODE-delay，并保留精确类型字段。
-    # 论文对应：Remark 4.1 的外部 d 直接进入行为类型。
-    def test_fractional_delay_appears_exactly_in_the_inferred_type(self) -> None:
-        """有限常量算式应以精确有理数进入 PureDelayType。"""
-
-        process = ODE(
-            [("x", 0)],
-            True,
-            annotation=ODEAnnotation(safety=True, delay="1 / 2"),
-        )
-        report = check_hcsp(
-            gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
-            theta={},
-            configurations=[Configuration({"x": 0}, process)],
-            dl_checker=_approve_dl,
-        )
-        self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsInstance(report.inferred_type, PureDelayType)
-        self.assertEqual(
-            report.inferred_type.duration,
-            Fraction(1, 2),
-        )
-        self.assertFalse(
-            any(item.rule == "T-ODE-delay" for item in report.obligations)
-        )
 
     # 测试输入：有限时延 ODE 后顺序连接具有 Int 载荷的 ``done!0``。
     # 预期行为：无通信分支使结果成为 PureDelayType，continuation 是 done!。

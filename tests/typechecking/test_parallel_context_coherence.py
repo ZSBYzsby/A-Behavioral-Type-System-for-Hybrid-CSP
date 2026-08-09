@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import unittest
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     Assert,
     BasicType,
     Configuration,
@@ -100,7 +100,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
     # 测试输入：全局 Gamma 为空，局部 Gamma 凭空声明 y:Int。
     # 预期行为：T-|| 立即拒绝局部新增项，不能把局部环境伪装成全局判断的前提。
     # 检查内容：结果必须为 false/None，并报告 y 不存在于 global Gamma。
-    # 论文对应：结论上下文由前提上下文组成，公共 API 不能同时声称全局为空。
+    # 论文对应：结论上下文由前提上下文组成，检查器入口不能同时声称全局为空。
     def test_local_gamma_cannot_invent_a_global_variable(self) -> None:
         """局部 Gamma 中的每个变量都必须来自入口全局 Gamma。"""
 

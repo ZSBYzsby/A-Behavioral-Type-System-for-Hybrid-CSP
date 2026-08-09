@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import unittest
 
-from hcsp_typechecker.model import (
+from hcsp_typechecker.typechecking.model import (
     BasicType,
     ChannelType,
     ContinuousType,
@@ -125,6 +125,8 @@ class ChannelTypeBoundaryTests(unittest.TestCase):
             lambda: ChannelType((BasicType.INT, BasicType.REAL), binders=("x",)),
             lambda: ChannelType((BasicType.INT, BasicType.REAL), binders=("x", "x")),
             lambda: ChannelType((BasicType.INT,), binders=("not valid",)),
+            lambda: ChannelType((BasicType.INT,), binders=("变量",)),
+            lambda: ChannelType((BasicType.INT,), binders=("ｘ",)),
         )
         for declaration in invalid_declarations:
             with self.subTest(declaration=declaration):
@@ -193,6 +195,8 @@ class ContinuousTypeBoundaryTests(unittest.TestCase):
             lambda: ContinuousType(variables=()),
             lambda: ContinuousType(variables=("x", "x")),
             lambda: ContinuousType(variables=("not valid",)),
+            lambda: ContinuousType(variables=("变量",)),
+            lambda: ContinuousType(variables=("ｘ",)),
             lambda: ContinuousType(variables="x"),
         )
         for declaration in invalid_declarations:

@@ -39,8 +39,10 @@ keymaerax.jar
 keymaerax-artifacts/
 *.kyp
 
-# Local research material and audit notes.  Keep these files on the developer
-# machine, but publish only the root README as repository documentation.
+# Local research material and historical audit notes stay on the developer
+# machine.  Current public documentation lives in the root README and
+# document/; these patterns only exclude papers, slide decks, and root-level
+# scratch reports.
 *.pdf
 *.pptx
 /GETTING_STARTED.md

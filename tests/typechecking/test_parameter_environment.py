@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import unittest
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     Assert,
     Assign,
     BasicType,
@@ -304,6 +304,33 @@ class ParameterEnvironmentTests(unittest.TestCase):
         self.assertTrue(
             any("overlap" in item.message for item in report.diagnostics)
         )
+
+    # 测试输入：共享参数声明分别使用 Unicode 名称和非字符串键。
+    # 预期行为：检查器在建立任何 Z3 参数符号之前返回 false。
+    # 检查内容：确认参数环境不再通过 str() 接受或改写非 IDENT 名称。
+    # 论文对应：共享参数 H 与表达式中的只读变量使用同一 ASCII IDENT 词法域。
+    def test_parameter_names_must_be_ascii_ident_strings(self) -> None:
+        """共享参数键必须是原生 ASCII IDENT 字符串。"""
+
+        environments = (
+            ParameterEnvironment({"参数": BasicType.REAL}),
+            ParameterEnvironment({1: BasicType.REAL}),  # type: ignore[dict-item]
+        )
+        for parameters in environments:
+            with self.subTest(parameters=parameters):
+                report = check_hcsp(
+                    gamma={},
+                    theta={},
+                    configurations=[Assert(True)],
+                    parameters=parameters,
+                )
+                self.assertEqual(report.verdict, Verdict.FALSE)
+                self.assertTrue(
+                    any(
+                        "Invalid parameter names" in item.message
+                        for item in report.diagnostics
+                    )
+                )
 
 
 if __name__ == "__main__":

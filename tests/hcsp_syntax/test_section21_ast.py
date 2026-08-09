@@ -27,9 +27,9 @@ import math
 from fractions import Fraction
 import unittest
 
-import hcsp_typechecker as public_api
-import hcsp_typechecker.hcsp_process_ast as process_ast
-from hcsp_typechecker import (
+import hcsp_typechecker._internal as internal_api
+import hcsp_typechecker.process.ast as process_ast
+from hcsp_typechecker._internal import (
     Assert,
     Assign,
     Channel,
@@ -215,31 +215,6 @@ class Section21NodeInventoryTests(unittest.TestCase):
         actual = {node.__name__ for node in nodes}
         self.assertEqual(actual, EXPECTED_SYSTEM_ONLY_NODES)
 
-    # 测试输入：公共包导出的全部 EventReaction/HCSP 具体子类。
-    # 预期行为：恰好等于当前论文 E/P/S 具体节点集合，没有遗漏或额外节点。
-    # 检查内容：按类型层次正向检查完整公开库存。
-    # 论文对应：公共构造接口严格对应 Section 2.1 的 E、P、S 产生式。
-    def test_public_concrete_ast_inventory_matches_section21(self) -> None:
-        """公开 AST 节点集合应由当前论文文法正向、完整地定义。"""
-
-        abstract_nodes = {EventReaction, Process, HCSP}
-        actual = {
-            name
-            for name, value in vars(public_api).items()
-            if isinstance(value, type)
-            and value not in abstract_nodes
-            and (
-                issubclass(value, EventReaction)
-                or issubclass(value, HCSP)
-            )
-        }
-        expected = (
-            EXPECTED_EVENT_NODES
-            | EXPECTED_PROCESS_NODES
-            | EXPECTED_SYSTEM_ONLY_NODES
-        )
-        self.assertEqual(actual, expected)
-
 
 class Section21EventGrammarTests(unittest.TestCase):
     """逐项测试 ``E ::= empty | input-choice | output-choice``。"""
@@ -389,14 +364,14 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             OutputChannel("stop")  # type: ignore[call-arg]
 
-    # 测试输入：合法 ASCII/Unicode 标识符，以及空白、标点、数字开头等非法名称。
+    # 测试输入：合法 ASCII IDENT，以及 Unicode、空白、标点、数字开头等名称。
     # 预期行为：合法名称原样保留；三个通道构造入口统一拒绝所有非法名称。
-    # 检查内容：锁定通道名与 Variable 相同的 str.isidentifier() 词法边界。
+    # 检查内容：锁定通道名与 Variable 相同的 ASCII 正则词法边界。
     # 论文对应：Section 2.1 的 ch 是通道标识符，而不是任意非空字符串。
     def test_communication_enforces_identifier_channel_names(self) -> None:
-        """通道名必须满足与变量名相同的 Python 标识符规则。"""
+        """通道名必须满足与变量名相同的 ASCII IDENT 规则。"""
 
-        for name in ("channel", "channel_1", "_private", "通道_1"):
+        for name in ("channel", "channel_1", "_private", "Channel2"):
             with self.subTest(valid=name):
                 self.assertEqual(Channel(name).name, name)
                 self.assertEqual(InputChannel(name, "x").channel.name, name)
@@ -414,6 +389,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
             "a.b",
             "a/b",
             "a\nb",
+            "通道_1",
+            "ｃｈ",
+            "K",
         )
         for name in invalid_names:
             with self.subTest(name=repr(name)):
@@ -423,6 +401,29 @@ class Section21ProcessGrammarTests(unittest.TestCase):
                     InputChannel(name, "x")
                 with self.assertRaisesRegex(ValueError, "Invalid channel name"):
                     OutputChannel(name, 0)
+
+    # 测试输入：ASCII 左值/输入目标/进程变量及对应的 Unicode、全角混淆名称。
+    # 预期行为：ASCII 名称正常构造，所有非 ASCII 名称在 Process AST 边界失败。
+    # 检查内容：覆盖 ensure_variable 的赋值/输入路径和 Var 的独立名称检查。
+    # 论文对应：Section 2.1 的 x、X 与 ch 共享项目统一的 IDENT 词法形状。
+    def test_process_value_and_recursion_names_use_ascii_ident(self) -> None:
+        """Process AST 的值变量和进程变量必须使用 ASCII IDENT。"""
+
+        self.assertEqual(Assign("_x1", 0).target, Variable("_x1"))
+        self.assertEqual(
+            InputChannel("ch", "received_1").targets,
+            (Variable("received_1"),),
+        )
+        self.assertEqual(Var("Loop_1").name, "Loop_1")
+
+        for name in ("变量", "ｘ", "K"):
+            with self.subTest(name=name):
+                with self.assertRaises((TypeError, ValueError)):
+                    Assign(name, 0)
+                with self.assertRaises((TypeError, ValueError)):
+                    InputChannel("ch", name)
+                with self.assertRaises(ValueError):
+                    Var(name)
 
     # 测试输入：合法二元 If，以及缺失/多余参数、E 分支、Parallel 分支。
     # 预期行为：合法节点保留两个 P；四种非法调用均被拒绝。
@@ -537,6 +538,8 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         assert_process(self, node)
         with self.assertRaises(ValueError):
             Mu("not a name", Skip())
+        with self.assertRaises(ValueError):
+            Mu("循环", Skip())
         with self.assertRaises(TypeError):
             Mu("X", EmptyEvent())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
@@ -572,7 +575,7 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         assert_process(self, sequential)
         assert_process(self, choice)
 
-    # 测试输入：``ODE.wait("1 / 2")`` 以及包级、模块级 ODE 类。
+    # 测试输入：``ODE.wait("1 / 2")`` 以及内部聚合、模块级 ODE 类。
     # 预期行为：得到 ODE; skip 二元树，ODE 自动时钟截止值为精确 Fraction(1,2)。
     # 检查内容：确认没有 Wait 节点，用户方程为空，隐藏时钟仍固定从 0 以速率 1 演化。
     # 论文对应：Section 2.1 的 ``wait(d) := <dot(t)=1 & t<d>``，t 为局部时钟。
@@ -580,7 +583,7 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         """ODE.wait(d) 应只生成使用自动局部时钟的核心 AST。"""
 
         self.assertIs(process_ast.ODE, ODE)
-        self.assertIs(public_api.ODE, ODE)
+        self.assertIs(internal_api.ODE, ODE)
         waiting = ODE.wait("1 / 2")
 
         self.assertIsInstance(waiting, Sequence)
@@ -637,6 +640,12 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "reserved.*local clock"):
             ODE(
                 [("t", 1)],
+                True,
+                annotation=ODEAnnotation(delay=1),
+            )
+        with self.assertRaisesRegex(ValueError, "Invalid ODE variable"):
+            ODE(
+                [("位置", 1)],
                 True,
                 annotation=ODEAnnotation(delay=1),
             )

@@ -18,15 +18,18 @@ from __future__ import annotations
 
 import unittest
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     BasicType,
     ChannelType,
+    CheckReport,
     Configuration,
     ContinuousType,
+    EndType,
     InputChannel,
     ODE,
     ODEAnnotation,
     OutputChannel,
+    ProofObligation,
     Sequence,
     Skip,
     Verdict,
@@ -130,7 +133,7 @@ class DetailedReportTests(unittest.TestCase):
             "[O02] 有效 | 已证明 | T-Out | FOL",
             "论文前提 : [T-Out]  phi => refinement{e/eta}",
             "规则生成公式（原始）:",
-            "证明器实际输入:",
+            "证明器实际输入 : 见 [FOL02]",
             "判定后端 : Z3 有效性检查",
             "处理状态 : 已解决",
             "=== 未解决或未通过的证明义务 ===",
@@ -138,7 +141,6 @@ class DetailedReportTests(unittest.TestCase):
             "Proof @ T-Out",
             "=== 诊断信息 ===",
             "=== 汇总 ===",
-            "简洁类型 : ch?.(ch!.(0))",
             "规则步骤 : 8",
             "证明记录 : 2",
             "有效义务 : 2 (true=2, false=0, unknown=0)",
@@ -147,14 +149,15 @@ class DetailedReportTests(unittest.TestCase):
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, rendered)
+        self.assertNotIn("简洁类型 :", rendered)
 
     # 测试输入：具有非平凡 safety 和有限自然后继的 ODE，dL 后端固定返回 unknown。
     # 预期行为：两个 ODE 候选都在首条 unknown safety premise 处停止，因此
     #           不伪造唯一类型，只保留两条已经实际判定的候选证据。
     # 检查内容：候选标记、单独的 dL 公式清单、选择诊断和未选候选证据区。
     # 论文对应：Table 2 两条带 fallback ODE premise 必须保留，不能因后端缺失而隐藏。
-    def test_unknown_dl_formulas_are_repeated_in_unresolved_section(self) -> None:
-        """报告应把尚未判定的 dL 公式集中列出并给出后续操作。"""
+    def test_unknown_dl_formulas_are_indexed_without_duplicate_bodies(self) -> None:
+        """报告应集中列出未决 dL 公式，并引用而不重复相同公式正文。"""
 
         process = Sequence.of(
             ODE(
@@ -176,7 +179,7 @@ class DetailedReportTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.UNKNOWN)
         self.assertIsNone(report.inferred_type)
         expected_fragments = (
-            "简洁类型 : (none)",
+            "推导类型 : (none)",
             "未选候选 : 2",
             "candidate=communication-only",
             "candidate=natural-timeout",
@@ -186,6 +189,7 @@ class DetailedReportTests(unittest.TestCase):
             "[DL01] 对应 O02 | 未选候选 | 待证明 | T-ODE-safety | DL",
             "[DL02] 对应 O03 | 未选候选 | 待证明 | T-ODE-safety | DL",
             "实际检查公式:",
+            "实际检查公式 : 与 [DL01] 相同，不重复展开",
             "[T-unrhd/T-unrhd-prime]",
             "配置的 dL 后端（通常为 KeYmaera X）",
             "=== 未选 ODE 候选的未决证据 ===",
@@ -195,6 +199,61 @@ class DetailedReportTests(unittest.TestCase):
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, rendered)
+        shared_formula = str(report.obligations[1].proof_formula)
+        self.assertEqual(
+            rendered.splitlines().count(f"       {shared_formula}"),
+            1,
+        )
+
+    # 测试输入：三条人工构造的 FOL 义务；第一条原始公式与证明器输入不同，
+    #           后两条具有相同的证明器输入。
+    # 预期行为：原始公式保留在顺序证据中；规范化输入只在 FOL 清单展开一次，
+    #           其余位置通过稳定的 FOL 编号引用。
+    # 检查内容：逐个统计唯一标记正文出现次数，并核对顺序记录的交叉引用。
+    # 论文对应：不改变任何 Table 2 premise，只去除同一审计证据的文本复制。
+    def test_formula_bodies_are_printed_once_and_referenced_elsewhere(self) -> None:
+        """完整报告必须保留两种公式表示，但不得反复展开同一正文。"""
+
+        obligations = (
+            ProofObligation(
+                "T-Test",
+                "normalized formula",
+                "RAW_UNIQUE_FORMULA",
+            ).decided(Verdict.TRUE, proof_formula="NORMALIZED_UNIQUE_FORMULA"),
+            ProofObligation(
+                "T-Test",
+                "first shared formula",
+                "SHARED_FORMULA",
+            ).decided(Verdict.TRUE),
+            ProofObligation(
+                "T-Test",
+                "second shared formula",
+                "SHARED_FORMULA",
+            ).decided(Verdict.TRUE),
+        )
+        report = CheckReport(
+            verdict=Verdict.TRUE,
+            inferred_type=EndType(),
+            component_types=(EndType(),),
+            obligations=obligations,
+            diagnostics=(),
+        )
+
+        rendered = report.format_detailed()
+        lines = rendered.splitlines()
+
+        self.assertEqual(lines.count("       RAW_UNIQUE_FORMULA"), 1)
+        self.assertEqual(lines.count("       NORMALIZED_UNIQUE_FORMULA"), 1)
+        self.assertEqual(lines.count("       SHARED_FORMULA"), 1)
+        self.assertIn("证明器实际输入 : 见 [FOL01]", rendered)
+        self.assertIn(
+            "规则生成公式与证明器实际输入相同 : 见 [FOL02]",
+            rendered,
+        )
+        self.assertIn(
+            "实际检查公式 : 与 [FOL02] 相同，不重复展开",
+            rendered,
+        )
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import unittest
 
-from hcsp_typechecker import (
+from hcsp_typechecker._internal import (
     Assign,
     BasicType,
     ChannelType,
@@ -28,7 +28,7 @@ from hcsp_typechecker import (
     Verdict,
     check_hcsp,
 )
-from hcsp_typechecker.logic import (
+from hcsp_typechecker.typechecking.logic import (
     ExpressionTranslator,
     Z3ProofEngine,
     z3,
