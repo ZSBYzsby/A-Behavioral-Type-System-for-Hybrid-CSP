@@ -94,7 +94,10 @@ class DetailedReportTests(unittest.TestCase):
         self.assertTrue(
             any(name == "x" and "__input" in term for name, term in output_step.symbolic_state)
         )
-        self.assertIn("ch?.(ch!.(0))", input_step.result)
+        self.assertIn(
+            r"delay(infinity) \unrhd (ch?.(delay(infinity) \unrhd (ch!.(0))))",
+            input_step.result,
+        )
         self.assertIn("ch!.(0)", output_step.result)
         proof_steps = tuple(step for step in report.steps if step.rule == "Proof")
         self.assertEqual(len(proof_steps), 2)
@@ -121,7 +124,7 @@ class DetailedReportTests(unittest.TestCase):
             "规则推导 : 已完成",
             "类型构造 : 成功",
             "类型可信性 : 可信（全部义务已验证）",
-            "构造类型 : ch?.(ch!.(0))",
+            r"构造类型 : delay(infinity) \unrhd (ch?.(delay(infinity) \unrhd (ch!.(0))))",
             "=== 规则执行过程 ===",
             "T-In @ K1",
             "T-Out @ K1",

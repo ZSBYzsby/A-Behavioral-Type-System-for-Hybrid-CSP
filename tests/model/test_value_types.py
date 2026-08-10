@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import unittest
 
-from hcsp_typechecker.typechecking.model import (
+from hcsp_typechecker.data_structures.runtime_context import (
     BasicType,
     ChannelType,
     ContinuousType,

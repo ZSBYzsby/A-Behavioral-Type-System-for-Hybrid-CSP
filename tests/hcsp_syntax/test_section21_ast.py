@@ -27,7 +27,7 @@ from fractions import Fraction
 import unittest
 
 import hcsp_typechecker._internal as internal_api
-import hcsp_typechecker.process.ast as process_ast
+import hcsp_typechecker.data_structures.process_ast.ast as process_ast
 from hcsp_typechecker._internal import (
     Assert,
     Assign,

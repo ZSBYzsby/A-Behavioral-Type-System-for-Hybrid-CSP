@@ -1,7 +1,7 @@
 """项目表达式 AST 到 Z3 的翻译与一阶逻辑证明基础设施。
 
 Process AST 节点在构造阶段已经把字符串和 Python 常量转换为项目自有
-:class:`~hcsp_typechecker.process.expressions.Expr`。本模块因此只需要访问确定的节点
+:class:`~hcsp_typechecker.data_structures.process_ast.expressions.Expr`。本模块因此只需要访问确定的节点
 类型，不再根据外部对象类名或字段进行兼容性猜测。
 
 Z3 项仍可在通道 callable refinement 和证明器内部出现，但它们不是 HCSP AST
@@ -23,7 +23,7 @@ from numbers import Integral, Real
 from typing import Any, Mapping, MutableMapping, Sequence
 
 from ..identifiers import is_hcsp_identifier
-from ..process.expressions import (
+from ..data_structures.process_ast.expressions import (
     BinaryExpr,
     BooleanExpr,
     CallExpr,
@@ -36,7 +36,7 @@ from ..process.expressions import (
     ensure_expr,
     ensure_variable,
 )
-from .model import (
+from ..data_structures.type_construction.model import (
     BasicType,
     ChannelType,
     GammaType,

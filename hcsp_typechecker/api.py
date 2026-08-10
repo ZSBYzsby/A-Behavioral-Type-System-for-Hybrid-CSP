@@ -25,14 +25,17 @@ from enum import Enum
 import sys
 from typing import Any, TextIO, TypeAlias
 
-from .input_language.errors import HCSPInputError
-from .input_language.parser import parse_expression, parse_hcsp_source
-from .input_language.source import ParsedHCSPSource
-from .process.ast import HCSP, Process
-from .type_system.ast import ConfigurationType
+from .frontend.type_constructor_frontend.errors import HCSPInputError
+from .frontend.type_constructor_frontend.parser import (
+    parse_expression,
+    parse_hcsp_source,
+)
+from .frontend.type_constructor_frontend.source import ParsedHCSPSource
+from .data_structures.process_ast.ast import HCSP, Process
+from .data_structures.type_ast.ast import ConfigurationType
 from .typechecking.constructor import construct_type
 from .typechecking.keymaerax import KeYmaeraXConfig
-from .typechecking.model import (
+from .data_structures.type_construction.model import (
     ChannelType,
     TypeConstructionReport,
     Configuration,

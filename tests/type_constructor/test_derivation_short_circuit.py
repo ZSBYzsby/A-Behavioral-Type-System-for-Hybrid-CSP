@@ -36,6 +36,7 @@ from hcsp_typechecker._internal import (
     If,
     InputChannel,
     InputType,
+    InfiniteDelayType,
     NoInterruptType,
     ODE,
     ODEAnnotation,
@@ -108,7 +109,11 @@ class DerivationShortCircuitTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.UNKNOWN)
         self.assertEqual(
             report.constructed_type,
-            FiniteDelayType(1, NoInterruptType(), InputType("ch", EndType())),
+            FiniteDelayType(
+                1,
+                NoInterruptType(),
+                InfiniteDelayType(InputType("ch", EndType())),
+            ),
         )
         ode_obligations = tuple(
             item for item in report.obligations if item.rule.startswith("T-ODE")

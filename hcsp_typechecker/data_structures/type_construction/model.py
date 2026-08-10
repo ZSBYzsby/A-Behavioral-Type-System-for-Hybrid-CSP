@@ -15,8 +15,8 @@
 ``phi'``。赋值后状态由 ``constructor.py`` 在规则展开时通过惰性最强后置状态确定；
 这里的数据对象只负责记录后续需要证明的具体目标和证明器返回的三值结果。
 
-HCSP 进程语法由 ``process/ast.py`` 独立定义，行为类型语法由
-``type_system/ast.py`` 独立定义。本模块只在构造请求和构造报告中引用这些
+HCSP 进程语法由 ``data_structures/process_ast/ast.py`` 独立定义，行为类型语法由
+``data_structures/type_ast/ast.py`` 独立定义。本模块只在构造请求和构造报告中引用这些
 结构，不定义任何 Process AST 或 Type AST 节点。
 
 ────────────────── 模型分层与数据流 ────────────────────────────────────────
@@ -39,7 +39,7 @@ HCSP 进程语法由 ``process/ast.py`` 独立定义，行为类型语法由
 ────────────────── 与论文 Section 4.2/4.3 的对应 ───────────────────────────
 
 Section 4.1 的行为类型 ``T``、angelic type ``A`` 和 Section 4.2 的组合类型
-``mathcal T`` 由 ``type_system/ast.py`` 定义；本模块只保存推导请求及其证据。
+``mathcal T`` 由 ``data_structures/type_ast/ast.py`` 定义；本模块只保存推导请求及其证据。
 
 Definition 4.1 的 ``Gamma`` 同时描述值变量、递归变量和连续演化项。本项目将其
 拆分：``TypeConstructionRequest.gamma`` 用 ``BasicType`` 表示包括 ODE 分量在内的
@@ -63,9 +63,9 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from ..identifiers import is_hcsp_identifier
-from ..process.expressions import Expr, ExprLike, Literal, ensure_expr
-from ..type_system.ast import ConfigurationType as _ConfigurationType
+from ...identifiers import is_hcsp_identifier
+from ..process_ast.expressions import Expr, ExprLike, Literal, ensure_expr
+from ..type_ast.ast import ConfigurationType as _ConfigurationType
 
 
 # --------------------------------------------------------------------------

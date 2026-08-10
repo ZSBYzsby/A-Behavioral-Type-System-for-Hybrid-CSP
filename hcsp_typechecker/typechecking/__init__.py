@@ -12,17 +12,19 @@
 from .constructor import TypeConstructor, construct_type
 from .dl import DLFormula, DLTranslationError, UntranslatedDLFormula
 from .keymaerax import KeYmaeraXBackend, KeYmaeraXConfig
-from .model import (
+from ..data_structures.runtime_context import (
     BasicType,
     ChannelType,
-    TypeConstructionReport,
-    Configuration,
     ContinuousType,
-    DLCheckResult,
-    Diagnostic,
-    DerivationStep,
     ParameterEnvironment,
+)
+from ..data_structures.type_construction import (
+    Configuration,
+    DLCheckResult,
+    DerivationStep,
+    Diagnostic,
     ProofObligation,
+    TypeConstructionReport,
     TypeConstructionRequest,
     Verdict,
 )

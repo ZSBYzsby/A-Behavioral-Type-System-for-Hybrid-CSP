@@ -1,8 +1,8 @@
 """把类型规则中的连续演化证明目标表示为 KeYmaera X 可读的 dL 公式。
 
 本模块刻意不定义新的 HCSP 语法，也不修改
-:mod:`hcsp_typechecker.process.ast` 或
-:mod:`hcsp_typechecker.type_system.ast`。
+:mod:`hcsp_typechecker.data_structures.process_ast.ast` 或
+:mod:`hcsp_typechecker.data_structures.type_ast.ast`。
 它处于 TypeConstructor 和外部证明器之间，只负责两件事：
 
 * 把类型构造器已经建立的 Z3 符号状态翻译成 differential dynamic logic (dL)；
@@ -117,7 +117,7 @@ class UntranslatedDLFormula:
     """保留无法可靠翻译的 dL 目标及其原因。
 
     这种对象仍会进入
-    :class:`~hcsp_typechecker.typechecking.model.ProofObligation`，使审计者
+    :class:`~hcsp_typechecker.data_structures.type_construction.model.ProofObligation`，使审计者
     能看到失败发生在哪一类公式；KeYmaera X 后端会保守返回 ``UNKNOWN``。
     """
 

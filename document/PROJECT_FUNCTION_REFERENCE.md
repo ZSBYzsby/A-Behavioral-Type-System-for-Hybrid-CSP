@@ -515,21 +515,30 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
 
 ## 项目架构与自有 AST
 
-实现按数据流划分为一个稳定门面和五个内部职责层：
+实现按数据流划分为一个稳定门面、三个输入结构层和两个核心职责层：
 
 - `hcsp_typechecker.api`：面向普通用户的单一门面层，在一次调用中编排“完整
   source → 内部 Process AST → `TypeAST`”，并统一打印和异常语义；中间 AST
   不作为公共结果暴露；
 
-- `hcsp_typechecker.input_language`：用户输入层，负责词法分析、语法分析、
-  源码位置诊断；`parse_hcsp_source` 一次生成参数环境、Gamma、Theta 和 Process，
-  `parse_hcsp`/`parse_expression` 则保留为内部 Process/Expr 片段入口；
-- `hcsp_typechecker.process`：源语言层，`expressions.py` 定义表达式 ``e/B``，
+- `hcsp_typechecker.frontend.annotated_hcsp_syntax`：带批注 HCSP 与 Expr 的输入结构及其到
+  Process/Expr AST 的片段转换；
+- `hcsp_typechecker.frontend.typing_context_syntax`：Gamma、Theta、全局参数的输入结构及其到
+  内部环境对象的片段转换；
+- `hcsp_typechecker.frontend.type_syntax`：用户给定行为 Type 的输入结构，以及 Type AST 的
+  解析与规范化输出；
+- `hcsp_typechecker.frontend.type_constructor_frontend`：完整 source 的组合前端，负责共享词法、源码位置诊断，
+  并将参数环境、Gamma、Theta 和 Process 绑定为一次 TypeConstructor 调用的内部输入；
+- `hcsp_typechecker.data_structures.process_ast`：源语言层，`expressions.py` 定义表达式 ``e/B``，
   `ast.py` 定义 Section 2.1 的 ``E/P/S`` process AST，以及附着在 ODE/Mu 上的
   Section 4.2/4.3 批注；
-- `hcsp_typechecker.type_system`：行为类型层，定义 Section 4.1 的行为类型
+- `hcsp_typechecker.data_structures.type_ast`：行为类型层，定义 Section 4.1 的行为类型
   ``T/A``、Section 4.2 的组合类型 ``mathcal T`` 和 alpha 等价比较；后续所有
   直接分析或变换 Type AST 的功能也放在这一层；
+- `hcsp_typechecker.data_structures.runtime_context`：Gamma、Theta、共享参数以及
+  基础类型、连续向量和通道 refinement 的运行上下文定义；
+- `hcsp_typechecker.data_structures.type_construction`：Configuration、类型构造请求、
+  证明义务、推导步骤、诊断和构造报告；
 - `hcsp_typechecker.typechecking`：类型相关功能的共享内部层。当前实现放在
   `constructor.py`：`TypeConstructor` 保存四类 conclusion judgment、两类 premise、
   `RuleExpansion` 和统一递归构造器，`model.py` 保存 Gamma/Theta、
@@ -573,7 +582,7 @@ construct_hcsp_type
 写进完整 source：
 
 ```python
-from hcsp_typechecker.process import (
+from hcsp_typechecker.data_structures.process_ast import (
     Assert,
     Assign,
     BinaryExpr,
@@ -585,7 +594,7 @@ from hcsp_typechecker.process import (
     Variable,
     ensure_expr,
 )
-from hcsp_typechecker.typechecking import BasicType, ChannelType
+from hcsp_typechecker.data_structures.runtime_context import BasicType, ChannelType
 
 expr = BinaryExpr("+", Variable("x"), Literal(1))
 hp = Sequence.of(

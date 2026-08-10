@@ -214,7 +214,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "一槽 ch?(x) 转换为输入前缀类型",
             InputChannel("in", "x"),
             Verdict.TRUE,
-            InputType("in", EndType()),
+            InfiniteDelayType(InputType("in", EndType())),
             theta={"in": integer},
         ),
         ConversionScenario(
@@ -222,7 +222,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "一槽 ch!(e) 转换为输出前缀类型",
             OutputChannel("out", 1),
             Verdict.TRUE,
-            OutputType("out", EndType()),
+            InfiniteDelayType(OutputType("out", EndType())),
             theta={"out": integer},
             obligation_rules=("T-Out",),
         ),
@@ -237,8 +237,8 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             InternalChoiceType(
                 (
-                    OutputType("positive", EndType()),
-                    OutputType("negative", EndType()),
+                    InfiniteDelayType(OutputType("positive", EndType())),
+                    InfiniteDelayType(OutputType("negative", EndType())),
                 )
             ),
             gamma={"x": BasicType.INT},
@@ -268,7 +268,12 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 OutputChannel("out", "x"),
             ),
             Verdict.TRUE,
-            InputType("in", OutputType("out", EndType())),
+            InfiniteDelayType(
+                InputType(
+                    "in",
+                    InfiniteDelayType(OutputType("out", EndType())),
+                )
+            ),
             theta={"in": integer, "out": integer},
             obligation_rules=("T-Out",),
         ),
@@ -283,9 +288,9 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             InternalChoiceType(
                 (
-                    OutputType("left", EndType()),
-                    OutputType("right", EndType()),
-                    OutputType("audit", EndType()),
+                    InfiniteDelayType(OutputType("left", EndType())),
+                    InfiniteDelayType(OutputType("right", EndType())),
+                    InfiniteDelayType(OutputType("audit", EndType())),
                 )
             ),
             theta={"left": integer, "right": integer, "audit": integer},
@@ -299,7 +304,10 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 Sequence.of(InputChannel("tick", "u"), Var("X")),
             ),
             Verdict.TRUE,
-            MuType("T", InputType("tick", TypeVar("T"))),
+            MuType(
+                "T",
+                InfiniteDelayType(InputType("tick", TypeVar("T"))),
+            ),
             theta={"tick": integer},
             obligation_rules=("T-mu", "T-X"),
         ),
@@ -311,7 +319,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             FiniteDelayType(
                 1,
                 NoInterruptType(),
-                OutputType("done", EndType()),
+                InfiniteDelayType(OutputType("done", EndType())),
             ),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"done": integer},
@@ -328,8 +336,8 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             ParallelType(
                 (
-                    OutputType("left", EndType()),
-                    InputType("right", EndType()),
+                    InfiniteDelayType(OutputType("left", EndType())),
+                    InfiniteDelayType(InputType("right", EndType())),
                 )
             ),
             theta={"left": integer, "right": integer},
@@ -359,13 +367,17 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             InternalChoiceType(
                 (
-                    OutputType(
-                        "positive",
-                        OutputType("done", EndType()),
+                    InfiniteDelayType(
+                        OutputType(
+                            "positive",
+                            InfiniteDelayType(OutputType("done", EndType())),
+                        )
                     ),
-                    OutputType(
-                        "negative",
-                        OutputType("done", EndType()),
+                    InfiniteDelayType(
+                        OutputType(
+                            "negative",
+                            InfiniteDelayType(OutputType("done", EndType())),
+                        )
                     ),
                 )
             ),
@@ -382,7 +394,12 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 OutputChannel("out", "x"),
             ),
             Verdict.TRUE,
-            InputType("in", OutputType("out", EndType())),
+            InfiniteDelayType(
+                InputType(
+                    "in",
+                    InfiniteDelayType(OutputType("out", EndType())),
+                )
+            ),
             gamma={"y": BasicType.INT},
             theta={"in": integer, "out": integer},
             state={"y": 0},
@@ -409,9 +426,9 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 1,
                 OutputType(
                     "alarm",
-                    OutputType("done", EndType()),
+                    InfiniteDelayType(OutputType("done", EndType())),
                 ),
-                OutputType("done", EndType()),
+                InfiniteDelayType(OutputType("done", EndType())),
             ),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": integer, "done": integer},
@@ -427,7 +444,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             InfiniteDelayType(OutputType(
                 "alarm",
-                OutputType("done", EndType()),
+                InfiniteDelayType(OutputType("done", EndType())),
             )),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": integer, "done": integer},
@@ -445,8 +462,18 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             InternalChoiceType(
                 (
-                    OutputType("left", OutputType("done", EndType())),
-                    OutputType("right", OutputType("done", EndType())),
+                    InfiniteDelayType(
+                        OutputType(
+                            "left",
+                            InfiniteDelayType(OutputType("done", EndType())),
+                        )
+                    ),
+                    InfiniteDelayType(
+                        OutputType(
+                            "right",
+                            InfiniteDelayType(OutputType("done", EndType())),
+                        )
+                    ),
                 )
             ),
             theta={"left": integer, "right": integer, "done": integer},

@@ -218,7 +218,7 @@ from fractions import Fraction
 from math import inf, isinf, isnan
 from typing import Iterable
 
-from ..identifiers import is_hcsp_identifier
+from ...identifiers import is_hcsp_identifier
 from .expressions import (
     BinaryExpr,
     Expr,

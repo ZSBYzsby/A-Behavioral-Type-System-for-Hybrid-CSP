@@ -247,7 +247,7 @@ ParameterEnvironment(
         "amin": BasicType.REAL,
         "amax": BasicType.REAL,
     },
-    parse_expression(
+    parse_annotated_expression(
         "end >= 0 and vmax >= 0 and amin < 0 and amax >= 0"
     ),
 )
@@ -260,7 +260,7 @@ ParameterEnvironment(
 
 共享参数不属于 Gamma 状态，因此可被多个并行 Process 同时读取，不会
 违反并行状态分离。该例外只在解析完整 source、已知参数声明时用于构造
-`Parallel` AST；内部低层 `parse_hcsp(...)` 和直接 `Parallel(...)` 仍保持原来的严格
+`Parallel` AST；内部低层 `parse_annotated_hcsp(...)` 和直接 `Parallel(...)` 仍保持原来的严格
 Assumption 2.1 检查。赋值、输入目标、ODE 左端或初始 state 对参数的修改始终
 由 TypeConstructor 拒绝。
 
@@ -281,7 +281,7 @@ theta(
 {
     "sensor": ChannelType(
         (BasicType.REAL,),
-        refinement=parse_expression("0 <= value and value <= 100"),
+        refinement=parse_annotated_expression("0 <= value and value <= 100"),
         binders=("value",),
     ),
     "tick": ChannelType(
@@ -310,7 +310,7 @@ theta(
 ```python
 ChannelType(
     (BasicType.REAL, BasicType.REAL),
-    refinement=parse_expression(
+    refinement=parse_annotated_expression(
         "position >= 0 and velocity >= 0"
     ),
     binders=("position", "velocity"),
@@ -405,7 +405,7 @@ gamma = {
 theta = {
     "command": ChannelType(
         (BasicType.REAL,),
-        parse_expression("-2 <= acceleration and acceleration <= 2"),
+        parse_annotated_expression("-2 <= acceleration and acceleration <= 2"),
         ("acceleration",),
     ),
     "state": ChannelType(
@@ -415,7 +415,7 @@ theta = {
     ),
     "switch": ChannelType(
         (BasicType.INT, BasicType.BOOL),
-        parse_expression("0 <= next_mode and next_mode <= 3"),
+        parse_annotated_expression("0 <= next_mode and next_mode <= 3"),
         ("next_mode", "active"),
     ),
 }
@@ -477,15 +477,16 @@ Type 并检查它是否适用的 TypeChecker 尚未实现，也不属于当前 s
 内部仍有以下实现入口：
 
 ```python
-from hcsp_typechecker.input_language import (
-    parse_hcsp,
-    parse_hcsp_source,
-)
+from hcsp_typechecker.frontend.annotated_hcsp_syntax import parse_annotated_hcsp
+from hcsp_typechecker.frontend.type_constructor_frontend import parse_hcsp_source
+from hcsp_typechecker.frontend.typing_context_syntax import parse_typing_context
 from hcsp_typechecker.typechecking import construct_type
 ```
 
-`parse_hcsp_source(...)` 返回内部 `ParsedHCSPSource`，`parse_hcsp(...)` 只解析
-`process_system` 片段，`construct_type(...)` 接受内部 `TypeConstructionRequest`。
+`parse_hcsp_source(...)` 返回内部 `ParsedHCSPSource`，
+`parse_typing_context(...)` 只解析 `gamma [parameters] theta` 前缀，
+`parse_annotated_hcsp(...)` 只解析 `process_system` 片段，`construct_type(...)`
+接受内部 `TypeConstructionRequest`。
 它们只用于
 实现、测试和论文规则审计，不从包根公开，也不属于用户兼容性承诺。
 

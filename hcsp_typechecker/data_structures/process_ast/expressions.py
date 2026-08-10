@@ -83,7 +83,7 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import Iterable, TypeAlias
 
-from ..identifiers import is_hcsp_identifier
+from ...identifiers import is_hcsp_identifier
 
 
 # --------------------------------------------------------------------------

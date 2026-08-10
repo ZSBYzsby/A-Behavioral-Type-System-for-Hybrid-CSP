@@ -350,7 +350,7 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         expected = FiniteDelayType(
             1,
             NoInterruptType(),
-            OutputType("done", EndType()),
+            InfiniteDelayType(OutputType("done", EndType())),
         )
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(types_equivalent(report.constructed_type, expected))
@@ -415,7 +415,10 @@ class RecursionAnnotationTypingTests(unittest.TestCase):
         self.assertTrue(
             types_equivalent(
                 report.constructed_type,
-                MuType("T", OutputType("tick", TypeVar("T"))),
+                MuType(
+                    "T",
+                    InfiniteDelayType(OutputType("tick", TypeVar("T"))),
+                ),
             )
         )
         rules = {item.rule for item in report.obligations}

@@ -43,29 +43,29 @@ r"""Type System 层中 Section 4.1/4.2 行为类型的规范化抽象语法树�
 
 ────────────────── 规范 AST 的抽象架构 ─────────────────────────────────────
 
-Python 继承层次显式保存论文 ``mathcal T``、``T``、``A`` 的包含方向：任意
-``A`` 都可按论文的无限等待缩写作为 ``T``，任意 ``T`` 都可作为单个配置类型
-``mathcal T``；反方向不成立，尤其不能把并行 ``mathcal T`` 放入要求 ``T`` 的
-通信后继、内部选择或递归体。
+Python 继承层次把论文 ``mathcal T``、``T``、``A`` 分为三个独立语法范畴：任意
+``T`` 可作为单个配置类型 ``mathcal T``，但 ``A`` 只能作为 delay 的中断字段。
+论文把 ``A`` 写作无限等待 ``T`` 的缩写；本实现将该缩写显式建成
+``InfiniteDelayType(A)``，避免把两种 AST 范畴混在一起。
 
 .. code-block:: text
 
     BehavioralType
-    `-- ConfigurationType                         mathcal T
-        |-- ProcessType                           T
-        |   |-- AngelicType                       A
-        |   |   |-- NoInterruptType               empty A
-        |   |   |-- InputType                     ch?.T
-        |   |   |-- OutputType                    ch!.T
-        |   |   `-- ExternalChoiceType            A1 \sqcap ... \sqcap An
-        |   |-- EmptyType                         0 (empty communication behavior)
-        |   |-- BottomType                        \bot
-        |   |-- TypeVar                           t
-        |   |-- InternalChoiceType                T \sqcup T'
-        |   |-- FiniteDelayType                   delay(d) \unrhd A \triangleright T
-        |   |-- InfiniteDelayType                 delay(infinity) \unrhd A
-        |   `-- MuType                            mu t.T
-        `-- ParallelType                          mathcal T | mathcal T
+    |-- ConfigurationType                         mathcal T
+    |   |-- ProcessType                           T
+    |   |   |-- EmptyType                         0 (empty communication behavior)
+    |   |   |-- BottomType                        \bot
+    |   |   |-- TypeVar                           t
+    |   |   |-- InternalChoiceType                T \sqcup T'
+    |   |   |-- FiniteDelayType                   delay(d) \unrhd A \triangleright T
+    |   |   |-- InfiniteDelayType                 delay(infinity) \unrhd A
+    |   |   `-- MuType                            mu t.T
+    |   `-- ParallelType                          mathcal T | mathcal T
+    `-- AngelicType                               A
+        |-- NoInterruptType                       empty A
+        |-- InputType                             ch?.T
+        |-- OutputType                            ch!.T
+        `-- ExternalChoiceType                    A1 \sqcap ... \sqcap An
 
 上图四个抽象层只用于类别检查，不能实例化；缩进最深的类才是
 实际保存在推导结果中的 AST 节点。``ParallelType`` 属于 ``ConfigurationType``
@@ -95,7 +95,7 @@ Python 继承层次显式保存论文 ``mathcal T``、``T``、``A`` 的包含方
 ────────────────── 构造责任与检查边界 ──────────────────────────────────────
 
 ``ConfigurationType`` 对应 ``mathcal T``，``ProcessType`` 对应 ``T``，
-``AngelicType`` 对应可按论文缩写嵌入 ``T`` 的 ``A``。输入/输出节点是单分支
+``AngelicType`` 对应独立的 ``A``。输入/输出节点是单分支
 ``A``；至少两个通信分支才使用 ``ExternalChoiceType``，空中断集合则使用
 ``NoInterruptType``。过程终止/无通信行为由独立的 ``EmptyType`` 表示。
 
@@ -116,7 +116,7 @@ from fractions import Fraction
 from math import inf, isinf, isnan
 from typing import Any, Iterable, Mapping
 
-from ..identifiers import is_hcsp_identifier
+from ...identifiers import is_hcsp_identifier
 
 # --------------------------------------------------------------------------
 # 论文对应：行为类型 T/A 与组合配置类型 mathcal T 的共同 Python 根节点。
@@ -142,7 +142,7 @@ class ConfigurationType(BehavioralType, ABC):
 
 # --------------------------------------------------------------------------
 # 论文对应：Section 4.1 的过程类型 T；任意 T 同时可作为一个 mathcal T。
-# 构造方式：不直接实例化；使用 End/Input/Delay/Mu 等具体过程类型。
+# 构造方式：不直接实例化；使用 Empty/Delay/Mu 等具体过程类型。
 # 构造检查：继承抽象 __str__，阻止绕过具体产生式构造裸 T。
 # --------------------------------------------------------------------------
 class ProcessType(ConfigurationType, ABC):
@@ -150,12 +150,12 @@ class ProcessType(ConfigurationType, ABC):
 
 
 # --------------------------------------------------------------------------
-# 论文对应：Section 4.1 的 angelic type A；论文定义 A 为无限等待过程类型的缩写。
+# 论文对应：Section 4.1 的 angelic type A；它只用于 delay 的中断位置。
 # 构造方式：使用 NoInterruptType、InputType、OutputType 或 ExternalChoiceType。
 # 构造检查：本层保持抽象；四个具体节点给 A 建立唯一规范表示。
 # --------------------------------------------------------------------------
-class AngelicType(ProcessType, ABC):
-    """可按论文定义式作为过程类型使用的 angelic type ``A``。"""
+class AngelicType(BehavioralType, ABC):
+    """论文中的中断/外部选择类型 ``A``，不是过程类型 ``T``。"""
 
 
 # --------------------------------------------------------------------------

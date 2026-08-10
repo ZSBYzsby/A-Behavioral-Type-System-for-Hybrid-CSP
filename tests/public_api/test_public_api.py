@@ -106,7 +106,10 @@ class PublicFacadeTests(unittest.TestCase):
         )
 
         self.assertIsInstance(constructed, TypeAST)
-        self.assertEqual(str(constructed), "ch?.(ch!.(0))")
+        self.assertEqual(
+            str(constructed),
+            r"delay(infinity) \unrhd (ch?.(delay(infinity) \unrhd (ch!.(0))))",
+        )
 
     # 测试输入：两个独立 skip 块构成的顶层并行 source，并给出两个有序初态。
     # 预期行为：入口在内部拆分顶层 Process 叶子并返回配置类型 (0) | (0)。

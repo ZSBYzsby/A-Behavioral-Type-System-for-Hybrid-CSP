@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping
 
-from ..process.ast import HCSP, Parallel, Process
-from ..typechecking.model import (
+from ...data_structures.process_ast.ast import HCSP, Parallel, Process
+from ...data_structures.runtime_context import (
     ChannelType,
     GammaType,
     ParameterEnvironment,

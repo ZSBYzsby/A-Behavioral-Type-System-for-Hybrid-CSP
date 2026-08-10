@@ -6,6 +6,7 @@
 ## 用户输入
 
 - [共享参数、Gamma、Theta 与 Process 完整语法](GAMMA_THETA_INPUT_SYNTAX.md)
+- [用户给定 Type 的输入语法与 Type AST 往返](TYPE_INPUT_SYNTAX.md)
 - [Process 与表达式子语法](HCSP_INPUT_SYNTAX.md)
 
 ## TypeConstructor 与内部实现

@@ -4,8 +4,8 @@ r"""用几个小程序演示项目的单一公共 TypeConstructor 接口。
 ``construct_hcsp_type``；接口在内部完成解析、类型构造和必要公式证明，成功时
 返回正式 Type AST。
 
-前四个示例是离散 HCSP；第五个示例使用空 flow 和恒真性质展示本地即可判定的
-有限 delay；第六个示例则包含二阶微分方程、隐式时钟、非线性 safety、多标量
+前四个示例是离散 HCSP；第五个示例使用空 flow、隐式时钟边界 ``t < 1`` 和恒真
+安全性质展示有限 delay；第六个示例则包含二阶微分方程、隐式时钟、非线性 safety、多标量
 通信中断和自然超时后继，会实际调用 KeYmaera X。请在项目根目录执行：
 
     python -B demo.py
@@ -88,14 +88,14 @@ EXAMPLES = (
     ),
     (
         "5. 有限 delay 与通信中断",
-        "展示在 1 个时间单位内等待输入的 ODE，以及对应的时限通信类型。",
+        "展示在 1 个时间单位内等待输入；t < 1 使 ODE 恰在时限到达时停止。",
         """
         gamma(x: Int)
         theta(ch: channel(value: Int))
         process {{
             ode(
                 flow(),
-                domain(true),
+                domain(t < 1),
                 safety(true),
                 delay(1),
                 interrupt(

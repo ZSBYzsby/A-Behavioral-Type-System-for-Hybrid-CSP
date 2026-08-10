@@ -4,7 +4,7 @@ TypeConstructor 只把 :class:`~hcsp_typechecker.typechecking.dl.DLFormula`
 交给本模块。后端将
 公式写入临时 ``.kyx`` archive，以独立进程运行官方 ``keymaerax.jar``，再把
 命令行状态映射为项目的三值
-:class:`~hcsp_typechecker.typechecking.model.Verdict`：
+:class:`~hcsp_typechecker.data_structures.type_construction.model.Verdict`：
 
 * ``PROVED`` -> ``TRUE``；
 * ``DISPROVED`` 或带可信反例的 ``UNFINISHED (CEX)`` -> ``FALSE``；
@@ -33,7 +33,11 @@ from typing import Literal
 import uuid
 
 from .dl import DLFormula, UntranslatedDLFormula
-from .model import DLCheckResult, ProofObligation, Verdict
+from ..data_structures.type_construction.model import (
+    DLCheckResult,
+    ProofObligation,
+    Verdict,
+)
 
 
 # 功能：解析命令行工具常见的环境变量布尔写法。

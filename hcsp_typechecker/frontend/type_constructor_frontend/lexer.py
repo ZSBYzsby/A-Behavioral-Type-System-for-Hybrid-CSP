@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
-from ..identifiers import (
+from ...identifiers import (
     is_hcsp_identifier_continue,
     is_hcsp_identifier_start,
 )
@@ -58,6 +58,17 @@ KEYWORDS = frozenset(
         "Int",
         "Rational",
         "Real",
+        # Type source language.  These words are reserved across the complete
+        # user-facing grammar so a later ``type`` section shares one lexer
+        # with Gamma/Theta/Process sections.
+        "type",
+        "empty",
+        "bottom",
+        "internal",
+        "forever",
+        "angelic",
+        "then",
+        "parallel",
     }
 )
 
@@ -74,6 +85,7 @@ _MAX_ABSOLUTE_DECIMAL_EXPONENT = 10_000
 
 _MULTI_CHARACTER_TOKENS = (
     "<->",
+    "->",
     ":=",
     "**",
     "&&",
@@ -83,7 +95,7 @@ _MULTI_CHARACTER_TOKENS = (
     "<=",
     ">=",
 )
-_SINGLE_CHARACTER_TOKENS = frozenset("{}(),;:?!=+-*/%^<>")
+_SINGLE_CHARACTER_TOKENS = frozenset("{}(),;:.?!=+-*/%^<>")
 _NUMBER_PATTERN = re.compile(
     r"(?:"
     r"(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"

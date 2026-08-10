@@ -13,7 +13,7 @@ from decimal import Decimal, DecimalException
 from math import inf
 from typing import Callable, TypeVar
 
-from ..process.ast import (
+from ...data_structures.process_ast.ast import (
     Assert,
     Assign,
     EventChoice,
@@ -32,7 +32,7 @@ from ..process.ast import (
     Skip,
     Var,
 )
-from ..process.expressions import (
+from ...data_structures.process_ast.expressions import (
     BinaryExpr,
     BooleanExpr,
     CallExpr,
@@ -42,7 +42,7 @@ from ..process.expressions import (
     UnaryExpr,
     Variable,
 )
-from ..typechecking.model import (
+from ...data_structures.runtime_context import (
     BasicType,
     ChannelType,
     ContinuousType,

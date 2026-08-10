@@ -15,7 +15,8 @@
 - `hcsp_typechecker/typechecking/logic.py`：表达式到 Z3 项的翻译及 FOL/state 判定；
 - `hcsp_typechecker/typechecking/dl.py`：ODE 证明义务到 dL 公式的翻译；
 - `hcsp_typechecker/type_system/ast.py`：最终 Type AST 及规范化构造；
-- `hcsp_typechecker/typechecking/model.py`：Gamma、Theta、构造请求和审计报告。
+- `hcsp_typechecker/data_structures/runtime_context/`：Gamma、Theta 与全局参数；
+- `hcsp_typechecker/data_structures/type_construction/model.py`：Configuration、构造请求和审计报告。
 
 ---
 
@@ -57,7 +58,7 @@
 ## 2. Process AST 构造阶段已经做掉的工作
 
 TypeConstructor 接收的不是任意 Python 对象，而是已经构造好的项目 Process AST。
-进入 `typechecking/constructor.py` 之前，`process/ast.py` 已经执行以下操作：
+进入 `typechecking/constructor.py` 之前，`data_structures/process_ast/ast.py` 已经执行以下操作：
 
 1. 字符串表达式被解析成项目自己的 `Expr` 节点；
 2. 赋值左端、输入目标和通道名称被检查为合法标识符；
@@ -502,10 +503,12 @@ existing_i <: B_i\quad\lor\quad B_i <: existing_i.
 该 refinement。后继推导成功后生成：
 
 ```python
-InputType(channel, continuation_type)
+InfiniteDelayType(InputType(channel, continuation_type))
 ```
 
-载荷数量、槽位类型、变量名和 refinement 均不存入 Type AST。
+`InputType` 是中断/外部选择类型 \(A\) 的分支；T-In 再以无穷时延包装它，
+使整个通信行为成为过程类型 \(T\)。载荷数量、槽位类型、变量名和 refinement
+均不存入 Type AST。
 
 ### 7.6 `ch!(e1,...,en); P`
 
@@ -527,7 +530,7 @@ InputType(channel, continuation_type)
 输出不会改变 Gamma、路径或符号状态。后继推导成功后生成：
 
 ```python
-OutputType(channel, continuation_type)
+InfiniteDelayType(OutputType(channel, continuation_type))
 ```
 
 ### 7.7 `If(B,P1,P2); Q`
@@ -1008,13 +1011,15 @@ false > unknown > true.
 5. 逐层包装：
 
 ```python
-InputType("ch", OutputType("ch", EmptyType()))
+InfiniteDelayType(
+    InputType("ch", InfiniteDelayType(OutputType("ch", EmptyType())))
+)
 ```
 
 显示为：
 
 ```text
-ch?.(ch!.(0))
+delay(inf) interrupt angelic {ch? -> delay(inf) interrupt angelic {ch! -> empty}}
 ```
 
 ### 14.2 `x := x + 1; ch!x`
@@ -1038,8 +1043,8 @@ ch!.(0)
 
 ```python
 InternalChoiceType((
-    OutputType("ch1", EmptyType()),
-    OutputType("ch2", EmptyType()),
+    InfiniteDelayType(OutputType("ch1", EmptyType())),
+    InfiniteDelayType(OutputType("ch2", EmptyType())),
 ))
 ```
 

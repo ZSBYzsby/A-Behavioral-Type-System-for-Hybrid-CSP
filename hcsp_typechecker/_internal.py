@@ -6,7 +6,7 @@ Process/Expr/Type AST 构造器、Table 2 TypeConstructor 和证明后端，是�
 """
 
 from .typechecking.constructor import TypeConstructor, construct_type
-from .input_language import (
+from .frontend.type_constructor_frontend import (
     HCSPInputError,
     ParsedHCSPSource,
     parse_expression,
@@ -18,7 +18,7 @@ from .typechecking.dl import (
     DLTranslationError,
     UntranslatedDLFormula,
 )
-from .process.expressions import (
+from .data_structures.process_ast.expressions import (
     BinaryExpr,
     BooleanExpr,
     CallExpr,
@@ -30,7 +30,7 @@ from .process.expressions import (
     ensure_expr,
     parse_expr,
 )
-from .process.ast import (
+from .data_structures.process_ast.ast import (
     Assert,
     Assign,
     Channel,
@@ -54,7 +54,7 @@ from .process.ast import (
     Var,
 )
 from .typechecking.keymaerax import KeYmaeraXBackend, KeYmaeraXConfig
-from .type_system.ast import (
+from .data_structures.type_ast.ast import (
     AngelicType,
     BehavioralType,
     BottomType,
@@ -76,7 +76,7 @@ from .type_system.ast import (
     make_delay_type,
     types_equivalent,
 )
-from .typechecking.model import (
+from .data_structures.type_construction.model import (
     BasicType,
     ChannelType,
     TypeConstructionReport,

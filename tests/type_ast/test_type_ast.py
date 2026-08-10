@@ -267,8 +267,14 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
                 "t",
                 FiniteDelayType(1, NoInterruptType(), TypeVar("t")),
             )
-        guarded = MuType("t", InputType("ch", TypeVar("t")))
-        self.assertEqual(guarded.body, InputType("ch", TypeVar("t")))
+        guarded = MuType(
+            "t",
+            InfiniteDelayType(InputType("ch", TypeVar("t"))),
+        )
+        self.assertEqual(
+            guarded.body,
+            InfiniteDelayType(InputType("ch", TypeVar("t"))),
+        )
 
     # 测试输入：仅绑定变量名不同、且包含 FiniteDelayType 的两个递归类型。
     # 预期行为：types_equivalent 返回 true；改变通信方向后返回 false。
@@ -282,7 +288,7 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
             FiniteDelayType(
                 1,
                 InputType("ch", TypeVar("t")),
-                OutputType("done", EndType()),
+                InfiniteDelayType(OutputType("done", EndType())),
             ),
         )
         right = MuType(
@@ -290,7 +296,7 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
             FiniteDelayType(
                 Fraction(1),
                 InputType("ch", TypeVar("u")),
-                OutputType("done", EndType()),
+                InfiniteDelayType(OutputType("done", EndType())),
             ),
         )
         changed = MuType(
@@ -298,7 +304,7 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
             FiniteDelayType(
                 1,
                 OutputType("ch", TypeVar("u")),
-                OutputType("done", EndType()),
+                InfiniteDelayType(OutputType("done", EndType())),
             ),
         )
         self.assertTrue(types_equivalent(left, right))
@@ -319,15 +325,16 @@ class TypeRenderingTests(unittest.TestCase):
             "in",
             InternalChoiceType(
                 (
-                    OutputType("left", EndType()),
-                    OutputType("right", EndType()),
+                    InfiniteDelayType(OutputType("left", EndType())),
+                    InfiniteDelayType(OutputType("right", EndType())),
                 )
             ),
         )
 
         self.assertEqual(
             str(value),
-            r"in?.((left!.(0)) \sqcup (right!.(0)))",
+            r"in?.((delay(infinity) \unrhd (left!.(0))) \sqcup "
+            r"(delay(infinity) \unrhd (right!.(0))))",
         )
 
     # 测试输入：双通信分支的完整定时选择，其正常到时后继又是内部选择。
@@ -345,15 +352,16 @@ class TypeRenderingTests(unittest.TestCase):
         )
         fallback = InternalChoiceType(
             (
-                OutputType("left", EndType()),
-                OutputType("right", EndType()),
+                InfiniteDelayType(OutputType("left", EndType())),
+                InfiniteDelayType(OutputType("right", EndType())),
             )
         )
 
         self.assertEqual(
             str(FiniteDelayType(2, choices, fallback)),
             r"delay(2) \unrhd ((reset?.(0)) \sqcap (alarm!.(0))) "
-            r"\triangleright ((left!.(0)) \sqcup (right!.(0)))",
+            r"\triangleright ((delay(infinity) \unrhd (left!.(0))) \sqcup "
+            r"(delay(infinity) \unrhd (right!.(0))))",
         )
         self.assertEqual(
             str(FiniteDelayType(2, choices, EmptyType())),
@@ -371,21 +379,22 @@ class TypeRenderingTests(unittest.TestCase):
             "t",
             InternalChoiceType(
                 (
-                    InputType("ch", TypeVar("t")),
-                    OutputType("stop", EndType()),
+                    InfiniteDelayType(InputType("ch", TypeVar("t"))),
+                    InfiniteDelayType(OutputType("stop", EndType())),
                 )
             ),
         )
         delayed = FiniteDelayType(
             1,
             NoInterruptType(),
-            OutputType("done", EndType()),
+            InfiniteDelayType(OutputType("done", EndType())),
         )
 
         self.assertEqual(
             str(ParallelType((recursive, delayed))),
-            r"(mu t.((ch?.(t)) \sqcup (stop!.(0)))) "
-            r"| (delay(1).(done!.(0)))",
+            r"(mu t.((delay(infinity) \unrhd (ch?.(t))) \sqcup "
+            r"(delay(infinity) \unrhd (stop!.(0))))) "
+            r"| (delay(1).(delay(infinity) \unrhd (done!.(0))))",
         )
 
 

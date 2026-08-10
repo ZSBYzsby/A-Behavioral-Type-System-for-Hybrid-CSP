@@ -37,7 +37,7 @@ Table 2 的 T-\sqcup 在项目的规范多元 Process AST 上写成以下带公�
 只会执行被选中的一条分支；这也不需要定义
 通用的类型级 T-Seq。
 
-类型构造器只接受 :mod:`hcsp_typechecker.process.ast` 中定义的节点，并使用明确的
+类型构造器只接受 :mod:`hcsp_typechecker.data_structures.process_ast.ast` 中定义的节点，并使用明确的
 ``isinstance`` 分派。外部对象不会因拥有同名字段而被隐式解释为 HCSP。
 """
 
@@ -49,7 +49,7 @@ from math import inf
 from typing import Any, Callable, Mapping, Sequence
 
 from ..identifiers import is_hcsp_identifier
-from ..process.expressions import Literal, ensure_expr
+from ..data_structures.process_ast.expressions import Literal, ensure_expr
 from .dl import (
     DLFormula,
     DLTranslationError,
@@ -58,7 +58,7 @@ from .dl import (
     boundary_formula,
     safety_formula,
 )
-from ..process.ast import (
+from ..data_structures.process_ast.ast import (
     Assert,
     Assign,
     Channel,
@@ -91,7 +91,7 @@ from .logic import (
     z3,
 )
 from .keymaerax import KeYmaeraXBackend, KeYmaeraXConfig
-from ..type_system.ast import (
+from ..data_structures.type_ast.ast import (
     AngelicType,
     ConfigurationType,
     EmptyType,
@@ -110,7 +110,7 @@ from ..type_system.ast import (
     make_delay_type,
     types_equivalent,
 )
-from .model import (
+from ..data_structures.type_construction.model import (
     BasicType,
     ChannelType,
     TypeConstructionReport,
@@ -1120,7 +1120,7 @@ class TypeConstructor:
         else:
             self._diagnose(
                 Verdict.FALSE,
-                "Process is not a node from hcsp_typechecker.process.ast: "
+                "Process is not a node from hcsp_typechecker.data_structures.process_ast.ast: "
                 f"{head.__class__.__name__}",
                 "structural",
                 context.location,
@@ -1509,7 +1509,9 @@ class TypeConstructor:
             continuation = children[0]
             if isinstance(continuation, _ConstructionFailure):
                 return _CONSTRUCTION_FAILURE
-            return InputType(channel, continuation)
+            # ``ch?`` 本身不是过程类型 T，而是中断类型 A 中的一个分支。
+            # [T-In] 使用论文的缩写展开：delay(infinity) unrhd (ch?.T) ▷ bottom。
+            return InfiniteDelayType(InputType(channel, continuation))
 
         return _RuleExpansion("T-In", (premise,), conclude)
 
@@ -1612,7 +1614,8 @@ class TypeConstructor:
             continuation = children[0]
             if isinstance(continuation, _ConstructionFailure):
                 return _CONSTRUCTION_FAILURE
-            return OutputType(channel, continuation)
+            # 与 [T-In] 对称：裸输出动作是无穷等待的过程类型，而非裸 A。
+            return InfiniteDelayType(OutputType(channel, continuation))
 
         return _RuleExpansion("T-Out", tuple(premises), conclude)
 
@@ -1689,7 +1692,17 @@ class TypeConstructor:
             """把全部通信分支合成规范 angelic type。"""
             if any(isinstance(child, _ConstructionFailure) for child in children):
                 return _CONSTRUCTION_FAILURE
-            if not all(isinstance(child, (InputType, OutputType)) for child in children):
+            # 每个事件分支以一次输入/输出动作开头。T-In/T-Out 现在严格
+            # 返回展开后的 ``InfiniteDelayType``；在事件表的 A 位置重新
+            # 取出其中唯一的通信前缀，避免把 A 与 T 混为同一个 AST 范畴。
+            branches = tuple(
+                child.interrupts
+                if isinstance(child, InfiniteDelayType)
+                and isinstance(child.interrupts, (InputType, OutputType))
+                else None
+                for child in children
+            )
+            if any(branch is None for branch in branches):
                 self._diagnose(
                     Verdict.FALSE,
                     "External branch did not construct a communication prefix",
@@ -1697,7 +1710,7 @@ class TypeConstructor:
                     context.location,
                 )
                 return _CONSTRUCTION_FAILURE
-            return make_external_choice(children)
+            return make_external_choice(branches)
 
         return _RuleExpansion("T-&", premises, conclude)
 

@@ -30,8 +30,8 @@ from hcsp_typechecker._internal import (
     parse_expression,
     parse_hcsp,
 )
-from hcsp_typechecker.input_language import tokenize
-from hcsp_typechecker.process.ast import InputChannel
+from hcsp_typechecker.frontend.type_constructor_frontend import tokenize
+from hcsp_typechecker.data_structures.process_ast.ast import InputChannel
 
 
 class LexerInputTests(unittest.TestCase):

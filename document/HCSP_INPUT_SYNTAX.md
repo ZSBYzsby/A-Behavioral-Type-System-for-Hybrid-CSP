@@ -23,7 +23,7 @@ type_ast = construct_hcsp_type(source, source_name="example.hcsp")
 ```
 
 解析失败会抛出 `HCSPInputError`，错误信息包含词法或语法阶段、源文件名、行列位置
-和源码指示符。`parse_hcsp(...)`、`parse_expression(...)` 和直接 AST 构造器仍保留
+和源码指示符。`parse_annotated_hcsp(...)`、`parse_annotated_expression(...)` 和直接 AST 构造器仍保留
 给实现、测试与语法审计，但属于内部开发接口，不从包根导出，也不承诺兼容性。
 手工修改完整 Gamma、Theta、Process 输入并查看最终 Type AST 时，
 在仓库根目录编辑并运行 `python demo.py`。
@@ -645,15 +645,15 @@ TypeConstructor；未来接收用户给定 Type 的 TypeChecker 尚未实现。
 以下入口只属于内部开发与审计层：
 
 ```python
-from hcsp_typechecker.input_language import (
-    parse_expression,
-    parse_hcsp,
-    parse_hcsp_source,
+from hcsp_typechecker.frontend.annotated_hcsp_syntax import (
+    parse_annotated_expression,
+    parse_annotated_hcsp,
 )
+from hcsp_typechecker.frontend.type_constructor_frontend import parse_hcsp_source
 ```
 
-- `parse_hcsp(...)` 解析一个非空 `process_system` 片段并 lower 为 Process/Parallel AST；
-- `parse_expression(...)` 使用第 3 节的严格表达式文法构造 `Expr`；
+- `parse_annotated_hcsp(...)` 解析一个非空 `process_system` 片段并 lower 为 Process/Parallel AST；
+- `parse_annotated_expression(...)` 使用第 3 节的严格表达式文法构造 `Expr`；
 - `parse_hcsp_source(...)` 是单一公共门面内部使用的完整解析实现，返回内部
   `ParsedHCSPSource`；
 - `parse_expr(...)` 是 Process 表达式节点的旧便捷构造入口。

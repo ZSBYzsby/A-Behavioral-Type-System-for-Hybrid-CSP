@@ -496,7 +496,10 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertEqual(report.constructed_type, OutputType("sample", EndType()))
+        self.assertEqual(
+            report.constructed_type,
+            InfiniteDelayType(OutputType("sample", EndType())),
+        )
 
     # 测试输入：把独立声明键 ode_x 分别用作 state、赋值目标、输入目标和表达式。
     # 预期行为：四种用法都失败；只有声明成员 x 才具有 Real 当前值。
