@@ -2,8 +2,8 @@
 
 本文件定义 TypeChecker 使用的用户 Type 具体语法。当前项目已经提供对应的
 内部前端：`hcsp_typechecker.frontend.type_syntax.parse_type_source` 与
-`hcsp_typechecker.frontend.type_syntax.format_type_source`。它们只在内部开发层可用，
-暂不属于包根公共接口。
+`hcsp_typechecker.frontend.type_syntax.format_type_source`。它们属于内部开发层，
+不属于包根稳定公共接口；普通用户通过 `check_hcsp_type(...)` 读取完整 typed source。
 
 解析和规范化输出满足：
 
@@ -24,10 +24,7 @@ TypeConstructor 与 TypeChecker 的 `result/full` 运行日志也调用同一个
 
 ```ebnf
 typed_source
-    ::= gamma_section
-        [ parameters_section ]
-        theta_section
-        process_section
+    ::= program_prefix
         type_section
         EOF
 
@@ -35,8 +32,8 @@ type_section
     ::= "type" configuration_type
 ```
 
-前四段沿用 [完整 HCSP 输入语法](GAMMA_THETA_INPUT_SYNTAX.md)。本文件只定义最后
-的 `type_section`。
+`program_prefix` 沿用 [完整 HCSP 输入语法](GAMMA_THETA_INPUT_SYNTAX.md)，依次包含
+Gamma、可选 Parameters、Theta 和 Process。本文件只定义最后的 `type_section`。
 
 ## 2. Type 语法
 

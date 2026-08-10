@@ -7,8 +7,8 @@
 
 本文件中的 Process/Expr 子语法已经由内部输入层实现，且不会改变项目中 Python
 AST 节点的语义。普通用户不单独调用片段解析器，而是把本语法放在完整 source 的
-`process` 分节中，再调用包根唯一稳定的 TypeConstructor 接口
-`construct_hcsp_type(...)`：
+`process` 分节中。没有 `type` 分节时调用 `construct_hcsp_type(...)`；需要检查
+用户给定类型时追加 `type` 分节并调用 `check_hcsp_type(...)`。下面先展示构造入口：
 
 ```python
 from hcsp_typechecker import construct_hcsp_type
@@ -68,7 +68,6 @@ statement
       | assertion_statement
       | input_action
       | output_action
-      | wait_statement
       | process_call
       | if_statement
       | choice_statement
@@ -616,7 +615,7 @@ lower_block({P1; ...; Pn})
 
 ## 10. 公共完整入口与内部兼容边界
 
-普通用户唯一的完整 TypeConstructor 入口是：
+普通用户完整的 TypeConstructor 入口是：
 
 ```python
 from hcsp_typechecker import construct_hcsp_type
@@ -628,20 +627,11 @@ type_ast = construct_hcsp_type(
 )
 ```
 
-它解析 `GAMMA_THETA_INPUT_SYNTAX.md` 规定的完整 source，在内部构造参数、Gamma、
-Theta 和 Process AST，随后进行类型构造与公式证明。中间 Process AST 不会作为
-公共结果暴露。输入错误会立即终止并抛出 `HCSPInputError`；结构/静态失败或公式
-为 `false` 时立即停止并抛出 `HCSPTypeConstructionError`。公式为 `unknown` 时
-会记录义务并继续构造：若形成完整候选 Type AST，则抛出
-`HCSPUntrustedTypeConstructionError`，候选可从
-异常的 `untrusted_type` 属性读取，但必须视为未验证、不可信。只有构造完整且全部
-义务为 `true` 时才正常返回 `TypeAST`。这是由 HCSP 主动构造类型的
-TypeConstructor。若在完整输入后追加本文所链接的 `type` 段，则由已经实现的
-TypeChecker 递归检查用户 Type；详见 [TYPE_CHECKER.md](TYPE_CHECKER.md)。
-
-`output` 只控制显示，不改变上述推导、证明和异常语义。`result` 显示可信结果，
-或显示不可信候选/失败摘要；`full` 还显示全部实际规则轨迹、FOL/dL 公式及未决
-义务；`none` 保持静默。
+它解析 `GAMMA_THETA_INPUT_SYNTAX.md` 规定的 `constructor_source`，在内部构造
+参数、Gamma、Theta 和 Process AST，随后进行类型构造与公式证明。若追加 `type`
+分节，则调用 `check_hcsp_type(...)` 递归检查用户 Type；详见
+[TYPE_CHECKER.md](TYPE_CHECKER.md)。两个接口的输出和异常协议集中记录在
+[README](../README.md#稳定用户接口)，本语法文档不重复维护。
 
 以下入口只属于内部开发与审计层：
 
@@ -655,7 +645,7 @@ from hcsp_typechecker.frontend.type_constructor_frontend import parse_hcsp_sourc
 
 - `parse_annotated_hcsp(...)` 解析一个非空 `process_system` 片段并 lower 为 Process/Parallel AST；
 - `parse_annotated_expression(...)` 使用第 3 节的严格表达式文法构造 `Expr`；
-- `parse_hcsp_source(...)` 是单一公共门面内部使用的完整解析实现，返回内部
+- `parse_hcsp_source(...)` 是公共门面内部共用的 program prefix 解析实现，返回内部
   `ParsedHCSPSource`；
 - `parse_expr(...)` 是 Process 表达式节点的旧便捷构造入口。
 

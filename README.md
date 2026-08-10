@@ -78,8 +78,9 @@ except HCSPTypeConstructionError as error:
 只有构造完整且全部证明义务均为 `true` 时，接口才正常返回可信 `TypeAST`。
 `HCSPUntrustedTypeConstructionError` 是 `HCSPTypeConstructionError` 的子类；
 需要读取 `untrusted_type` 时应像
-示例一样先捕获它。`BottomType` 保留在 Type AST 中供将来用户给定类型的检查功能使用，
-当前 TypeConstructor 不会把它作为已构造 HCSP 行为的结果。
+示例一样先捕获它。`BottomType` 是用户 Type AST 中的正式不可达错误行为，
+TypeChecker 可以读取并按规则检查；当前 TypeConstructor 不会把它作为已构造 HCSP
+行为的结果。
 
 ### 检查用户给定的 Type
 
@@ -147,11 +148,15 @@ TypeConstructor 相同的可信证明机制。Type 结构不匹配、静态规�
 
 ## 完整用户输入格式
 
-一份输入固定按以下顺序书写：
+TypeConstructor 输入固定按以下顺序书写：
 
 ```ebnf
-source ::= gamma [parameters] theta process EOF
+constructor_source ::= gamma [parameters] theta process EOF
+typed_source       ::= gamma [parameters] theta process type EOF
 ```
+
+`check_hcsp_type(...)` 使用第二种形式；其中 `type` 分节的语法见
+[用户 Type 输入语法](document/TYPE_INPUT_SYNTAX.md)。
 
 最小示例：
 

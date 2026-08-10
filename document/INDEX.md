@@ -3,13 +3,18 @@
 根目录 `README.md` 只说明普通用户接口、完整输入形状和受支持边界。维护者、
 审计者和希望逐条核对论文规则的读者从本目录进入详细说明。
 
+公开 API 的权威入口是 [README 的稳定用户接口](../README.md#稳定用户接口)；完整
+函数签名、异常字段和内部数据流见
+[完整功能参考的公共接口部分](PROJECT_FUNCTION_REFERENCE.md#公共接口的输入和输出)。
+各语法文档只维护自身 EBNF 与 lowering 约束，不重复定义输出和异常协议。
+
 ## 用户输入
 
 - [共享参数、Gamma、Theta 与 Process 完整语法](GAMMA_THETA_INPUT_SYNTAX.md)
 - [用户给定 Type 的输入语法与 Type AST 往返](TYPE_INPUT_SYNTAX.md)
 - [Process 与表达式子语法](HCSP_INPUT_SYNTAX.md)
 
-## TypeConstructor 与内部实现
+## TypeConstructor、TypeChecker 与内部实现
 
 - [TypeConstructor：Process AST 到 Type AST 的真实构造过程](TYPE_CONSTRUCTOR.md)
 - [TypeChecker：检查用户给定 Type 的规则递归过程](TYPE_CHECKER.md)

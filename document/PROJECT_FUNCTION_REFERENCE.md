@@ -1,4 +1,4 @@
-# HCSP Behavioral Type Constructor：完整功能参考
+# HCSP Behavioral Type Constructor and Checker：完整功能参考
 
 这是对论文 *A Behavioral Type System for Hybrid CSP* 中 Table 2 的 Python
 实现。除通信载荷按项目约定扩展为多个独立标量外，项目使用 Section 2.1 的
@@ -6,7 +6,8 @@ HCSP 语法，并把 Section 4.2/4.3 要求的安全、时延和递归不变量�
 一同输入：
 
 - 用户把共享参数、`Gamma`、`Theta` 和 HCSP process 写在同一份完整 source 中；
-- 唯一公共接口在内部解析 source，并结合可选初态和路径条件直接生成 Type AST；
+- 两个公共业务接口都在内部解析 source：TypeConstructor 主动构造 Type AST，
+  TypeChecker 递归验证用户在末尾给出的 Type；
 - Gamma 的连续项只登记允许出现的完整 ODE 演化向量；轨迹 `phi` 只由 ODE safety 定义；
 - 把待构造对象表示成 configuration、system、process 或 event conclusion judgment；
 - 每个 `rule_t_*` 只返回显式 `RuleExpansion(premises, conclude)`，不在规则内递归；
@@ -19,9 +20,9 @@ HCSP 语法，并把 Section 4.2/4.3 要求的安全、时延和递归不变量�
   `unknown` 且构造完整时通过
   `HCSPUntrustedTypeConstructionError.untrusted_type` 提供不可信候选供审计。
 
-这项功能称为 **TypeConstructor**，因为 Type 由程序根据 HCSP 与环境主动构造，
-而不是由用户提供。未来的 **TypeChecker** 将接收用户给出的 Type 并检查其正确性；
-该功能尚未实现，当前公共接口也不接受用户 Type。
+主动生成 Type 的功能称为 **TypeConstructor**；检查用户给定 Type 的功能称为
+**TypeChecker**。二者已经分别实现，并共享 Table 2 规则展开、表达式语义和证明
+后端，但两个业务后端彼此不导入。具体公共入口见“公共接口的输入和输出”。
 
 ## 获取源码并准备环境
 
@@ -116,7 +117,7 @@ P ::= skip | x := e | assert(B)
 S ::= P | S || S'
 ```
 
-普通用户只使用包根提供的 `construct_hcsp_type(...)`。它按
+需要主动构造类型时，普通用户使用包根的 `construct_hcsp_type(...)`。它按
 [GAMMA_THETA_INPUT_SYNTAX.md](GAMMA_THETA_INPUT_SYNTAX.md) 解析一份完整输入，在
 内部把共享参数、Gamma、Theta 和 Process AST 保持为同源数据，然后立即执行完整
 类型构造：
@@ -348,25 +349,25 @@ python -m unittest discover -s tests -p "test_*.py" -v
 python scripts/check_repository.py
 ```
 
-`tests/` 当前共有 379 个自动化测试，并按职责分层组织：
+`tests/` 按职责分层组织。这里不写死测试数量，实际数量以测试命令的输出为准：
 
 ```text
 tests/
-├── backend/        4 个后端目录边界、共享引擎和单向依赖测试
-├── expressions/    24 个表达式 AST、输入边界和精确解析测试
-├── frontend/       4 个前端目录边界测试
-├── hcsp_syntax/    57 个 Section 2.1 AST 与 Assumption 2.1/2.2 测试
-├── input_frontend/ 66 个完整 source、参数环境、Process 与表达式输入测试
-├── annotations/    18 个 Section 4.2/4.3 批注与自动局部时钟测试
-├── type_ast/       15 个行为类型 AST 规范化测试
-├── type_constructor/ 108 个构造、Table 2 契约、参数背景、ODE 选规和通信测试
-├── type_checker/   12 个给定 Type 递归检查、选择分组、日志与 Constructor 往返测试
-├── type_syntax/    8 个 Type 文本与 Type AST 可逆转换测试
-├── model/          14 个值类型、连续类型、通道边界、环境自检和详细报告测试
-├── logic/          6 个表达式语义、偏函数有定义性和状态值测试
-├── dl/             26 个 dL 公式、KeYmaera X 后端和公开 API 集成测试
-├── public_api/     16 个稳定门面、案例脚本、日志模式、往返演示和失败异常测试
-└── quality/        1 个全项目文档及测试审计注释完整性检查
+├── backend/          后端目录边界、共享规则引擎与代码风格
+├── expressions/      Expr AST、输入边界与精确解析
+├── frontend/         前端目录边界
+├── hcsp_syntax/      Process AST 与 Assumption 2.1/2.2
+├── input_frontend/   完整 source、运行上下文、Process 与表达式输入
+├── annotations/      ODE/Mu 批注与自动局部时钟
+├── type_ast/         Type AST 规范化
+├── type_constructor/ Table 2 构造、参数背景、ODE 选规与通信
+├── type_checker/     给定 Type 的递归检查、分组与往返性质
+├── type_syntax/      Type 文本与 Type AST 的可逆转换
+├── model/            运行上下文、证明证据与详细报告
+├── logic/            表达式语义、偏函数有定义性与状态值
+├── dl/               dL 公式与 KeYmaera X 后端
+├── public_api/       稳定门面、日志、异常与案例脚本
+└── quality/          全项目文档及测试审计注释
 ```
 
 表达式解析测试覆盖头部注释列出的每一种支持语法，并比较完整 `Expr` AST。
@@ -542,8 +543,8 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
 `TypeConstructionReport`，但它不是普通用户接口。公共门面只在全部义务通过时
 交付可信 Type AST；确定失败通过 `HCSPTypeConstructionError` 报告，构造完整但
 证明未决则通过 `HCSPUntrustedTypeConstructionError` 报告并保留
-`untrusted_type`。论文中的 `BottomType`
-（`\bot`）始终是正式行为类型，不承担错误占位职责。
+`untrusted_type`。论文中的 `BottomType`（`\bot`）是正式的不可达错误行为；它不被
+复用为“构造器内部失败”或“尚未构造”的恢复占位符。
 
 ## 项目架构与自有 AST
 
@@ -744,5 +745,5 @@ KeYmaera X 配置，只额外公开 `keymaerax_timeout_seconds` 作为本次调�
 - Z3 或 KeYmaera X 给出反例：`false`；
 - 求解/证明未完成、超时或工具不可用：`unknown`。
 
-当前范围是 Table 2 的类型构造与 proof obligations，不包含论文 Table 3 的
-类型级状态空间搜索（deadlock/livelock model checking）。
+当前范围是依据 Table 2 构造类型、检查用户给定类型并证明相应 premises；不包含
+论文 Table 3 的类型级状态空间搜索（deadlock/livelock model checking）。

@@ -3,8 +3,9 @@
 本文档定义一次完整的用户输入如何把共享只读参数、类型环境
 `Gamma`、通道环境 `Theta` 和一个 HCSP Process 系统绑定在同一份源码中，
 以及它们如何转换为项目现有的数据
-模型。这套 concrete syntax 已由内部统一解析器实现，并通过包根唯一稳定的
-TypeConstructor 入口 `construct_hcsp_type(...)` 提供给普通用户；其中 Process
+模型。这套 concrete syntax 已由内部统一解析器实现。普通用户通过包根的
+`construct_hcsp_type(...)` 构造类型，或在末尾增加 `type` 分节后通过
+`check_hcsp_type(...)` 检查给定类型；其中 Process
 语句和表达式的详细子语法仍见
 [`HCSP_INPUT_SYNTAX.md`](HCSP_INPUT_SYNTAX.md)。
 
@@ -46,11 +47,15 @@ TypeConstructor 入口 `construct_hcsp_type(...)` 提供给普通用户；其中
 ## 2. 完整 EBNF
 
 ```ebnf
-source
+program_prefix
     ::= gamma
         [ parameters ]
         theta
         process
+
+
+constructor_source
+    ::= program_prefix
         EOF
 
 
@@ -142,9 +147,10 @@ process_system
 ```
 
 `statement_block`、各类 `statement`、ODE、通信和 `expr` 的完整产生式由
-`HCSP_INPUT_SYNTAX.md` 定义。这里的 `source` 是唯一正式的完整用户输入根；
-Gamma、参数、Theta 和 Process 的单独解析入口即使为了测试而保留，也只是片段级 API，
-不再属于完整 source 的替代写法。
+`HCSP_INPUT_SYNTAX.md` 定义。`constructor_source` 供 TypeConstructor 使用；
+TypeChecker 在同一个 `program_prefix` 后追加必填 `type` 分节，完整形式见
+[TYPE_INPUT_SYNTAX.md](TYPE_INPUT_SYNTAX.md)。Gamma、参数、Theta 和 Process 的
+单独解析入口即使为了测试而保留，也只是片段级 API，不是完整 source 的替代写法。
 
 ## 3. Gamma 的转换规则
 
@@ -425,9 +431,9 @@ theta = {
 AST；它不是字符串，也不会复制一套新的进程节点定义。该内部记录只在
 `parse_hcsp_source(...)` 与 TypeConstructor 之间传递，不是公共接口的返回值。
 
-## 7. 已实现的公共封装接口
+## 7. 完整输入入口与内部片段接口
 
-普通用户只调用一次包根接口：
+TypeConstructor 用户只调用一次包根构造接口：
 
 ```python
 from hcsp_typechecker import construct_hcsp_type
@@ -442,42 +448,18 @@ type_ast = construct_hcsp_type(
 ```
 
 接口在内部把同一份 source 的参数、Gamma、Theta 和 Process AST 绑定后立即进入
-类型构造；这些中间对象不会交给普通调用者。构造完整且全部证明义务均通过时直接
-返回可信 `TypeAST`。调用者不需要、也不能通过包根构造内部判断、
-`TypeConstructionRequest` 或内部解析记录。
+类型构造；这些中间对象不会交给普通调用者。调用者不需要、也不能通过包根构造
+内部判断、`TypeConstructionRequest` 或内部解析记录。
 
 不含 `type` 段时由 TypeConstructor 主动构造类型；在同一 source 后追加
 `type configuration_type` 时，由 TypeChecker 检查给定 Type。Type 段语法见
 [TYPE_INPUT_SYNTAX.md](TYPE_INPUT_SYNTAX.md)，检查算法见
 [TYPE_CHECKER.md](TYPE_CHECKER.md)。
 
-`output` 接受三种模式：
-
-- `"none"`：不打印，默认模式；
-- `"result"`：打印最终结论；成功时按规范用户 Type 语法显示可信类型，构造
-  完整但证明未决时用同一语法显示不可信候选，其他失败显示原因和部分进度；
-- `"full"`：打印原始 source、环境摘要、内部构造完成说明、规则步骤、FOL/dL
-  公式、证明器说明、未决义务和最终可信性；不会打印或返回 Process AST 对象/repr。
-
-三种模式只影响日志展示，不影响返回对象与数学结论。也可以使用
-`OutputMode.NONE`、`OutputMode.RESULT`、`OutputMode.FULL`，并用 `stream=` 指定
-其他文本输出流。`false` 导致构造立即停止时，`full` 会打印停止位置以前的完整
-证据；`unknown` 不会让公式 premise 短路，`full` 会继续展示后续规则轨迹、完整
-候选类型（如能形成）和全部待证明义务。`none` 不打印，但异常仍保留对应格式化文本。
-
-日志中的 `Type 源码 : type ...` 使用 [TYPE_INPUT_SYNTAX.md](TYPE_INPUT_SYNTAX.md)
-定义的可逆语法；标签后的完整文本可以直接复制为 TypeChecker 的 `type` 分节。
-
-完整 source 的词法、语法或结构错误会立即终止并抛出公共 `HCSPInputError`，同时
-保留源文件名、行、列和源码指示符；此时不会进入类型构造。结构/静态前提失败或
-必要公式为 `false` 时立即停止构造并抛出 `HCSPTypeConstructionError`。证明器返回
-`unknown` 只会记录未决义务，构造仍继续；若最终形成完整候选 Type AST，接口抛出
-`HCSPUntrustedTypeConstructionError`，并通过 `untrusted_type` 提供该候选供审计
-或外部补证。它是 `HCSPTypeConstructionError` 的子类，但候选类型没有通过验证，
-不能视为成功结果。若 `unknown` 与其他无法形成完整类型的情况并存，则仍抛出普通
-`HCSPTypeConstructionError`。
-两种类型异常都提供 `format_result()`/`format_full()`；正式 `BottomType` 不作错误
-占位符。
+两个公共接口的参数、输出模式、返回值和异常只在
+[README 的稳定用户接口](../README.md#稳定用户接口) 与
+[完整功能参考](PROJECT_FUNCTION_REFERENCE.md#公共接口的输入和输出) 中集中说明，
+本语法文档不再复制这些展示层规则。
 
 内部仍有以下实现入口：
 

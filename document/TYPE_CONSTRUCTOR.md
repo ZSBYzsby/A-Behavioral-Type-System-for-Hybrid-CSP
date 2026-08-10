@@ -53,8 +53,8 @@
 - `verdict`：有效证明义务与诊断的 `true / false / unknown` 合并值。
 
 `None` 只表示没有形成完整类型结构。非空类型是否可信必须同时查看 verdict：
-`true` 表示可信，`unknown` 表示仍有必要义务未验证。两种情况都与 Type AST 中
-预留给未来类型检查功能的 `BottomType()` 完全不同；当前构造器不会输出它。
+`true` 表示可信，`unknown` 表示仍有必要义务未验证。两种情况都与用户 Type AST
+中表示不可达错误行为的 `BottomType()` 完全不同；当前构造器不会输出它。
 
 ---
 
