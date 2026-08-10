@@ -26,7 +26,7 @@ from hcsp_typechecker._internal import (
     OutputChannel,
     Skip,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 from hcsp_typechecker.typechecking.logic import (
     ExpressionTranslator,
@@ -62,13 +62,13 @@ class ExpressionSemanticTests(unittest.TestCase):
         """符号除法必须产生当前路径蕴含除数非零的证明义务。"""
 
         process = Assign("y", "1 / x")
-        accepted = check_hcsp(
+        accepted = construct_type(
             gamma={"x": BasicType.REAL, "y": BasicType.REAL},
             theta={},
             configurations=[Configuration({"x": 1, "y": 0}, process)],
             path_condition="x != 0",
         )
-        rejected = check_hcsp(
+        rejected = construct_type(
             gamma={"x": BasicType.REAL, "y": BasicType.REAL},
             theta={},
             configurations=[Configuration({"x": 0, "y": 0}, process)],
@@ -86,14 +86,14 @@ class ExpressionSemanticTests(unittest.TestCase):
     # 检查内容：前者产生清晰类型诊断，后者产生未定义性反例义务。
     # 论文对应：表达式类型前提和“求值失败则规则不可应用”的要求。
     def test_invalid_modulo_and_square_root_are_reported_cleanly(self) -> None:
-        """不合法算术必须成为审计结果，而不能使类型检查器崩溃。"""
+        """不合法算术必须成为审计结果，而不能使类型构造器崩溃。"""
 
-        modulo = check_hcsp(
+        modulo = construct_type(
             gamma={"x": BasicType.REAL},
             theta={},
             configurations=[Configuration({"x": 0}, Assign("x", "x % 2"))],
         )
-        square_root = check_hcsp(
+        square_root = construct_type(
             gamma={"y": BasicType.REAL},
             theta={},
             configurations=[Configuration({"y": 0}, Assign("y", "sqrt(-1)"))],
@@ -116,13 +116,13 @@ class ExpressionSemanticTests(unittest.TestCase):
         """未定义守卫不能因两个分支恰好相同而被忽略。"""
 
         process = If("1 / x > 0", Skip(), Skip())
-        accepted = check_hcsp(
+        accepted = construct_type(
             gamma={"x": BasicType.REAL},
             theta={},
             configurations=[Configuration({"x": 1}, process)],
             path_condition="x != 0",
         )
-        rejected = check_hcsp(
+        rejected = construct_type(
             gamma={"x": BasicType.REAL},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
@@ -141,7 +141,7 @@ class ExpressionSemanticTests(unittest.TestCase):
     def test_output_refinement_includes_definedness(self) -> None:
         """通道精化中的除零不能被 Z3 的全函数除法掩盖。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={
                 "ch": ChannelType(

@@ -100,9 +100,7 @@ class Assumption21ConstructionTests(unittest.TestCase):
         """事件输入目标在本分支 continuation 中属于绑定出现。"""
 
         reaction = EventChoice(
-            InputChannel("sensor", "x"),
-            Assert("x >= 0"),
-            EmptyEvent(),
+            (InputChannel("sensor", "x"), Assert("x >= 0")),
         )
         self.assertIsInstance(reaction, EventChoice)
 
@@ -113,16 +111,11 @@ class Assumption21ConstructionTests(unittest.TestCase):
     def test_event_alternative_cannot_reuse_input_target_name(self) -> None:
         """事件输入目标不能在另一事件分支中作为自由变量出现。"""
 
-        other_branch = EventChoice(
-            OutputChannel("report", 1),
-            Assert("x >= 0"),
-            EmptyEvent(),
-        )
+        other_branch = (OutputChannel("report", 1), Assert("x >= 0"))
         with self.assertRaisesRegex(ValueError, r"overlap: x"):
             EventChoice(
-                InputChannel("sensor", "x"),
-                Skip(),
                 other_branch,
+                (InputChannel("sensor", "x"), Skip()),
             )
 
     # 测试输入：通信保护的 ``mu X.(guard!None; X)``。
@@ -255,11 +248,7 @@ class Assumption21ConstructionTests(unittest.TestCase):
     def test_ode_variable_cannot_be_rebound_by_interrupt_input(self) -> None:
         """ODE 状态变量不能同时作为中断输入绑定目标。"""
 
-        interrupts = EventChoice(
-            InputChannel("stop", "x"),
-            Skip(),
-            EmptyEvent(),
-        )
+        interrupts = EventChoice((InputChannel("stop", "x"), Skip()))
         with self.assertRaisesRegex(ValueError, r"overlap: x"):
             ODE(
                 [("x", 1)],

@@ -8,9 +8,9 @@
 - [共享参数、Gamma、Theta 与 Process 完整语法](GAMMA_THETA_INPUT_SYNTAX.md)
 - [Process 与表达式子语法](HCSP_INPUT_SYNTAX.md)
 
-## 转换与内部实现
+## TypeConstructor 与内部实现
 
-- [Process AST 到 Type AST 的真实转换过程](PROCESS_TO_TYPE_CONVERSION.md)
+- [TypeConstructor：Process AST 到 Type AST 的真实构造过程](TYPE_CONSTRUCTOR.md)
 - [完整项目功能参考](PROJECT_FUNCTION_REFERENCE.md)
 
 ## 文档边界

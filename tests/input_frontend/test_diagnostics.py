@@ -129,7 +129,7 @@ class SyntaxDiagnosticTests(unittest.TestCase):
     # 测试输入：``assert(x > 0`` 缺少关闭圆括号和语句块边界。
     # 预期行为：EOF/右花括号位置产生 syntax，并给出期望 ``)``。
     # 检查内容：检查 expected 字段，而不锁死整段英文错误消息。
-    # 论文对应：保证断言公式 B 的括号边界先于类型检查完整闭合。
+    # 论文对应：保证断言公式 B 的括号边界先于类型构造完整闭合。
     def test_unclosed_parenthesis_exposes_expected_token(self) -> None:
         """未闭合表达式结构应通过 expected 字段说明缺失 token。"""
 

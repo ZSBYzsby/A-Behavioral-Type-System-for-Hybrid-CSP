@@ -24,7 +24,6 @@ KEYWORDS = frozenset(
     {
         "skip",
         "assert",
-        "wait",
         "call",
         "if",
         "else",

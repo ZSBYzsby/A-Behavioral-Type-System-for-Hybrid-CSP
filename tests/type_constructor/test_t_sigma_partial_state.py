@@ -8,7 +8,7 @@ r"""Table 2 [T-sigma] 的部分状态替换语义测试。
    ``phi[state]`` 中；
 3. T-sigma 检查的是 ``|= phi[state]``。只要 Z3 找到一个残留变量反例，结果
    就是 false，而不是只有公式恒假时才是 false；
-4. state 引入 Gamma 未声明的变量属于未定义状态，规则层必须停止类型生成，
+4. state 引入 Gamma 未声明的变量属于未定义状态，规则层必须停止类型构造，
    底层证明器也必须拒绝，不能静默忽略。
 
 论文对应
@@ -29,7 +29,7 @@ from hcsp_typechecker._internal import (
     EndType,
     Skip,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 from hcsp_typechecker.typechecking.logic import Z3ProofEngine, z3
 
@@ -47,7 +47,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
     def test_partial_state_is_accepted_when_residual_formula_is_valid(self) -> None:
         """未赋值的 Gamma 变量保留为全称有效性检查中的自由符号。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "y": BasicType.REAL},
             theta={},
             configurations=[Configuration({"x": 0}, Skip())],
@@ -55,7 +55,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertEqual(report.inferred_type, EndType())
+        self.assertEqual(report.constructed_type, EndType())
         obligation = next(
             item for item in report.obligations if item.rule == "T-sigma"
         )
@@ -71,7 +71,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
     def test_counterexample_to_residual_formula_is_false_not_unknown(self) -> None:
         """残留公式不恒真时直接使用 valid 的反例结论。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "y": BasicType.REAL},
             theta={},
             configurations=[Configuration({"x": 0}, Skip())],
@@ -79,7 +79,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         obligation = next(
             item for item in report.obligations if item.rule == "T-sigma"
         )
@@ -96,7 +96,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
     def test_undeclared_state_variable_stops_type_generation(self) -> None:
         """未知状态变量不能被当作与路径条件无关的多余输入忽略。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.INT},
             theta={},
             configurations=[Configuration({"x": 0, "ghost": 1}, Skip())],
@@ -104,7 +104,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertFalse(
             any(item.rule == "T-sigma" for item in report.obligations)
         )
@@ -116,7 +116,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
             )
         )
 
-    # 测试输入：绕过 TypeChecker，直接把未声明的 ghost 状态项交给证明引擎。
+    # 测试输入：绕过 TypeConstructor，直接把未声明的 ghost 状态项交给证明引擎。
     # 预期行为：底层仍返回 false 并报告 Gamma 声明错误，不执行旧版的 continue。
     # 检查内容：防御性覆盖 state_satisfies 的公开调用边界。
     # 论文对应：未声明变量无法按 Gamma 的 Basic Type 构造替换项。

@@ -65,8 +65,8 @@ class ODEInputTests(unittest.TestCase):
         self.assertEqual(parse_hcsp(source), expected)
 
     # 测试输入：显式 safety、1/2 delay 以及输入/输出两个中断分支。
-    # 预期行为：构造精确批注和按书写顺序右结合的 EventChoice。
-    # 检查内容：比较通信、各自 continuation 和最终 EmptyEvent 余项。
+    # 预期行为：构造精确批注和按书写顺序保存的多分支 EventChoice。
+    # 检查内容：比较每个通信、各自 continuation 及完整事件分支表。
     # 论文对应：覆盖带安全批注连续演化及 InputChoice/OutputChoice 事件 E。
     def test_full_ode_with_safety_and_interrupts(self) -> None:
         """完整 ODE 应保留安全性质、精确时长及全部事件分支。"""
@@ -180,9 +180,9 @@ class ODEInputTests(unittest.TestCase):
                     parse_hcsp(source)
                 self.assertEqual(context.exception.phase, phase)
 
-    # 测试输入：负数、变量、布尔、取模、除零、非整数指数及 wait(inf)。
+    # 测试输入：负数、变量、布尔、取模、除零和非整数指数。
     # 预期行为：每个非法 duration 均产生 syntax 或 validation 诊断。
-    # 检查内容：锁定 delay 的非负有理常量限制和 wait 的有限时长限制。
+    # 检查内容：锁定 delay 的非负有理常量限制。
     # 论文对应：对应 ODE 外部批注 d 为非负有理数或正无穷的项目约束。
     def test_invalid_delay_and_wait_durations_are_rejected(self) -> None:
         """符号、负值和非有理时长不得进入 ODEAnnotation。"""
@@ -194,7 +194,6 @@ class ODEInputTests(unittest.TestCase):
             "{{ode(flow(), domain(true), delay(1 % 2))}}",
             "{{ode(flow(), domain(true), delay(1 / 0))}}",
             "{{ode(flow(), domain(true), delay(4 ** (1 / 2)))}}",
-            "{{wait(inf)}}",
         )
         for source in invalid:
             with self.subTest(source=source):

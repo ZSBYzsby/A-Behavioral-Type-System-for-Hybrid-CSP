@@ -1,9 +1,9 @@
-"""验证面向用户的详细类型检查报告。
+"""验证面向用户的详细类型构造报告。
 
 测试内容：本文件覆盖两类功能：
 
-* ``InferenceStep`` 是否按规则进入顺序保存环境快照和候选类型；
-* ``CheckReport.format_detailed()`` 是否同时展示总体结论、执行过程、证明义务、
+* ``DerivationStep`` 是否按规则进入顺序保存环境快照和候选类型；
+* ``TypeConstructionReport.format_detailed()`` 是否同时展示总体结论、执行过程、证明义务、
   分组后的一阶逻辑/dL 公式、原始公式、证明器实际输入、遗留义务、诊断和
   汇总，避免命令行用户只能看到一个最终 ``Verdict``。
 
@@ -21,7 +21,7 @@ import unittest
 from hcsp_typechecker._internal import (
     BasicType,
     ChannelType,
-    CheckReport,
+    TypeConstructionReport,
     Configuration,
     ContinuousType,
     EndType,
@@ -29,11 +29,13 @@ from hcsp_typechecker._internal import (
     ODE,
     ODEAnnotation,
     OutputChannel,
+    FiniteDelayType,
+    NoInterruptType,
     ProofObligation,
     Sequence,
     Skip,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 
 
@@ -47,7 +49,7 @@ class DetailedReportTests(unittest.TestCase):
             InputChannel("ch", "x"),
             OutputChannel("ch", "x"),
         )
-        return check_hcsp(
+        return construct_type(
             gamma={},
             theta={"ch": ChannelType(BasicType.INT)},
             configurations=[Configuration({}, process)],
@@ -62,7 +64,7 @@ class DetailedReportTests(unittest.TestCase):
     #           公式判定与规则展开的严格顺序。
     # 论文对应：Section 4.2/Table 2 的环境判断、T-sigma、T-In、T-Out、T-End。
     def test_trace_exposes_rule_order_and_input_environment_change(self) -> None:
-        """规则轨迹应让用户看见输入值如何进入后继类型检查上下文。"""
+        """规则轨迹应让用户看见输入值如何进入后继类型构造上下文。"""
 
         report = self._report()
 
@@ -109,25 +111,27 @@ class DetailedReportTests(unittest.TestCase):
     # 检查内容：关键标题、可读 Theta、T-In/T-Out 说明、单独的 FOL/dL
     #           公式清单及统计数量；本案例没有 ODE，因此 dL 清单应明确为空。
     # 论文对应：推导树和横线以上的逻辑前提在实现报告中分区展示。
-    def test_detailed_text_separates_inference_from_proof_evidence(self) -> None:
+    def test_detailed_text_separates_construction_from_proof_evidence(self) -> None:
         """详细文本不应把“类型已生成”和“证明义务为真”合并成一个模糊状态。"""
 
         rendered = self._report().format_detailed()
 
         expected_fragments = (
             "总体结论 : true",
-            "类型生成 : 成功",
-            "推导类型 : ch?.(ch!.(0))",
+            "规则推导 : 已完成",
+            "类型构造 : 成功",
+            "类型可信性 : 可信（全部义务已验证）",
+            "构造类型 : ch?.(ch!.(0))",
             "=== 规则执行过程 ===",
             "T-In @ K1",
             "T-Out @ K1",
             "Gamma    : x:Int",
             "Theta    : ch:{eta:Int | true}",
-            "=== 本次检查的一阶逻辑（FOL）公式 ===",
+            "=== 本次类型构造的一阶逻辑（FOL）证明公式 ===",
             "[FOL01] 对应 O01 | 有效 | 已证明 | T-sigma | STATE",
             "[FOL02] 对应 O02 | 有效 | 已证明 | T-Out | FOL",
             "实际检查公式:",
-            "=== 本次检查的微分动态逻辑（dL）公式 ===",
+            "=== 本次类型构造的微分动态逻辑（dL）证明公式 ===",
             "(无 dL 公式)",
             "=== 顺序公式判定记录 ===",
             "[O02] 有效 | 已证明 | T-Out | FOL",
@@ -152,9 +156,10 @@ class DetailedReportTests(unittest.TestCase):
         self.assertNotIn("简洁类型 :", rendered)
 
     # 测试输入：具有非平凡 safety 和有限自然后继的 ODE，dL 后端固定返回 unknown。
-    # 预期行为：两个 ODE 候选都在首条 unknown safety premise 处停止，因此
-    #           不伪造唯一类型，只保留两条已经实际判定的候选证据。
-    # 检查内容：候选标记、单独的 dL 公式清单、选择诊断和未选候选证据区。
+    # 预期行为：两个 ODE 候选遇到 unknown 仍继续展开全部 premise；选择器
+    #           保留 natural-timeout 的完整 delay(1).end 候选，但明确标成不可信。
+    # 检查内容：完整候选类型、四条 dL 公式、active/未选候选标记、选择诊断
+    #           和两条有效未决义务的统计。
     # 论文对应：Table 2 两条带 fallback ODE premise 必须保留，不能因后端缺失而隐藏。
     def test_unknown_dl_formulas_are_indexed_without_duplicate_bodies(self) -> None:
         """报告应集中列出未决 dL 公式，并引用而不重复相同公式正文。"""
@@ -167,7 +172,7 @@ class DetailedReportTests(unittest.TestCase):
             ),
             Skip(),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
@@ -177,24 +182,41 @@ class DetailedReportTests(unittest.TestCase):
         rendered = report.format_detailed()
 
         self.assertEqual(report.verdict, Verdict.UNKNOWN)
-        self.assertIsNone(report.inferred_type)
+        self.assertEqual(
+            report.constructed_type,
+            FiniteDelayType(1, NoInterruptType(), EndType()),
+        )
         expected_fragments = (
-            "推导类型 : (none)",
+            "规则推导 : 已完成",
+            "类型构造 : 成功",
+            "类型可信性 : 不可信（存在未验证义务）",
+            "构造类型 : delay(1).(0)  [完整候选，未验证]",
             "未选候选 : 2",
             "candidate=communication-only",
             "candidate=natural-timeout",
             "[O02] 未选候选 | 待证明 | T-ODE-safety | DL",
-            "[O03] 未选候选 | 待证明 | T-ODE-safety | DL",
-            "=== 本次检查的微分动态逻辑（dL）公式 ===",
+            "[O03] 未选候选 | 待证明 | T-ODE-domain | DL",
+            "[O04] 有效 | 待证明 | T-ODE-safety | DL",
+            "[O05] 有效 | 待证明 | T-ODE-boundary | DL",
+            "=== 本次类型构造的微分动态逻辑（dL）证明公式 ===",
             "[DL01] 对应 O02 | 未选候选 | 待证明 | T-ODE-safety | DL",
-            "[DL02] 对应 O03 | 未选候选 | 待证明 | T-ODE-safety | DL",
+            "[DL02] 对应 O03 | 未选候选 | 待证明 | T-ODE-domain | DL",
+            "[DL03] 对应 O04 | 有效 | 待证明 | T-ODE-safety | DL",
+            "[DL04] 对应 O05 | 有效 | 待证明 | T-ODE-boundary | DL",
             "实际检查公式:",
             "实际检查公式 : 与 [DL01] 相同，不重复展开",
             "[T-unrhd/T-unrhd-prime]",
             "配置的 dL 后端（通常为 KeYmaera X）",
             "=== 未选 ODE 候选的未决证据 ===",
-            "stopped at an unknown premise",
-            "遗留义务 : 0 (未通过=0, 待证明=0)",
+            "temporary candidate natural-timeout",
+            "遗留义务 : 2 (未通过=0, 待证明=2)",
+        )
+        # 有限末尾 ODE 现在只有自然结束规则，不再生成已废弃的通信候选记录。
+        expected_fragments = (
+            "T-ODE-safety",
+            "T-ODE-boundary",
+            "[T-unrhd-prime]",
+            "遗留义务 : 2",
         )
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
@@ -231,10 +253,10 @@ class DetailedReportTests(unittest.TestCase):
                 "SHARED_FORMULA",
             ).decided(Verdict.TRUE),
         )
-        report = CheckReport(
+        report = TypeConstructionReport(
             verdict=Verdict.TRUE,
-            inferred_type=EndType(),
-            component_types=(EndType(),),
+            constructed_type=EndType(),
+            constructed_component_types=(EndType(),),
             obligations=obligations,
             diagnostics=(),
         )

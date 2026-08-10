@@ -1,9 +1,7 @@
-r"""通过新版公共接口推导改良后的 Section 5 Vehicle/Controller 案例。
+r"""通过新版 TypeConstructor 接口构造改良后的 Section 5 Vehicle/Controller 案例。
 
-本文件只生成一份符合项目用户输入语法的完整 source，并依次调用：
-
-``parse_hcsp_program(source) -> HCSPProgram``
-``infer_hcsp_type(program) -> TypeAST``
+本文件生成一份符合项目用户输入语法的完整 source，并通过
+``construct_hcsp_type(source) -> TypeAST`` 一次完成解析、类型构造和必要公式证明。
 
 ``end``、``vmax``、``amin``、``amax`` 是 source 中声明的共享只读 Real
 参数，不属于任一并行分量的状态 Gamma，也不会被替换成具体数值。统一约束为：
@@ -11,7 +9,7 @@ r"""通过新版公共接口推导改良后的 Section 5 Vehicle/Controller 案�
     end >= 0 and vmax >= 0 and amin < 0 and amax >= 0
 
 ``d`` 不是共享符号参数，而是每次运行时给定的具体正有理数 ODE 批注；它会
-同时用于 Vehicle 的 delay、Controller 的 wait 和 ``phi_a`` 的周期预测。默认值
+同时用于 Vehicle 的 delay、Controller 显式空 flow ODE 和 ``phi_a`` 的周期预测。默认值
 为 1，也可以通过命令行修改：
 
     python -B case_study/new_case.py
@@ -19,8 +17,8 @@ r"""通过新版公共接口推导改良后的 Section 5 Vehicle/Controller 案�
 
 本例使用加强后的 ``phi_a``：除了周期终点的 ``phi_p``、``phi_v``，还检查区间
 内部可能出现的速度转向点。Vehicle 收到新加速度后检查该性质，不安全时回退到
-共享参数 ``amin``。完整接口日志会显示实际 source、Process AST、FOL/dL 公式、
-证明结果、规则轨迹和最终 Type AST。
+共享参数 ``amin``。完整接口日志会显示实际 source、环境摘要、FOL/dL 公式、
+证明结果、规则轨迹和最终 Type AST 的可信性；内部 Process AST 不会暴露。
 """
 
 from __future__ import annotations
@@ -41,9 +39,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from hcsp_typechecker import (
     HCSPInputError,
-    HCSPTypeError,
-    infer_hcsp_type,
-    parse_hcsp_program,
+    HCSPTypeConstructionError,
+    construct_hcsp_type,
 )
 
 
@@ -222,7 +219,7 @@ process {{
                     }}
                 }};
                 dh!(command);
-                wait({duration});
+                ode(flow(), domain(t < {duration}), delay({duration}));
                 call Y
             }} else {{
                 stop!(0)
@@ -261,7 +258,7 @@ def parse_period(argv: Sequence[str] | None = None) -> Fraction:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """用两项稳定公共接口完成 source 到 Type AST 的推导。"""
+    """用单一稳定公共接口完成 source 到 Type AST 的构造。"""
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -269,39 +266,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     period = parse_period(argv)
     source = build_source(period)
 
-    # 第二接口的 full 输出已经包含原始 source 和第一阶段结果，因此第一接口
-    # 成功时保持静默，避免把同一份 Process AST 打印两次。
-    try:
-        program = parse_hcsp_program(
-            source,
-            source_name=f"case_study/new_case.py --d {_number_text(period)}",
-            output="none",
-        )
-    except HCSPInputError as error:
-        # 第一阶段失败时第二接口不会运行，需要在此打印唯一一份源码定位诊断。
-        print("=== HCSP 用户输入转换失败 ===")
-        print(error.format_diagnostic())
-        return 1
-
-    # 公共推导接口从这些环境变量读取证明器目录与产物保留策略。设置只影响
+    # 公共接口从这些环境变量读取证明器目录与产物保留策略。设置只影响
     # 当前脚本进程及其 KeYmaera X 子进程。
     os.environ["KEYMAERAX_HOME"] = str(KEYMAERAX_HOME_DIRECTORY)
     os.environ["KEYMAERAX_KEEP_ARTIFACTS"] = "true"
     os.environ["KEYMAERAX_ARTIFACTS"] = str(ARTIFACTS_DIRECTORY)
 
     try:
-        infer_hcsp_type(
-            program,
+        construct_hcsp_type(
+            source,
+            source_name=(
+                f"case_study/new_case.py --d {_number_text(period)}"
+            ),
             output="full",
             keymaerax_timeout_seconds=180.0,
         )
-    except HCSPInputError as error:
-        # 该分支只可能来自第二接口额外接收的表达式输入（例如路径条件）。本例
-        # 使用默认路径条件，但仍显式保留公共异常边界。
-        print(error.format_diagnostic())
+    except HCSPInputError:
+        # full 模式已经输出带源码位置的解析诊断。
         return 1
-    except HCSPTypeError:
-        # full 模式已经打印完整失败报告；只返回非零状态，避免重复打印异常。
+    except HCSPTypeConstructionError:
+        # 包括确定失败，以及构造完整但证明仍未决的不可信候选。full 模式已经
+        # 打印类型可信性和完整审计证据；这里只返回非零状态，避免重复输出。
         return 1
     return 0
 

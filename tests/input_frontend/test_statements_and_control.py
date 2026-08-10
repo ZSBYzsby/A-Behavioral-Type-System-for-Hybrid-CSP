@@ -2,14 +2,14 @@
 
 测试内容
 --------
-1. skip、赋值、断言、输入、输出、wait 和 call 的精确 Process AST。
+1. skip、赋值、断言、输入、输出和 call 的精确 Process AST。
 2. 语句块分号的唯一顺序组合含义和非法空项/尾分号边界。
 3. if、内部选择及递归的块结构、规范 AST 和构造期良构失败。
-4. 内部选择之后的块内语句直接进入三元节点公共 continuation。
+4. 内部选择之后的块内语句直接进入多元节点公共 continuation。
 
 论文对应
 --------
-这些测试覆盖 Section 2.1 的离散 Process 产生式以及项目的多标量通信和三元
+这些测试覆盖 Section 2.1 的离散 Process 产生式以及项目的多标量通信和多元
 内部选择规范形；递归批注与通信保护对应 Section 4.2/4.3 和 Assumption 2.2。
 """
 
@@ -88,15 +88,16 @@ class AtomicStatementInputTests(unittest.TestCase):
             ),
         )
 
-    # 测试输入：``wait(1/2)`` 与自由 ``call Loop`` 两个表面语句。
-    # 预期行为：wait 精确展开为 ODE.wait，call 构造 Var，不提前查找绑定。
-    # 检查内容：比较完整规范 Process AST 和精确 Fraction 时长。
-    # 论文对应：wait 是 ODE 扩展语法糖；call 对应 Section 2.1 的变量 X。
-    def test_wait_and_process_call(self) -> None:
-        """wait 与 call 应分别 lower 为核心 ODE 展开和进程变量节点。"""
+    # 测试输入：自由 ``call Loop`` 与已移除语法糖 ``wait(1/2)``。
+    # 预期行为：call 构造 Var；wait 不再作为语句接受。
+    # 检查内容：确认前端不再偷偷展开 wait，用户必须显式写 ODE。
+    # 论文对应：call 对应 Section 2.1 的变量 X；时延统一由带批注 ODE 表示。
+    def test_process_call_is_supported_and_wait_is_rejected(self) -> None:
+        """call 应 lower 为进程变量节点，wait 语法糖应得到语法诊断。"""
 
-        self.assertEqual(parse_hcsp("{{wait(1 / 2)}}"), ODE.wait(Fraction(1, 2)))
         self.assertEqual(parse_hcsp("{{call Loop}}"), Var("Loop"))
+        with self.assertRaises(HCSPInputError):
+            parse_hcsp("{{wait(1 / 2)}}")
 
     # 测试输入：空/重复输入目标、空/尾逗号输出和表达式型输入目标。
     # 预期行为：各项均抛出 syntax 或 validation HCSPInputError。
@@ -182,9 +183,9 @@ class CompoundControlInputTests(unittest.TestCase):
         self.assertEqual(parse_hcsp(source), expected)
 
     # 测试输入：二分支 choose 后紧随 ``done!(0)``。
-    # 预期行为：后继直接写入三元 InternalChoice.continuation。
+    # 预期行为：后继直接写入多元 InternalChoice.continuation。
     # 检查内容：明确排除旧的 Sequence(InternalChoice(...), done) 结构。
-    # 论文对应：对应项目规范化的 ``(P \sqcup P');Q`` 三元表示。
+    # 论文对应：对应项目规范化的 ``(P_1 \sqcup ... \sqcup P_n);Q`` 多元表示。
     def test_choice_owns_its_common_continuation(self) -> None:
         """内部选择后面的块内语句必须成为两个分支的公共后继。"""
 
@@ -194,14 +195,14 @@ class CompoundControlInputTests(unittest.TestCase):
             InternalChoice(
                 OutputChannel("left", 0),
                 OutputChannel("right", 0),
-                OutputChannel("done", 0),
+                continuation=OutputChannel("done", 0),
             ),
         )
 
     # 测试输入：三分支 choose 和由两条语句组成的公共后继。
-    # 预期行为：分支按 InternalChoice.of 右结合，完整后继保存在最外层。
-    # 检查内容：比较嵌套分支顺序及 continuation 的 Sequence.of 结构。
-    # 论文对应：多分支是二元内部选择的表面语法展开，不增加新语义节点。
+    # 预期行为：三个分支直接保存在同一个 InternalChoice 中，完整后继单独保存。
+    # 检查内容：比较多元分支顺序及 continuation 的 Sequence.of 结构。
+    # 论文对应：对应 Table 2 可直接推广的多分支内部选择，不增加嵌套节点。
     def test_multi_branch_choice_preserves_branch_order_and_tail(self) -> None:
         """多分支选择应保持顺序并共享完整的剩余语句块。"""
 

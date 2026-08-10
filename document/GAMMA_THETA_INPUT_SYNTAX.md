@@ -3,8 +3,9 @@
 本文档定义一次完整的用户输入如何把共享只读参数、类型环境
 `Gamma`、通道环境 `Theta` 和一个 HCSP Process 系统绑定在同一份源码中，
 以及它们如何转换为项目现有的数据
-模型。这套 concrete syntax 已由内部统一解析器实现，并通过包根稳定入口
-`parse_hcsp_program(...)` 提供给普通用户；其中 Process 语句和表达式的详细子语法仍见
+模型。这套 concrete syntax 已由内部统一解析器实现，并通过包根唯一稳定的
+TypeConstructor 入口 `construct_hcsp_type(...)` 提供给普通用户；其中 Process
+语句和表达式的详细子语法仍见
 [`HCSP_INPUT_SYNTAX.md`](HCSP_INPUT_SYNTAX.md)。
 
 当前代码不为输入文本建立第二套环境 AST：
@@ -16,9 +17,10 @@
 - 解析结果中的 `Theta` 是只读 `Mapping[str, ChannelType]`；
 - Process 部分转换为项目现有的 `Process` 或 `Parallel` AST。
 
-公共门面把四者聚合成一个只读 `HCSPProgram`，不需要为参数、Gamma、Theta 或
-Process 再建立第二套 AST。本文后续显示的 Python mapping 和节点构造形式用于说明
-内部转换结果，不是要求普通用户直接导入这些类。
+公共门面直接返回最终 `TypeAST`，不会暴露解析阶段生成的 Process AST。内部解析器
+仍把四者作为同源数据交给 TypeConstructor，不需要为参数、Gamma、Theta 或 Process 再
+建立第二套 AST。本文后续显示的 Python mapping 和节点构造形式只用于说明内部
+转换结果，不是要求普通用户直接导入这些类。
 
 ## 1. 设计约定
 
@@ -209,7 +211,7 @@ continuous 声明可以共享部分或全部成员；当前模型也允许不同
 ODE 自动建立的隐藏局部时钟 `t` 不属于用户演化向量，不写入 Gamma，也不参加
 成员集合比较。因此 `t` 不能写入 `continuous(...)` 的成员列表；普通标量声明
 仍可使用名称 `t`，但它在 ODE 自身的 flow、domain 和 safety 中会被隐藏局部时钟
-遮蔽。没有用户方程的 `wait(d)` 同样不需要 continuous 声明。
+遮蔽。没有用户方程的空 flow ODE 同样不需要 continuous 声明。
 
 ### 3.3 Gamma 的结构检查
 
@@ -253,14 +255,14 @@ ParameterEnvironment(
 
 参数只能使用五种 `BasicType`，不支持 `continuous(...)`。参数声明名必须
 互异，且不能同时出现在 Gamma 中。约束的自由变量只能是当前分节声明的
-参数；其 Bool 类型、有定义性和可满足性由类型检查器统一验证。省略整个
+参数；其 Bool 类型、有定义性和可满足性由 TypeConstructor 统一验证。省略整个
 `parameters` 分节等价于空声明和恒真约束。
 
 共享参数不属于 Gamma 状态，因此可被多个并行 Process 同时读取，不会
 违反并行状态分离。该例外只在解析完整 source、已知参数声明时用于构造
 `Parallel` AST；内部低层 `parse_hcsp(...)` 和直接 `Parallel(...)` 仍保持原来的严格
 Assumption 2.1 检查。赋值、输入目标、ODE 左端或初始 state 对参数的修改始终
-由类型检查器拒绝。
+由 TypeConstructor 拒绝。
 
 ## 5. Theta 的转换规则
 
@@ -332,7 +334,8 @@ ChannelType(
 - `ContinuousType` 的声明名没有标量值，不能作为 refinement 表达式中的变量。
 - refinement 最终必须具有 `Bool` 类型。统一解析器只负责把语法合法的内容保存为
   `Expr`；未绑定名称、类型错误和表达式未定义条件在通道实际参与 T-In/T-Out 时
-  由类型检查器处理。当前检查器不会主动遍历验证未使用通道的 refinement，因此
+  由 TypeConstructor 中的表达式静态类型检查和证明检查处理。当前实现不会主动
+  遍历验证未使用通道的 refinement，因此
   “source 解析成功”本身不代表整个 Theta 已完成语义检查。
 
 ### 5.4 Theta 的结构检查
@@ -387,7 +390,7 @@ process {
 }
 ```
 
-该输入应生成一个同时保存四个结果的源码对象。共享参数转换为
+该输入在内部解析为四项同源数据。共享参数转换为
 `ParameterEnvironment({"limit": BasicType.REAL}, limit >= 0)`，其他两个环境分别为：
 
 ```python
@@ -418,64 +421,58 @@ theta = {
 }
 ```
 
-`process` 字段则保存由 `process {...}` 生成的正式 Process AST；它不是字符串，也
-不在聚合对象中复制一套新的进程节点定义。
+内部 `ParsedHCSPSource.process` 字段保存由 `process {...}` 生成的正式 Process
+AST；它不是字符串，也不会复制一套新的进程节点定义。该内部记录只在
+`parse_hcsp_source(...)` 与 TypeConstructor 之间传递，不是公共接口的返回值。
 
 ## 7. 已实现的公共封装接口
 
-普通用户按两步调用包根接口：
+普通用户只调用一次包根接口：
 
 ```python
-from hcsp_typechecker import infer_hcsp_type, parse_hcsp_program
+from hcsp_typechecker import construct_hcsp_type
 
-program = parse_hcsp_program(
+type_ast = construct_hcsp_type(
     source,
     source_name="example.hcsp",
-    output="result",
-)
-
-type_ast = infer_hcsp_type(
-    program,
     initial_states=None,
     path_condition=True,
     output="full",
 )
 ```
 
-第一接口返回只读 `HCSPProgram`。它是一次完整用户输入在程序内部的正式封装，
-也是第二接口唯一接受的程序对象：
+接口在内部把同一份 source 的参数、Gamma、Theta 和 Process AST 绑定后立即进入
+类型构造；这些中间对象不会交给普通调用者。构造完整且全部证明义务均通过时直接
+返回可信 `TypeAST`。调用者不需要、也不能通过包根构造内部判断、
+`TypeConstructionRequest` 或内部解析记录。
 
-```text
-program.source_text         原始完整 source
-program.source_name         诊断使用的来源名
-program.parameters          ParameterEnvironment 只读参数环境
-program.gamma               只读 Gamma mapping
-program.theta               只读 Theta mapping
-program.process_ast         正式 Process 或 Parallel AST
-program.process_components  按源码顺序展开的顶层 Process 叶子
-```
+这里的职责是从 HCSP 主动构造类型，因此称为 TypeConstructor。未来接收用户给定
+Type 并检查它是否适用的 TypeChecker 尚未实现，也不属于当前 source 语法。
 
-因此调用者可以查看第一阶段得到的四类内部对象，但不需要把它们拆开、重新配对，
-也不需要自己建立 `TypingJudgment`、`Configuration` 或内部解析记录。第二接口会
-根据 `process_components` 自动为单进程或并行系统建立类型推导输入；推导成功时
-直接返回正式 `TypeAST`。
-
-两个接口的 `output` 都接受三种模式：
+`output` 接受三种模式：
 
 - `"none"`：不打印，默认模式；
-- `"result"`：只打印本阶段结论和主要结果；
-- `"full"`：第一阶段打印原始 source、环境和 Process AST，第二阶段再打印规则
-  步骤、FOL/dL 公式、证明器说明和停止原因。
+- `"result"`：打印最终结论；成功时显示可信 Type AST，构造完整但证明未决时
+  显示带“不可信”标记的完整候选类型，其他失败显示原因和部分进度；
+- `"full"`：打印原始 source、环境摘要、内部构造完成说明、规则步骤、FOL/dL
+  公式、证明器说明、未决义务和最终可信性；不会打印或返回 Process AST 对象/repr。
 
 三种模式只影响日志展示，不影响返回对象与数学结论。也可以使用
 `OutputMode.NONE`、`OutputMode.RESULT`、`OutputMode.FULL`，并用 `stream=` 指定
-其他文本输出流。
+其他文本输出流。`false` 导致构造立即停止时，`full` 会打印停止位置以前的完整
+证据；`unknown` 不会让公式 premise 短路，`full` 会继续展示后续规则轨迹、完整
+候选类型（如能形成）和全部待证明义务。`none` 不打印，但异常仍保留对应格式化文本。
 
-完整 source 的词法、语法或结构错误抛出公共 `HCSPInputError`，并保留源文件名、
-行、列和源码指示符。类型推导只有在总体 verdict 为 `true` 时才返回 Type AST；
-`false` 或 `unknown` 会停止推导并抛出公共 `HCSPTypeError`。异常保留首要原因、
-停止前形成的部分类型以及 `format_result()`/`format_full()` 文本，不会用
-`BottomType` 或未经证明的候选类型充当错误返回值。
+完整 source 的词法、语法或结构错误会立即终止并抛出公共 `HCSPInputError`，同时
+保留源文件名、行、列和源码指示符；此时不会进入类型构造。结构/静态前提失败或
+必要公式为 `false` 时立即停止构造并抛出 `HCSPTypeConstructionError`。证明器返回
+`unknown` 只会记录未决义务，构造仍继续；若最终形成完整候选 Type AST，接口抛出
+`HCSPUntrustedTypeConstructionError`，并通过 `untrusted_type` 提供该候选供审计
+或外部补证。它是 `HCSPTypeConstructionError` 的子类，但候选类型没有通过验证，
+不能视为成功结果。若 `unknown` 与其他无法形成完整类型的情况并存，则仍抛出普通
+`HCSPTypeConstructionError`。
+两种类型异常都提供 `format_result()`/`format_full()`；正式 `BottomType` 不作错误
+占位符。
 
 内部仍有以下实现入口：
 
@@ -484,11 +481,12 @@ from hcsp_typechecker.input_language import (
     parse_hcsp,
     parse_hcsp_source,
 )
-from hcsp_typechecker.typechecking import check_hcsp
+from hcsp_typechecker.typechecking import construct_type
 ```
 
 `parse_hcsp_source(...)` 返回内部 `ParsedHCSPSource`，`parse_hcsp(...)` 只解析
-`process_system` 片段，`check_hcsp(...)` 接受松散环境与 Configuration。它们只用于
+`process_system` 片段，`construct_type(...)` 接受内部 `TypeConstructionRequest`。
+它们只用于
 实现、测试和论文规则审计，不从包根公开，也不属于用户兼容性承诺。
 
 内部实现不会边解析边无条件覆盖最终字典：它保留声明 token，在写入前检查重复键，

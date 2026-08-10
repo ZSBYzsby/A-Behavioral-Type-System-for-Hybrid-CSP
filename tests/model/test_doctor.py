@@ -66,7 +66,8 @@ class EnvironmentDoctorTests(unittest.TestCase):
 
         self.assertTrue(all(check.available for check in checks))
         rendered = format_environment(checks)
-        self.assertIn("Core checker ready : yes", rendered)
+        self.assertIn("HCSP TypeConstructor environment", rendered)
+        self.assertIn("Core constructor ready : yes", rendered)
         self.assertIn("KeYmaera X ready   : yes", rendered)
 
 

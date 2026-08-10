@@ -32,7 +32,7 @@ from hcsp_typechecker._internal import (
     Sequence,
     Var,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 
 
@@ -52,7 +52,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
     def test_constraint_is_a_background_assumption(self) -> None:
         """参数约束应推出断言，而不是被 T-sigma 当作无条件真命题。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[Assert("limit >= 0")],
@@ -63,7 +63,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE, report.format_detailed())
-        self.assertIsNotNone(report.inferred_type)
+        self.assertIsNotNone(report.constructed_type)
         self.assertIn("Parameters: limit:Real", report.format_detailed())
         self.assertIn("参数约束", report.format_detailed())
 
@@ -74,7 +74,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
     def test_initial_path_is_proved_for_every_admissible_assignment(self) -> None:
         """H 只能推出真正随 H 成立的局部初态条件。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -91,7 +91,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertEqual(report.obligations[0].rule, "T-sigma")
 
     # 测试输入：不可满足的参数约束 x > 0 and x < 0。
@@ -101,7 +101,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
     def test_unsatisfiable_parameter_constraint_is_rejected(self) -> None:
         """矛盾参数约束不能用真空蕴含伪造成功推导。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[Assert(True)],
@@ -125,7 +125,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
 
         left = Sequence.of(Assert("limit >= 0"), OutputChannel("left", 0))
         right = Sequence.of(Assert("limit >= 0"), OutputChannel("right", 0))
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={
                 "left": ChannelType(BasicType.INT),
@@ -142,7 +142,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE, report.format_detailed())
-        self.assertIsInstance(report.inferred_type, ParallelType)
+        self.assertIsInstance(report.constructed_type, ParallelType)
 
     # 测试输入：尝试通过赋值、输入、ODE 左端和初态改写 limit。
     # 预期行为：所有改写方式均被拒绝。
@@ -181,7 +181,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
         )
         for name, process, gamma, theta in cases:
             with self.subTest(name=name):
-                report = check_hcsp(
+                report = construct_type(
                     gamma=gamma,
                     theta=theta,
                     configurations=[process],
@@ -194,7 +194,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
                     report.format_detailed(),
                 )
 
-        initial_state_report = check_hcsp(
+        initial_state_report = construct_type(
             gamma={},
             theta={},
             configurations=[Configuration({"limit": 1}, Assert(True))],
@@ -223,7 +223,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
             captured.append(obligation)
             return DLCheckResult(Verdict.TRUE, "captured")
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={
                 "x": BasicType.REAL,
                 "flow": ContinuousType(("x",)),
@@ -274,7 +274,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
                 Var("X"),
             ),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={"tick": ChannelType(BasicType.INT)},
             configurations=[process],
@@ -293,7 +293,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
     def test_parameter_names_cannot_overlap_state_gamma(self) -> None:
         """同一名称不能同时表示共享参数和分量私有状态。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL},
             theta={},
             configurations=[Assert(True)],
@@ -318,7 +318,7 @@ class ParameterEnvironmentTests(unittest.TestCase):
         )
         for parameters in environments:
             with self.subTest(parameters=parameters):
-                report = check_hcsp(
+                report = construct_type(
                     gamma={},
                     theta={},
                     configurations=[Assert(True)],

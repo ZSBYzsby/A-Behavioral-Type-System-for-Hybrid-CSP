@@ -1,4 +1,4 @@
-"""Type checker 的内部输入、证明证据与报告数据模型。
+"""TypeConstructor 的内部输入、证明证据与报告数据模型。
 
 本模块只定义数据，不执行具体的类型推导。审计代码时可以把这里看成系统的
 “词汇表”：
@@ -6,28 +6,29 @@
 * :class:`BasicType`、:class:`ContinuousType`、:class:`ChannelType` 描述变量
   环境 ``Gamma`` 与通道环境 ``Theta`` 中允许出现的声明；其中 ``BasicType``
   项给标量值变量定型，连续项则独立登记 process 中允许出现的 ODE 演化向量；
-* :class:`TypingJudgment` 是检查器的输入；
-* :class:`InferenceStep`、:class:`ProofObligation`、:class:`Diagnostic` 和
-  :class:`CheckReport` 是检查器输出的可审计证据。
+* :class:`TypeConstructionRequest` 是类型构造器的输入；
+* :class:`DerivationStep`、:class:`ProofObligation`、:class:`Diagnostic` 和
+  :class:`TypeConstructionReport` 是类型构造器输出的可审计证据。
 
 本模块中的 ``ProofObligation`` 只保存已经完整生成的 state、FOL 或 dL 公式。
 它不保存待求解的谓词变量，也不表示需要从多条约束中综合 T-Assign 的未知
-``phi'``。赋值后状态由 ``checker.py`` 在规则展开时通过惰性最强后置状态确定；
+``phi'``。赋值后状态由 ``constructor.py`` 在规则展开时通过惰性最强后置状态确定；
 这里的数据对象只负责记录后续需要证明的具体目标和证明器返回的三值结果。
 
 HCSP 进程语法由 ``process/ast.py`` 独立定义，行为类型语法由
-``type_system/ast.py`` 独立定义。本模块只在判断输入和检查报告中引用这些
+``type_system/ast.py`` 独立定义。本模块只在构造请求和构造报告中引用这些
 结构，不定义任何 Process AST 或 Type AST 节点。
 
 ────────────────── 模型分层与数据流 ────────────────────────────────────────
 
-本文件中的定义按检查过程分为三层：
+本文件中的定义按类型构造过程分为三层：
 
 * ``BasicType`` 表示标量值变量类型和每个表达式的结果类型，
   ``ContinuousType`` 是 ``Gamma`` 中独立的 ODE 向量声明，``ChannelType`` 表示
   承载一个或多个独立 ``BasicType`` 槽位的 ``Theta`` 项；
-* ``Configuration``、``TypingJudgment`` 表示一次检查请求；
-* ``InferenceStep``、``ProofObligation``、``Diagnostic``、``CheckReport``
+* ``Configuration``、``TypeConstructionRequest`` 表示一次类型构造请求；
+* ``DerivationStep``、``ProofObligation``、``Diagnostic``、
+  ``TypeConstructionReport``
   表示规则执行轨迹、逻辑证据和最终结果。
 
 除明确写出规范化逻辑的构造器外，这些类都是不可变数据容器。Table 2 规则
@@ -41,11 +42,11 @@ Section 4.1 的行为类型 ``T``、angelic type ``A`` 和 Section 4.2 的组合
 ``mathcal T`` 由 ``type_system/ast.py`` 定义；本模块只保存推导请求及其证据。
 
 Definition 4.1 的 ``Gamma`` 同时描述值变量、递归变量和连续演化项。本项目将其
-拆分：``TypingJudgment.gamma`` 用 ``BasicType`` 表示包括 ODE 分量在内的
+拆分：``TypeConstructionRequest.gamma`` 用 ``BasicType`` 表示包括 ODE 分量在内的
 所有标量值变量，并用单独命名的 ``ContinuousType`` 项保存允许出现的 ODE
 向量成员；
 递归类型及边界不变量由
-``checker._Context.rec_env`` 和 ``Mu`` 批注保存。连续演化项的向量场仍来自对应
+``constructor._Context.rec_env`` 和 ``Mu`` 批注保存。连续演化项的向量场仍来自对应
 ``ODE`` 节点，T-ODE 要求节点左侧的完整变量集合已由 Gamma 登记；连续演化中
 必须恒成立的 ``phi`` 只来自 ODE 节点的 safety 批注。``Theta``
 则由 ``ChannelType`` 表示项目扩展后的 refinement type
@@ -77,9 +78,9 @@ from ..type_system.ast import ConfigurationType as _ConfigurationType
 #           combine 以 FALSE > UNKNOWN > TRUE 的保守优先级汇总结果。
 # --------------------------------------------------------------------------
 class Verdict(str, Enum):
-    """检查结果的三值逻辑。
+    """类型构造诊断与证明结果共用的三值逻辑。
 
-    ``UNKNOWN`` 不等同于类型错误：它表示结构类型检查已经执行，但某个公式
+    ``UNKNOWN`` 不等同于类型错误：它表示结构推导已经执行，但某个公式
     未能由当前证明后端判定。只有 ``FALSE`` 才表示已经发现反例或静态错误。
     """
 
@@ -88,13 +89,13 @@ class Verdict(str, Enum):
     UNKNOWN = "unknown"
 
     # 功能：把枚举值转成报告中使用的小写文本。
-    # 检查/模型关系：不改变真假含义，仅提供稳定显示格式。
+    # 构造/模型关系：不改变真假含义，仅提供稳定显示格式。
     def __str__(self) -> str:
         """返回适合报告与命令行展示的小写结果。"""
         return self.value
 
     # 功能：兼容自定义证明后端返回的 Verdict、bool 或常见状态文本。
-    # 检查/模型关系：只有明确的真/假词汇被采信，其他值一律保守为 UNKNOWN。
+    # 构造/模型关系：只有明确的真/假词汇被采信，其他值一律保守为 UNKNOWN。
     @classmethod
     def from_value(cls, value: Any) -> "Verdict":
         """把证明后端常见的布尔值或文本结果统一为三值结果。"""
@@ -107,7 +108,7 @@ class Verdict(str, Enum):
         return cls.UNKNOWN
 
     # 功能：把多条证明义务和诊断的结论合并为一个总体结论。
-    # 检查/模型关系：任一 FALSE 使整体为 FALSE；否则任一 UNKNOWN 使整体未知；
+    # 构造/模型关系：任一 FALSE 使整体为 FALSE；否则任一 UNKNOWN 使整体未知；
     #                空集合按全称条件的真空真返回 TRUE。
     @classmethod
     def combine(cls, values: Iterable["Verdict"]) -> "Verdict":
@@ -141,7 +142,7 @@ class BasicType(str, Enum):
     REAL = "Real"
 
     # 功能：返回环境、行为报告和诊断使用的规范类型名。
-    # 检查/模型关系：不执行子类型比较；该工作由 is_subtype 完成。
+    # 构造/模型关系：不执行子类型比较；该工作由 is_subtype 完成。
     def __str__(self) -> str:
         """按论文中使用的类型名打印。"""
         return self.value
@@ -150,10 +151,10 @@ class BasicType(str, Enum):
 # 论文对应：把用户输入归一为 Definition 4.1 的基础类型 B；
 #           不是 Table 2 中从表达式推导 B 的判断规则。
 # 功能：把内部建模接口接受的基础类型简写转换为唯一的 BasicType 表示。
-# 检查/模型关系：支持 BasicType、Python 类型对象和明确字符串别名；
+# 构造/模型关系：支持 BasicType、Python 类型对象和明确字符串别名；
 #                tuple/list 及其他无法识别的对象立即抛出 TypeError。
 def normalize_type(value: Any, *, subject: str = "Value type") -> BasicType:
-    """把便捷写法归一化为检查器内部唯一的基础值类型。
+    """把便捷写法归一化为类型构造器内部唯一的基础值类型。
 
     调用方可以传入枚举、Python 类型对象或字符串别名。论文未要求积类型，
     因此 tuple/list 不能表示一个普通值的类型。表达式结果、Theta 通信签名中
@@ -214,7 +215,7 @@ class ContinuousType:
 
     ``variables`` 按集合解释并规范化排序，因此 ODE 左端方程的书写顺序不影响
     匹配。ODE 的隐式局部时钟不属于用户向量，也不需要在 Gamma 中登记；没有
-    用户方程的 ``ODE.wait(d)`` 同样不需要连续向量声明。
+    用户方程为空的 ODE 同样不需要连续向量声明。
     """
 
     variables: tuple[str, ...]
@@ -251,7 +252,7 @@ class ContinuousType:
 
 
 # Gamma 项只允许标量基础类型或独立的 ODE 演化向量声明。进程变量类型保存在
-# checker 的递归环境中，不与 Python 字符串键上的值变量混用。
+# constructor 的递归环境中，不与 Python 字符串键上的值变量混用。
 GammaType = BasicType | ContinuousType
 
 
@@ -282,7 +283,7 @@ def gamma_value_type(value: Any, *, subject: str = "Gamma entry") -> BasicType:
 # 论文对应：服务于 Table 2 的 [T-Assign]、[T-In]、[T-Out] 表达式类型前提；
 #           数值提升是项目实现策略，论文表中只写两侧具有基础类型 B。
 # 功能：判断实际值类型能否安全流入期望值类型位置。
-# 检查/模型关系：实现 Nat <: Int <: Rational <: Real；这里只比较基础值类型，
+# 构造/模型关系：实现 Nat <: Int <: Rational <: Real；这里只比较基础值类型，
 #                不实现行为类型子类型关系。
 def is_subtype(actual: BasicType, expected: BasicType) -> bool:
     """判断表达式实际类型能否安全用于期望类型的位置。
@@ -333,7 +334,7 @@ class ChannelType:
     binders: tuple[str, ...] = ()
 
     # 功能：把一槽或多槽声明规范化为不可变、定元数的通道签名。
-    # 检查/模型关系：不创建 TupleType；每个分量独立规范化为 BasicType。
+    # 构造/模型关系：不创建 TupleType；每个分量独立规范化为 BasicType。
     def __init__(
         self,
         value_types: Any,
@@ -390,7 +391,7 @@ class ChannelType:
         return len(self.value_types)
 
     # 功能：按 refinement type 记法展示 Theta 中的一项，供详细报告使用。
-    # 检查/模型关系：只改变面向用户的字符串，不改变 dataclass 的结构表示、
+    # 构造/模型关系：只改变面向用户的字符串，不改变 dataclass 的结构表示、
     #                相等性或 T-In/T-Out 的替换逻辑。
     def __str__(self) -> str:
         """返回 ``{(eta1:B1,...) | phi}`` 形式的可读通道类型。"""
@@ -405,7 +406,7 @@ class ChannelType:
 
 # 论文扩展：把 Theta 输入统一为多标量通道 refinement type 记录。
 # 功能：把 Theta 项的便捷写法规范化为 ChannelType。
-# 检查/模型关系：ChannelType 原样返回；单个 B 形成一槽签名，tuple/list 的
+# 构造/模型关系：ChannelType 原样返回；单个 B 形成一槽签名，tuple/list 的
 #                全部元素形成多槽类型序列。非平凡 refinement 应显式构造 ChannelType，
 #                避免把类型序列误解成额外的 refinement 位置参数。
 def normalize_channel_type(value: Any) -> ChannelType:
@@ -423,15 +424,15 @@ def normalize_channel_type(value: Any) -> ChannelType:
 # 项目扩展：共享只读参数环境 Delta ::= x:B,... | H。
 # 功能：声明在 HCSP 执行前由用户选定、在所有并行配置间共享且执行中不可修改
 #       的参数，并给出所有合法预赋值必须满足的约束 H。
-# 检查/模型关系：本类只冻结构造输入；名称、基础类型、约束的 Bool 类型、约束
-#                可满足性以及与 Gamma 的不相交性由 TypeChecker 统一检查。
+# 构造/模型关系：本类只冻结构造输入；名称、基础类型、约束的 Bool 类型、约束
+#                可满足性以及与 Gamma 的不相交性由 TypeConstructor 统一检查。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ParameterEnvironment:
     """所有配置共享的预赋值、只读参数声明及其合法性约束。
 
     ``declarations`` 的每个值最终必须规范化为 ``BasicType``。``constraint``
-    只能引用这些参数，表示用户选择参数值时必须满足的性质。类型检查证明的是
+    只能引用这些参数，表示用户选择参数值时必须满足的性质。类型构造过程证明的是
     对每一个满足该约束的参数赋值，Table 2 推导均成立；参数不属于状态 Gamma，
     因而不参与并行状态空间分区。
     """
@@ -463,14 +464,14 @@ class ParameterEnvironment:
 # 判断对应：并行规则输入中的单个 <sigma, P> configuration。
 # 构造方式：Configuration(state, process, gamma=None, path_condition=None, name=None)。
 # 构造检查：复制 state 以隔离调用方修改，但暂不验证 process 属于 HCSP；
-#           局部 Gamma、路径条件和结构合法性由 TypeChecker 统一诊断。
+#           局部 Gamma、路径条件和结构合法性由 TypeConstructor 统一诊断。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Configuration:
     """并行判断中的单个 ``<state, process>`` 配置。
 
     ``gamma`` 和 ``path_condition`` 可以为不同并行叶子声明独立局部环境，
-    但不是不受约束的“覆盖”：TypeChecker 要求局部 Gamma 两两不交、与全局
+    但不是不受约束的“覆盖”：TypeConstructor 要求局部 Gamma 两两不交、与全局
     Gamma 同型且并集恰为全局 Gamma。若使用局部路径，则所有并行叶子都必须
     提供，外层默认 ``true`` 仅表示最终路径由这些局部路径的合取产生。
 
@@ -491,7 +492,7 @@ class Configuration:
     name: str | None = None
 
     # 功能：保存一个配置及其可选局部环境声明，并复制可变初始状态。
-    # 检查/模型关系：state=None 规范化为空状态；gamma/path/process 保持输入，
+    # 构造/模型关系：state=None 规范化为空状态；gamma/path/process 保持输入，
     #                后续 T-|| 展开及 configuration/system/process judgment 求解器验证。
     def __init__(
         self,
@@ -501,7 +502,7 @@ class Configuration:
         path_condition: Any | None = None,
         name: str | None = None,
     ):
-        """复制可变映射，避免调用方后续修改影响正在进行的检查。"""
+        """复制可变映射，避免调用方后续修改影响正在进行的类型构造。"""
         object.__setattr__(self, "state", {} if state is None else dict(state))
         object.__setattr__(self, "process", process)
         object.__setattr__(self, "gamma", gamma)
@@ -514,38 +515,35 @@ class Configuration:
 #           ``Gamma·Theta·phi |- P :: T`` 与
 #           ``Gamma·Theta·phi |- K :: mathcal T`` 的统一程序输入表示。
 #           configurations 表示 P 或组合配置 K；path_condition 表示前提 phi。
-#           expected_types 是项目的结果断言接口，不是论文判断的额外前提。
-# 判断对应：一次完整输入 Gamma、Theta、phi 和 configurations 的请求。
-# 构造方式：TypingJudgment(gamma, theta, configurations, path_condition=True,
-#                           expected_types=None)。
+# 判断对应：一次完整输入 Gamma、Theta、phi 和 configurations 的构造请求。
+# 构造方式：TypeConstructionRequest(gamma, theta, configurations,
+#                                   path_condition=True)。
 # 构造检查：复制环境并把进程、(state, process) 简写统一包装为 Configuration；
-#           环境项的具体类型规范化留给 TypeChecker.check。
+#           环境项的具体类型规范化留给 TypeConstructor.construct。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
-class TypingJudgment:
-    """一次完整的类型检查请求。
+class TypeConstructionRequest:
+    """一次完整的类型构造请求。
 
     对应 ``Gamma; Pi; Theta |- configurations : types``，其中 ``Pi``
-    是可选的共享只读参数环境。``expected_types`` 可选：提供时
-    额外校验推导结果，未提供时仅返回推导出的行为类型。
+    是可选的共享只读参数环境。请求只包含构造类型所需的左侧信息；由用户给定
+    候选 Type AST 并判断其是否匹配属于未来 ``TypeChecker`` 的职责。
     """
 
     gamma: Mapping[str, GammaType]
     theta: Mapping[str, ChannelType | Any]
     configurations: tuple[Configuration, ...]
     path_condition: Any = True
-    expected_types: tuple[_ConfigurationType, ...] | None = None
     parameters: ParameterEnvironment = ParameterEnvironment()
 
-# 功能：把低层判断接口的多种配置写法规范化成不可变 Configuration 元组。
-    # 检查/模型关系：不按 expected_types 反推类型；它只在推导完成后用于比较。
+    # 功能：把低层构造接口的多种配置写法规范化成不可变 Configuration 元组。
+    # 构造/模型关系：请求不接收期望类型，Type AST 始终由规则从 Process AST 构造。
     def __init__(
         self,
         gamma: Mapping[str, GammaType] | None,
         theta: Mapping[str, ChannelType | Any] | None,
         configurations: Sequence[Configuration | tuple[Mapping[str, Any], Any] | Any],
         path_condition: Any = True,
-        expected_types: Sequence[_ConfigurationType] | None = None,
         parameters: ParameterEnvironment | Mapping[str, Any] | None = None,
     ):
         """规范化环境与配置的多种便捷输入形式。"""
@@ -572,11 +570,6 @@ class TypingJudgment:
                 "parameters must be a ParameterEnvironment, mapping, or None"
             )
         object.__setattr__(self, "parameters", parameter_environment)
-        object.__setattr__(
-            self,
-            "expected_types",
-            None if expected_types is None else tuple(expected_types),
-        )
 
 
 # --------------------------------------------------------------------------
@@ -589,7 +582,7 @@ class TypingJudgment:
 # 结果对应：某条 Table 2 规则产生的一条独立 FOL、dL 或初态证明义务。
 # 构造方式：ProofObligation(rule, description, formula, kind="fol",
 #                            verdict=UNKNOWN, detail="", proof_formula=None)。
-# 构造检查：本类只冻结公式和元数据，不调用 Z3/KeYmaera X；checker.py 的
+# 构造检查：本类只冻结公式和元数据，不调用 Z3/KeYmaera X；constructor.py 的
 #           顺序 premise 求解器在规则当前位置立即化简、判定并写回不可变
 #           副本。ODE 候选规则中未被选中的义务会标记 active=False。
 # --------------------------------------------------------------------------
@@ -613,7 +606,7 @@ class ProofObligation:
     candidate: str = ""
 
     # 功能：保留规则原始公式和来源信息，写入证明器实际输入、结论及说明。
-    # 检查/模型关系：formula 始终对应规则生成的 premise；proof_formula 对应
+    # 构造/模型关系：formula 始终对应规则生成的 premise；proof_formula 对应
     #                证明器真正收到的化简式。两者分离，防止审计证据被覆盖。
     def decided(
         self,
@@ -658,7 +651,7 @@ class DLCheckResult:
 #           Definition 4.1 的环境形状；它是审计设施，不是论文中的判断式。
 # 结果对应：无法表示成已判定公式义务的结构错误、类型错误或定位信息。
 # 构造方式：Diagnostic(verdict, message, rule="", location="")。
-# 构造检查：纯数据容器；TypeChecker._diagnose 负责选择 verdict、规则和位置。
+# 构造检查：纯数据容器；TypeConstructor._diagnose 负责选择 verdict、规则和位置。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Diagnostic:
@@ -671,16 +664,16 @@ class Diagnostic:
 
 
 # --------------------------------------------------------------------------
-# 论文对应：记录检查器实际应用 Section 4.2/4.3、Table 2 规则和每条
+# 论文对应：记录类型构造器实际应用 Section 4.2/4.3、Table 2 规则和每条
 #           公式 premise 的顺序立即判定；论文只给出推导树，不定义运行时轨迹类。
 # 结果对应：一条规则应用时的进程片段、Gamma、Theta、路径条件、符号状态和
 #           候选类型，或单条公式的当场判定。它与 ProofObligation 分工：
 #           本类说明“如何推导/何时证明”，后者保存具体公式及其证明结果。
-# 构造方式：通常由 TypeChecker._start_step 创建，再用 completed 写入结果。
+# 构造方式：通常由 TypeConstructor._start_step 创建，再用 completed 写入结果。
 # 构造检查：所有环境和公式均保存为展示字符串，不能反向参与类型推导。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
-class InferenceStep:
+class DerivationStep:
     """一次类型规则应用或单条公式立即判定的不可变执行快照。
 
     ``number`` 是进入规则时分配的先序编号，因此条件、选择或递归产生嵌套
@@ -702,66 +695,79 @@ class InferenceStep:
     detail: str = ""
 
     # 功能：保留规则入口快照，只补充递归推导完成后才能得到的结果。
-    # 检查/模型关系：不改变证明义务结论；result 是候选类型的显示文本。
-    def completed(self, result: str, detail: str = "") -> "InferenceStep":
+    # 构造/模型关系：不改变证明义务结论；result 是候选类型的显示文本。
+    def completed(self, result: str, detail: str = "") -> "DerivationStep":
         """返回写入规则结果和补充说明后的不可变副本。"""
 
         return replace(self, result=result, detail=detail)
 
 
 # --------------------------------------------------------------------------
-# 论文对应：inferred_type/component_types 保存 Section 4.2 判断右侧的 T 或
+# 论文对应：constructed_type/constructed_component_types 保存 Section 4.2
+#           判断右侧的 T 或
 #           ``mathcal T``；无法形成正式类型的分量用 None 表示，而绝不借用论文
 #           中有独立语义的 BottomType。steps 保存规则推导轨迹，obligations
 #           保存 Table 2 前提的判定证据。verdict/diagnostics 是项目面向工具
 #           使用者增加的三值审计层。
-# 结果对应：一次类型判断的最终不可变审计报告。
-# 构造方式：由 TypeChecker._report 汇总 verdict、推导类型、义务和诊断。
+# 结果对应：一次类型构造及其正确性证明的最终不可变审计报告。
+# 构造方式：由 TypeConstructor._report 汇总 verdict、构造类型、义务和诊断。
 # 构造检查：本类不重新计算总体 verdict；调用方应信任 _report 使用
-#           Verdict.combine 的结果，并可通过 passed/summary 读取。
+#           Verdict.combine 的结果。UNKNOWN 与非空 constructed_type 可同时出现：
+#           它表示规则推导已完成，但候选类型尚未被所有义务证实。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
-class CheckReport:
-    """类型检查的最终审计报告。
+class TypeConstructionReport:
+    """类型构造与伴随证明的最终审计报告。
 
-    报告同时保留总体结论、推导类型、全部证明义务和诊断，避免调用方只能看到
-    一个布尔值却无法追溯失败原因。``inferred_type is None`` 表示结构或静态
-    类型前提未能形成 Table 2 类型，或推导在 false/unknown 公式 premise 处
-    停止；``component_types`` 中的 None 保留对应配置的失败或未访问位置。此时
-    ``obligations`` 与 ``steps`` 只保存停止点以前已经实际处理的推导前缀，不会
-    用未验证的后继拼出候选类型。
+    报告同时保留总体结论、构造类型、全部证明义务和诊断，避免调用方只能看到
+    一个布尔值却无法追溯失败原因。``constructed_type is None`` 表示未能形成
+    唯一的完整 Table 2 类型；原因可以是结构/静态前提失败，也可以是规则
+    候选尚无法唯一确定。``constructed_component_types`` 中的 None 保留对应
+    配置的失败或未访问位置。
+
+    ``verdict == UNKNOWN`` 时 ``constructed_type`` 可以非空。这不是“构造结果已
+    被证明正确”，
+    而是“Table 2 规则推导已形成完整候选类型，但至少一条必要证明义务
+    仍未决”。调用方必须将该类型标记为未验证、不可信；``passed`` 仍只在
+    verdict 为 TRUE 时成立。
     """
 
     verdict: Verdict
-    inferred_type: _ConfigurationType | None
-    component_types: tuple[_ConfigurationType | None, ...]
+    constructed_type: _ConfigurationType | None
+    constructed_component_types: tuple[_ConfigurationType | None, ...]
     obligations: tuple[ProofObligation, ...]
     diagnostics: tuple[Diagnostic, ...]
-    steps: tuple[InferenceStep, ...] = ()
+    steps: tuple[DerivationStep, ...] = ()
 
     # 功能：提供传统布尔式成功查询，仅 TRUE 被视为通过。
-    # 检查/模型关系：UNKNOWN 必须保持不通过，避免把未证明义务当成成功。
+    # 构造/模型关系：UNKNOWN 必须保持不通过，避免把未证明义务当成成功。
     @property
     def passed(self) -> bool:
         """仅当所有结构检查和证明义务均为 ``TRUE`` 时返回真。"""
         return self.verdict == Verdict.TRUE
 
-    # 功能：统计证明义务的 true/false/unknown 数量并显示推导类型和诊断数。
-    # 检查/模型关系：这是展示函数，不重新合并 verdict 或隐藏失败证据。
+    # 功能：统计证明义务的 true/false/unknown 数量并显示构造类型和诊断数。
+    # 构造/模型关系：这是展示函数，不重新合并 verdict 或隐藏失败证据。
     def summary(self) -> str:
         """生成紧凑的单行统计，适合测试失败信息和命令行输出。"""
         active = tuple(item for item in self.obligations if item.active)
         proved = sum(item.verdict == Verdict.TRUE for item in active)
         disproved = sum(item.verdict == Verdict.FALSE for item in active)
         unknown = sum(item.verdict == Verdict.UNKNOWN for item in active)
+        if self.constructed_type is None:
+            type_summary = "(none)"
+        elif self.verdict is Verdict.TRUE:
+            type_summary = str(self.constructed_type)
+        else:
+            type_summary = f"{self.constructed_type} [untrusted]"
         return (
-            f"{self.verdict.value}: type={self.inferred_type}; "
+            f"{self.verdict.value}: type={type_summary}; "
             f"obligations(proved={proved}, false={disproved}, unknown={unknown}); "
             f"diagnostics={len(self.diagnostics)}; steps={len(self.steps)}"
         )
 
     # 功能：把实现规则名转换为论文 Table 2 中便于人工审计的 premise 形状。
-    # 检查/模型关系：只提供公式来源说明；实际公式仍以 obligation.formula 为准。
+    # 构造/模型关系：只提供公式来源说明；实际公式仍以 obligation.formula 为准。
     @staticmethod
     def _paper_premise(obligation: ProofObligation) -> str:
         """返回证明义务在论文规则中的简写形状或表达式侧条件说明。"""
@@ -794,7 +800,7 @@ class CheckReport:
         return f"[{obligation.rule}] 规则展开产生的具体公式 premise"
 
     # 功能：说明不同 proof kind 对应的实际判定机制。
-    # 检查/模型关系：不声称 dL 一定使用 KeYmaera X，因为低层 TypeChecker
+    # 构造/模型关系：不声称 dL 一定使用 KeYmaera X，因为低层 TypeConstructor
     #                构造器允许注入其他可信后端。
     @staticmethod
     def _proof_backend(kind: str) -> str:
@@ -807,7 +813,7 @@ class CheckReport:
         }.get(kind, f"未知证明类别 {kind!r}")
 
     # 功能：把可能跨多行的 Z3/dL 公式统一缩进成独立文本块。
-    # 检查/模型关系：只改变显示缩进，不截断、化简或重写公式内容。
+    # 构造/模型关系：只改变显示缩进，不截断、化简或重写公式内容。
     @staticmethod
     def _append_formula_block(
         lines: list[str],
@@ -821,8 +827,8 @@ class CheckReport:
         lines.append(f"     {label}:")
         lines.extend(f"       {line}" for line in formula_lines)
 
-    # 功能：按逻辑类别集中展示本次运行实际检查过的完整公式。
-    # 检查/模型关系：FOL 清单同时包含普通 Z3 有效性义务和 T-sigma 的状态
+    # 功能：按逻辑类别集中展示本次类型构造实际证明过的完整公式。
+    # 构造/模型关系：FOL 清单同时包含普通 Z3 有效性义务和 T-sigma 的状态
     #                代入公式；dL 清单包含 ODE safety/domain/boundary。清单只
     #                重排现有 ProofObligation，不重新化简、证明或改变 active。
     def _append_formula_inventory(
@@ -906,29 +912,80 @@ class CheckReport:
         return references
 
     # 功能：把结构化轨迹、证明义务和诊断统一渲染为可直接阅读的中文报告。
-    # 检查/模型关系：只读取已经冻结的证据，不重新运行规则或证明器，也不会
+    # 构造/模型关系：只读取已经冻结的证据，不重新运行规则或证明器，也不会
     #                把候选类型生成成功误写成全部证明义务为真。
     def format_detailed(self) -> str:
         """生成包含 FOL/dL 清单、原始公式、证明器输入和遗留义务的报告。"""
 
+        derivation_complete = self.constructed_type is not None
+        type_trusted = self.verdict is Verdict.TRUE and derivation_complete
+        if type_trusted:
+            trust_status = "可信（全部义务已验证）"
+        elif not derivation_complete:
+            trust_status = "不适用（未形成完整类型）"
+        elif self.verdict is Verdict.UNKNOWN:
+            trust_status = "不可信（存在未验证义务）"
+        else:
+            trust_status = "不可信（存在未通过义务）"
+        if self.verdict is Verdict.UNKNOWN:
+            candidate_annotation = "完整候选，未验证"
+            ast_annotation = "UNTRUSTED"
+        else:
+            candidate_annotation = "完整候选，存在未通过义务"
+            ast_annotation = "UNTRUSTED/FAILED-OBLIGATION"
         verdict_explanations = {
             Verdict.TRUE: "全部结构检查、静态类型前提和证明义务均已通过",
             Verdict.FALSE: "至少发现结构/静态类型错误或未满足的证明义务",
-            Verdict.UNKNOWN: "推导在未决证明义务或不支持的规则边界处停止",
+            Verdict.UNKNOWN: (
+                "规则推导已完成，但至少一条必要证明义务仍未决；"
+                "构造类型是完整候选，但尚未验证、不可信"
+                if derivation_complete
+                else "规则推导未能形成唯一完整类型，且存在未决前提或诊断"
+            ),
         }
         lines = [
-            "=== 类型检查详细报告 ===",
+            "=== 类型构造与证明详细报告 ===",
             f"总体结论 : {self.verdict.value}",
             f"结论说明 : {verdict_explanations[self.verdict]}",
-            "类型生成 : " + ("成功" if self.inferred_type is not None else "失败"),
-            f"推导类型 : {self.inferred_type if self.inferred_type is not None else '(none)'}",
-            f"Type AST : {self.inferred_type!r}",
+            "规则推导 : " + ("已完成" if derivation_complete else "未完成"),
+            "类型构造 : " + ("成功" if derivation_complete else "失败"),
+            f"类型可信性 : {trust_status}",
+            "构造类型 : "
+            + (
+                str(self.constructed_type)
+                if type_trusted
+                else f"{self.constructed_type}  [{candidate_annotation}]"
+                if derivation_complete
+                else "(none)"
+            ),
+            "Type AST : "
+            + (
+                repr(self.constructed_type)
+                if type_trusted
+                else f"{self.constructed_type!r}  [{ast_annotation}]"
+                if derivation_complete
+                else "None"
+            ),
         ]
 
-        if len(self.component_types) > 1:
-            lines.extend(("", "=== 配置分量类型 ==="))
-            for index, component_type in enumerate(self.component_types, start=1):
-                lines.append(f"K{index}: {component_type if component_type is not None else '(failed)'}")
+        if len(self.constructed_component_types) > 1:
+            if type_trusted:
+                component_heading = "=== 配置分量类型 ==="
+            elif self.verdict is Verdict.UNKNOWN:
+                component_heading = "=== 配置分量候选类型（未验证） ==="
+            else:
+                component_heading = "=== 配置分量候选类型（存在未通过义务） ==="
+            lines.extend(("", component_heading))
+            for index, component_type in enumerate(
+                self.constructed_component_types,
+                start=1,
+            ):
+                rendered_component = (
+                    str(component_type)
+                    if component_type is not None
+                    else "(failed)"
+                )
+                lines.append(f"K{index}: {rendered_component}")
 
         active_obligations = tuple(
             item for item in self.obligations if item.active
@@ -951,14 +1008,14 @@ class CheckReport:
         # 引用这里唯一展开的证明器输入，避免完整日志重复打印同一正文。
         formula_references = self._append_formula_inventory(
             lines,
-            title="=== 本次检查的一阶逻辑（FOL）公式 ===",
+            title="=== 本次类型构造的一阶逻辑（FOL）证明公式 ===",
             kinds=frozenset({"state", "fol"}),
             label="FOL",
             empty_message="(无一阶逻辑公式)",
         )
         formula_references.update(self._append_formula_inventory(
             lines,
-            title="=== 本次检查的微分动态逻辑（dL）公式 ===",
+            title="=== 本次类型构造的微分动态逻辑（dL）证明公式 ===",
             kinds=frozenset({"dl"}),
             label="DL",
             empty_message="(无 dL 公式)",
@@ -1157,8 +1214,8 @@ class CheckReport:
 
 # 论文对应：为 Section 4.3/Table 2 的 ODE 相关 dL 前提提供可替换判定后端；
 #           论文未规定 Python callable 接口或 UNKNOWN 返回形式。
-# 功能：声明 TypeChecker 可注入的最小动态逻辑证明器接口。
-# 检查/模型关系：输入为单条 ProofObligation；bool/文本会经 Verdict.from_value
+# 功能：声明 TypeConstructor 可注入的最小动态逻辑证明器接口。
+# 构造/模型关系：输入为单条 ProofObligation；bool/文本会经 Verdict.from_value
 #                规范化，None 表示无法处理并应保守得到 UNKNOWN。
 DLChecker = Callable[
     [ProofObligation],

@@ -36,7 +36,7 @@ from hcsp_typechecker._internal import (
     ParallelType,
     Skip,
     Verdict,
-    check_hcsp,
+    construct_type,
     types_equivalent,
 )
 
@@ -51,7 +51,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
     def test_local_gamma_cannot_change_a_global_variable_type(self) -> None:
         """局部 Gamma 不是能够重新声明全局变量类型的覆盖层。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.INT},
             theta={},
             configurations=[
@@ -64,7 +64,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertTrue(
             any(
                 "global Int, local Bool" in item.message
@@ -79,7 +79,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
     def test_local_gamma_union_must_cover_the_global_gamma(self) -> None:
         """两两不交只是必要条件，局部 Gamma 还必须完整覆盖全局 Gamma。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"left": BasicType.INT, "right": BasicType.INT},
             theta={},
             configurations=[
@@ -89,7 +89,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertTrue(
             any(
                 "do not cover the global Gamma: right" in item.message
@@ -104,7 +104,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
     def test_local_gamma_cannot_invent_a_global_variable(self) -> None:
         """局部 Gamma 中的每个变量都必须来自入口全局 Gamma。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -117,7 +117,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertTrue(
             any(
                 "absent from the global Gamma: y" in item.message
@@ -132,7 +132,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
     def test_nontrivial_global_path_cannot_be_overridden_locally(self) -> None:
         """显式局部路径只能在外层路径留为默认 true 时使用。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -142,7 +142,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertTrue(
             any(
                 "non-trivial global path" in item.message
@@ -157,7 +157,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
     def test_parallel_local_paths_must_be_all_or_none(self) -> None:
         """局部路径必须覆盖全部并行配置，不能只覆盖部分分量。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -167,7 +167,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertTrue(
             any(
                 "either all provide local path" in item.message
@@ -183,7 +183,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         """Assumption 2.1 不会自动把一个全局 state/Gamma 拆成两个配置。"""
 
         system = Parallel(Assert("x > 0"), Assert("y > 0"))
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.INT, "y": BasicType.INT},
             theta={},
             configurations=[Configuration({"x": 1, "y": 1}, system)],
@@ -191,7 +191,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertTrue(
             any(
                 "stateful Parallel system" in item.message
@@ -206,7 +206,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
     def test_explicit_stateful_leaves_form_a_valid_parallel_judgment(self) -> None:
         """有状态并行的规范输入是多个上下文互不相交的 Configuration。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.INT, "y": BasicType.INT},
             theta={},
             configurations=[
@@ -231,7 +231,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(
             types_equivalent(
-                report.inferred_type,
+                report.constructed_type,
                 ParallelType((EndType(), EndType())),
             )
         )
@@ -244,7 +244,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
     def test_stateless_parallel_sugar_remains_available(self) -> None:
         """无状态并行仍可使用单 Configuration 的安全便捷写法。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={"left": BasicType.INT, "right": BasicType.INT},
             configurations=[
@@ -259,7 +259,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsInstance(report.inferred_type, ParallelType)
+        self.assertIsInstance(report.constructed_type, ParallelType)
 
 
 if __name__ == "__main__":

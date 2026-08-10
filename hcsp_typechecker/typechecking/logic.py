@@ -10,7 +10,7 @@ Z3 项仍可在通道 callable refinement 和证明器内部出现，但它们�
 本模块同时服务于推导的两个职责：``ExpressionTranslator`` 在规则展开时
 确定性地产生带类型的 Z3 项和有定义性条件；``Z3ProofEngine`` 在统一求解器
 遇到相应公式 premise 时立即判定具体 FOL 公式。它不综合路径谓词或赋值后置
-条件。T-Assign 已经由 ``checker.py`` 把右值项写入后继符号映射，因此传到
+条件。T-Assign 已经由 ``constructor.py`` 把右值项写入后继符号映射，因此传到
 这里的证明目标中不存在等待 Z3 搜索的未知 ``phi'``。
 """
 
@@ -593,7 +593,7 @@ class ExpressionTranslator:
 
     @staticmethod
     def _type_of_z3(value: Any) -> BasicType:
-        """从 Z3 sort 反向恢复检查器值类型。"""
+        """从 Z3 sort 反向恢复 TypeConstructor 使用的值类型。"""
         if z3.is_bool(value):
             return BasicType.BOOL
         if z3.is_int(value):

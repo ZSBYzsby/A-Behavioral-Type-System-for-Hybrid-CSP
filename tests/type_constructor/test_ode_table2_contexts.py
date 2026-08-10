@@ -22,6 +22,7 @@ domain、safety 和 boundary 公式。这里隔离检查三个 ODE 后继子 jud
 
 from __future__ import annotations
 
+from math import inf
 import unittest
 
 from hcsp_typechecker._internal import (
@@ -37,7 +38,7 @@ from hcsp_typechecker._internal import (
     Sequence,
     Skip,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 
 
@@ -73,10 +74,10 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
         process = ODE(
             [("x", 1)],
             "x < 1",
-            EventChoice(OutputChannel("alarm", 0), Assert("x < 1")),
-            annotation=ODEAnnotation(safety=True, delay=1),
+            EventChoice((OutputChannel("alarm", 0), Assert("x < 1"))),
+            annotation=ODEAnnotation(safety=True, delay=inf),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
@@ -98,10 +99,10 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
         evolution = ODE(
             [("x", 1)],
             "x < 1",
-            EventChoice(OutputChannel("alarm", 0), Assert("x < 1")),
+            EventChoice((OutputChannel("alarm", 0), Assert("x < 1"))),
             annotation=ODEAnnotation(safety=True, delay=1),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={
                 "alarm": ChannelType(BasicType.INT),
@@ -135,7 +136,7 @@ class ODETable2SuccessorContextTests(unittest.TestCase):
             ),
             Assert("x >= 1"),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],

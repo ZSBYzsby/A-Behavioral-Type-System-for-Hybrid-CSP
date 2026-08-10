@@ -9,11 +9,11 @@
 1. ``P01``-``P11``：全部十一种 P 节点及 ODE 事件反应的精确类型。
 2. ``S01``：并行系统到 ParallelType 的转换。
 3. ``C01``-``C09``：控制流组合、内部选择公共后继、有限时延节点、
-   ``ODE.wait`` 和自动局部时钟。
+   显式有限 ODE 和自动局部时钟。
 4. ``N01``-``N13``：逻辑证明失败、静态类型失败、通道、refinement、ODE、
    递归不变量、初始路径和缺少 dL 后端的 false/unknown 路径。
 5. 动态插桩所有 ``rule_t_*``，要求场景集实际进入每个规则入口。
-6. 结构推导失败使用 ``None``，并验证它不会与论文正式类型 ``BottomType`` 混淆。
+6. 结构推导失败使用 ``None``，并验证有限 ODE 会以正常终止收束。
 7. 检查推导入口的类型标注严格区分 process 类型 ``T`` 和 configuration 类型
    ``mathcal T``。
 8. Gamma 只允许普通 BasicType 或 ContinuousType，Theta 的字符串键也必须
@@ -40,12 +40,10 @@ from hcsp_typechecker._internal import (
     Assert,
     Assign,
     BasicType,
-    BottomType,
     ChannelType,
-    CheckReport,
+    TypeConstructionReport,
     Configuration,
     ContinuousType,
-    CommunicationTimeoutType,
     ConfigurationType,
     EndType,
     EventChoice,
@@ -53,6 +51,7 @@ from hcsp_typechecker._internal import (
     If,
     InputChannel,
     InputType,
+    InfiniteDelayType,
     InternalChoice,
     InternalChoiceType,
     Mu,
@@ -63,17 +62,17 @@ from hcsp_typechecker._internal import (
     OutputType,
     Parallel,
     ParallelType,
-    PureDelayType,
+    FiniteDelayType,
     RecursionAnnotation,
     ProcessType,
     Sequence,
     Skip,
-    TypeChecker,
-    TimedExternalChoiceType,
+    TypeConstructor,
+    NoInterruptType,
     TypeVar,
     Var,
     Verdict,
-    check_hcsp,
+    construct_type,
     types_equivalent,
 )
 
@@ -95,6 +94,12 @@ def _select_natural_timeout(obligation: object) -> Verdict:
     )
 
 
+def _unknown_dl(_obligation: object) -> Verdict:
+    """模拟尚无结论的 dL 后端，锁定不可信候选的推导路径。"""
+
+    return Verdict.UNKNOWN
+
+
 @dataclass(frozen=True)
 class ConversionScenario:
     """一个进程到行为类型的可执行场景及其精确期望。"""
@@ -113,10 +118,10 @@ class ConversionScenario:
     obligation_rules: tuple[str, ...] = ()
     step_rules: tuple[str, ...] = ()
 
-    def run(self) -> CheckReport:
-        """调用内部检查器入口并返回保留全部证明证据的检查报告。"""
+    def run(self) -> TypeConstructionReport:
+        """调用内部构造器入口并返回保留全部证明证据的构造报告。"""
 
-        return check_hcsp(
+        return construct_type(
             gamma=self.gamma,
             theta=self.theta,
             configurations=[Configuration(self.state, self.process)],
@@ -167,9 +172,6 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         EventChoice.of((OutputChannel("alarm", 0), Skip())),
         annotation=ODEAnnotation(delay=1),
     )
-    # ODE.wait(1) 只展开为空用户方程 ODE; Skip，并使用隐藏时钟建立边界。
-    # mock dL 后端隔离语法糖的类型结构与 KeYmaera X 实际求证环境。
-    implicit_clock_wait = ODE.wait(1)
     ordinary_ode_variable = Sequence.of(
         ODE(
             [("x", 1)],
@@ -245,15 +247,15 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P07_ODE_EVENT_REACTION",
-            "无限时延 ODE 按论文缩写规范为外部选择 A",
+            "无限时延 ODE 显式保留不可达 bottom 后继的 delay 结构",
             event_ode,
             Verdict.TRUE,
-            ExternalChoiceType(
+            InfiniteDelayType(ExternalChoiceType(
                 (
                     InputType("sense", EndType()),
                     OutputType("stop", EndType()),
                 )
-            ),
+            )),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"sense": integer, "stop": integer},
             obligation_rules=("T-ODE-domain",),
@@ -272,19 +274,21 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P09_INTERNAL_CHOICE",
-            "P |~| P' 转换为二元内部选择类型",
+            "多分支 P_1 |~| ... |~| P_n 转换为多元内部选择类型",
             InternalChoice(
                 OutputChannel("left", 0),
                 OutputChannel("right", 0),
+                OutputChannel("audit", 0),
             ),
             Verdict.TRUE,
             InternalChoiceType(
                 (
                     OutputType("left", EndType()),
                     OutputType("right", EndType()),
+                    OutputType("audit", EndType()),
                 )
             ),
-            theta={"left": integer, "right": integer},
+            theta={"left": integer, "right": integer, "audit": integer},
             step_rules=("T-sqcup",),
         ),
         ConversionScenario(
@@ -304,8 +308,9 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "无通信 ODE 形成以外层顺序后继为 continuation 的纯等待",
             Sequence.of(terminating_ode, OutputChannel("done", 0)),
             Verdict.TRUE,
-            PureDelayType(
+            FiniteDelayType(
                 1,
+                NoInterruptType(),
                 OutputType("done", EndType()),
             ),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
@@ -386,24 +391,21 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C04_FINITE_COMMUNICATION_TIMEOUT",
-            "有限 d、非空 A、无自然后继经域不变量验证形成 CommunicationTimeoutType",
+            "有限 d、非空 A、空通信边界后继仍使用统一有限时延节点",
             timeout_ode,
             Verdict.TRUE,
-            CommunicationTimeoutType(
-                2,
-                OutputType("tick", EndType()),
-            ),
+            FiniteDelayType(2, OutputType("tick", EndType()), EndType()),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"tick": integer},
             dl_checker=_true_dl,
-            obligation_rules=("T-ODE-domain",),
+            obligation_rules=("T-ODE-boundary",),
         ),
         ConversionScenario(
             "C05_TIMED_EXTERNAL_CHOICE_WITH_FALLBACK",
-            "有限 d、非空 A 和正常后继形成 TimedExternalChoiceType",
+            "有限 d、非空 A 和正常后继形成 FiniteDelayType",
             Sequence.of(fallback_ode, OutputChannel("done", 0)),
             Verdict.TRUE,
-            TimedExternalChoiceType(
+            FiniteDelayType(
                 1,
                 OutputType(
                     "alarm",
@@ -420,44 +422,25 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C06_INFINITE_DELAY_DISCARDS_TIMEOUT_FALLBACK",
-            "无限 d 把超时后继设为 bottom，但通信中断后仍继续顺序 tail",
+            "无限 d 没有自然超时，通信中断后仍继续顺序 tail",
             Sequence.of(infinite_fallback_ode, OutputChannel("done", 0)),
             Verdict.TRUE,
-            OutputType(
+            InfiniteDelayType(OutputType(
                 "alarm",
                 OutputType("done", EndType()),
-            ),
+            )),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": integer, "done": integer},
             state={"x": 0},
             obligation_rules=("T-ODE-domain",),
         ),
         ConversionScenario(
-            "C07_WAIT_SUGAR_WITH_IMPLICIT_CLOCK",
-            "ODE.wait(d) 无用户时钟或 Gamma 声明并生成有限纯等待类型",
-            implicit_clock_wait,
-            Verdict.TRUE,
-            PureDelayType(1, EndType()),
-            dl_checker=_select_natural_timeout,
-            obligation_rules=("T-ODE-boundary",),
-        ),
-        ConversionScenario(
-            "C08_WAIT_SUGAR_WITH_CONTINUATION",
-            "ODE.wait(d) 的展开可与外层顺序后继组合",
-            Sequence.of(ODE.wait(1), OutputChannel("done", 0)),
-            Verdict.TRUE,
-            PureDelayType(1, OutputType("done", EndType())),
-            theta={"done": integer},
-            dl_checker=_true_dl,
-            obligation_rules=("T-ODE-boundary",),
-        ),
-        ConversionScenario(
             "C09_INTERNAL_CHOICE_WITH_COMMON_TAIL",
-            "三元 (P |~| P'); Q 节点为两个分支保留同一顺序后继",
+            "多元内部选择节点为每个分支保留同一顺序后继",
             InternalChoice(
                 OutputChannel("left", 0),
                 OutputChannel("right", 0),
-                OutputChannel("done", 0),
+                continuation=OutputChannel("done", 0),
             ),
             Verdict.TRUE,
             InternalChoiceType(
@@ -472,7 +455,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N01_ASSERT_FALSE",
-            "不可证明的断言使检查结果为 false",
+            "不可证明的断言使构造结果为 false",
             Assert("x > 0"),
             Verdict.FALSE,
             None,
@@ -534,15 +517,19 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N07_ODE_WITHOUT_DL_BACKEND",
-            "非平凡 ODE 证明缺少后端时返回 unknown",
+            "非平凡 ODE 证明未决时仍生成完整但不可信的候选类型",
             Sequence.of(unknown_ode, Skip()),
             Verdict.UNKNOWN,
-            None,
+            FiniteDelayType(1, NoInterruptType(), EndType()),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             state={"x": 0},
             path="x == 0",
-            diagnostic_contains=("stopped at an unknown premise",),
-            obligation_rules=("T-ODE-safety",),
+            dl_checker=_unknown_dl,
+            diagnostic_contains=(),
+            obligation_rules=(
+                "T-ODE-safety",
+                "T-ODE-boundary",
+            ),
         ),
         ConversionScenario(
             "N08_ODE_VARIABLE_MISSING_FROM_GAMMA",
@@ -642,15 +629,15 @@ def _make_scenario_test(scenario: ConversionScenario):
             f"diagnostics={report.diagnostics}",
         )
         if scenario.expected_type is not None:
-            self.assertIsNotNone(report.inferred_type)
+            self.assertIsNotNone(report.constructed_type)
             self.assertTrue(
-                types_equivalent(report.inferred_type, scenario.expected_type),
-                f"{scenario.case_id}: inferred {report.inferred_type}, "
+                types_equivalent(report.constructed_type, scenario.expected_type),
+                f"{scenario.case_id}: constructed {report.constructed_type}, "
                 f"expected {scenario.expected_type}",
             )
         else:
             self.assertIsNone(
-                report.inferred_type,
+                report.constructed_type,
                 f"{scenario.case_id}: structural failure must not fabricate a type",
             )
         diagnostic_text = "\n".join(item.message for item in report.diagnostics)
@@ -682,7 +669,7 @@ for _scenario in SCENARIOS:
 class ProcessToTypeCoverageTests(unittest.TestCase):
     """验证场景集确实经过每个公开类型规则入口。"""
 
-    # 测试输入：SCENARIOS 和 TypeChecker 当前全部 rule_t_* 方法。
+    # 测试输入：SCENARIOS 和 TypeConstructor 当前全部 rule_t_* 方法。
     # 预期行为：每个已实现类型规则都至少被一个转换场景实际执行。
     # 检查内容：包装规则入口并集中报告没有测试路径的规则名称。
     # 论文对应：防止 Table 2 某条已实现类型规则没有任何自动化测试路径。
@@ -691,10 +678,10 @@ class ProcessToTypeCoverageTests(unittest.TestCase):
 
         rule_names = {
             name
-            for name, value in inspect.getmembers(TypeChecker, inspect.isfunction)
+            for name, value in inspect.getmembers(TypeConstructor, inspect.isfunction)
             if name.startswith("rule_t_")
         }
-        originals = {name: getattr(TypeChecker, name) for name in rule_names}
+        originals = {name: getattr(TypeConstructor, name) for name in rule_names}
         executed: set[str] = set()
 
         def wrapper(name: str):
@@ -712,12 +699,12 @@ class ProcessToTypeCoverageTests(unittest.TestCase):
 
         try:
             for name in rule_names:
-                setattr(TypeChecker, name, wrapper(name))
+                setattr(TypeConstructor, name, wrapper(name))
             for scenario in SCENARIOS:
                 scenario.run()
         finally:
             for name, original in originals.items():
-                setattr(TypeChecker, name, original)
+                setattr(TypeConstructor, name, original)
 
         self.assertEqual(
             executed,
@@ -726,17 +713,17 @@ class ProcessToTypeCoverageTests(unittest.TestCase):
         )
 
 
-class InferenceFailureSeparationTests(unittest.TestCase):
-    """验证内部推导失败、公开 None 与论文正式 ``BottomType`` 的边界。"""
+class ConstructionFailureSeparationTests(unittest.TestCase):
+    """验证内部推导失败与有限 ODE 正常终止候选的边界。"""
 
     # 测试输入：合法 skip 与非法输入的并行报告，以及有限、无中断、无后继的 ODE。
-    # 预期行为：前者按位置报告 (EndType(), None)，后者生成含正式 BottomType 的类型。
-    # 检查内容：失败不产生 bottom/ParallelType，同时合法 Table 2 规则仍可产生正式 bottom。
-    # 论文对应：Section 4.1 的 \bot 是行为类型，只能来自类型规则，不能表示 T-In 失败。
-    def test_failure_is_none_while_formal_bottom_remains_a_type(self) -> None:
-        """同时确认失败标记与论文正式 bottom 在两个方向上都不会混淆。"""
+    # 预期行为：前者按位置报告 (EndType(), None)，后者隐式接续 Skip 并正常终止。
+    # 检查内容：失败不伪造类型，有限 ODE 的构造结果也不含 BottomType。
+    # 论文对应：本项目将有限 ODE 的省略末尾解释为正常过程终止。
+    def test_failure_is_none_and_terminal_ode_uses_normal_end(self) -> None:
+        """同时确认构造失败与有限 ODE 的正常终止均不使用 bottom 占位。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -746,13 +733,9 @@ class InferenceFailureSeparationTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
-        self.assertEqual(report.component_types, (EndType(), None))
-        self.assertFalse(
-            any(isinstance(item, BottomType) for item in report.component_types)
-        )
-
-        formal_bottom_report = check_hcsp(
+        self.assertIsNone(report.constructed_type)
+        self.assertEqual(report.constructed_component_types, (EndType(), None))
+        terminal_ode_report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[
@@ -767,25 +750,25 @@ class InferenceFailureSeparationTests(unittest.TestCase):
             ],
             dl_checker=_true_dl,
         )
-        self.assertEqual(formal_bottom_report.verdict, Verdict.TRUE)
+        self.assertEqual(terminal_ode_report.verdict, Verdict.TRUE)
         self.assertEqual(
-            formal_bottom_report.inferred_type,
-            PureDelayType(1, BottomType()),
+            terminal_ode_report.constructed_type,
+            FiniteDelayType(1, NoInterruptType(), EndType()),
         )
 
 
-class InferenceLayerAnnotationTests(unittest.TestCase):
+class ConstructionLayerAnnotationTests(unittest.TestCase):
     """锁定显式 process/system judgment 求解器的返回类型层次。"""
 
     # 测试输入：统一推导引擎中 process 与 system judgment 求解器的运行时标注。
     # 预期行为：前者返回 ProcessType|失败，后者返回 ConfigurationType|失败。
     # 检查内容：两层共享同一个非行为类型失败分支，且类型层次不会互相流入。
     # 论文对应：Section 4.1 的 T 与 Section 4.2 的 mathcal T 不得在推导入口混用。
-    def test_process_and_system_inference_annotations_are_separated(self) -> None:
+    def test_process_and_system_construction_annotations_are_separated(self) -> None:
         """验证子 judgment 求解结果与 ``P :: T``、``S :: mathcal T`` 一致。"""
 
-        process_hints = get_type_hints(TypeChecker._solve_process_judgment)
-        system_hints = get_type_hints(TypeChecker._solve_system_judgment)
+        process_hints = get_type_hints(TypeConstructor._solve_process_judgment)
+        system_hints = get_type_hints(TypeConstructor._solve_system_judgment)
         process_members = set(get_args(process_hints["return"]))
         system_members = set(get_args(system_hints["return"]))
 
@@ -809,12 +792,12 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
     def test_global_and_local_gamma_reject_container_type_specs(self) -> None:
         """全局和分量局部 Gamma 都不能使用 tuple/list 类型说明。"""
 
-        global_report = check_hcsp(
+        global_report = construct_type(
             gamma={"state": (BasicType.INT, BasicType.REAL)},  # type: ignore[dict-item]
             theta={},
             configurations=[Configuration({}, Skip())],
         )
-        local_report = check_hcsp(
+        local_report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -829,7 +812,7 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
         for report in (global_report, local_report):
             with self.subTest(report=report):
                 self.assertEqual(report.verdict, Verdict.FALSE)
-                self.assertIsNone(report.inferred_type)
+                self.assertIsNone(report.constructed_type)
                 self.assertTrue(
                     any(
                         "Gamma entry must be a BasicType or ContinuousType"
@@ -839,20 +822,20 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
                 )
 
     # 测试输入：Theta 使用带首尾空格的字符串键，配置本身只含 Skip。
-    # 预期行为：公开检查入口返回 false，并报告 Invalid typing environment。
+    # 预期行为：内部构造入口返回 false，并报告 Invalid typing environment。
     # 检查内容：确认非法通道名即使未出现在 process AST 中也会被统一拒绝。
     # 论文对应：Theta 的定义域与 ch?.T/ch!.T 使用同一组通道标识符。
     def test_theta_rejects_non_identifier_channel_name(self) -> None:
         """Theta 的字符串键必须通过统一的 Channel 标识符检查。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={" invalid ": ChannelType(BasicType.INT)},
             configurations=[Configuration({}, Skip())],
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertTrue(
             any(
                 diagnostic.rule == "environment"
@@ -868,12 +851,12 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
     def test_gamma_names_use_the_same_ascii_ident_rule(self) -> None:
         """全局和局部 Gamma 的键必须是原生 ASCII IDENT 字符串。"""
 
-        global_report = check_hcsp(
+        global_report = construct_type(
             gamma={"变量": BasicType.INT},
             theta={},
             configurations=[Configuration({}, Skip())],
         )
-        local_report = check_hcsp(
+        local_report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -888,7 +871,7 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
         for report in (global_report, local_report):
             with self.subTest(report=report):
                 self.assertEqual(report.verdict, Verdict.FALSE)
-                self.assertIsNone(report.inferred_type)
+                self.assertIsNone(report.constructed_type)
                 self.assertTrue(
                     any(
                         "Gamma names" in diagnostic.message

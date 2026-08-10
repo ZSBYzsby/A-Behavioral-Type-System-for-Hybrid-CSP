@@ -4,7 +4,7 @@ r"""Definition 4.1 连续 Gamma 项及 T-ODE 使用边界测试。
 --------
 1. ODE 左端的每个分量仍是普通 ``BasicType.REAL``，``ContinuousType`` 作为
    另一个 Gamma 项独立登记允许出现的演化变量集合；
-2. 非空 ODE 缺少对应向量声明时拒绝，``ODE.wait(d)`` 的空向量无需声明；
+2. 非空 ODE 缺少对应向量声明时拒绝，空 flow ODE 无需声明；
 3. 离散赋值和通信输入只更新 Real 标量，不改写独立 ODE 向量声明；
 4. 未参与 ODE 的 Real 变量不需要任何 ContinuousType 包装；
 5. Gamma 只登记 process 中允许出现的完整 ODE 演化向量，ODE 左侧的真子集
@@ -39,6 +39,7 @@ from hcsp_typechecker._internal import (
     DLFormula,
     EndType,
     EventChoice,
+    InfiniteDelayType,
     InputChannel,
     ODE,
     ODEAnnotation,
@@ -47,7 +48,7 @@ from hcsp_typechecker._internal import (
     Sequence,
     Skip,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 
 
@@ -85,7 +86,7 @@ class ContinuousGammaTests(unittest.TestCase):
             ),
         )
         oscillator = ContinuousType(variables=("x", "v"))
-        report = check_hcsp(
+        report = construct_type(
             gamma={
                 "x": BasicType.REAL,
                 "v": BasicType.REAL,
@@ -101,7 +102,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsNotNone(report.inferred_type)
+        self.assertIsNotNone(report.constructed_type)
         ode_step = next(item for item in report.steps if item.rule == "T-ODE")
         self.assertIn(("x", "Real"), ode_step.gamma)
         self.assertIn(("v", "Real"), ode_step.gamma)
@@ -123,7 +124,7 @@ class ContinuousGammaTests(unittest.TestCase):
             captured.append(obligation)
             return Verdict.TRUE
 
-        report = check_hcsp(
+        report = construct_type(
             gamma=_single_ode_gamma(),
             theta={},
             configurations=[
@@ -158,7 +159,7 @@ class ContinuousGammaTests(unittest.TestCase):
         """ODE 用户左侧与 Gamma 登记向量完全相同时应通过静态检查。"""
 
         trajectory = ContinuousType(variables=("x", "y"))
-        report = check_hcsp(
+        report = construct_type(
             gamma={
                 "x": BasicType.REAL,
                 "y": BasicType.REAL,
@@ -182,7 +183,7 @@ class ContinuousGammaTests(unittest.TestCase):
             item for item in report.obligations if item.rule == "T-ODE-safety"
         )
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsNotNone(report.inferred_type)
+        self.assertIsNotNone(report.constructed_type)
         self.assertIsInstance(safety.formula, DLFormula)
         self.assertIn("123", safety.formula.source)
 
@@ -214,7 +215,7 @@ class ContinuousGammaTests(unittest.TestCase):
                     for name, declaration in gamma.items()
                     if isinstance(declaration, BasicType)
                 }
-                report = check_hcsp(
+                report = construct_type(
                     gamma=gamma,
                     theta={},
                     configurations=[
@@ -230,7 +231,7 @@ class ContinuousGammaTests(unittest.TestCase):
                     dl_checker=_approve_dl,
                 )
                 self.assertEqual(report.verdict, Verdict.FALSE)
-                self.assertIsNone(report.inferred_type)
+                self.assertIsNone(report.constructed_type)
                 self.assertFalse(
                     any(item.rule.startswith("T-ODE-") for item in report.obligations)
                 )
@@ -250,7 +251,7 @@ class ContinuousGammaTests(unittest.TestCase):
         """自动添加的 ODE 局部时钟不得破坏用户演化向量的精确匹配。"""
 
         trajectory = ContinuousType(variables=("x",))
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "x_ode": trajectory},
             theta={},
             configurations=[
@@ -267,7 +268,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsNotNone(report.inferred_type)
+        self.assertIsNotNone(report.constructed_type)
         self.assertFalse(
             any("complete vector" in item.message for item in report.diagnostics)
         )
@@ -296,13 +297,13 @@ class ContinuousGammaTests(unittest.TestCase):
         )
         for gamma, message in cases:
             with self.subTest(message=message):
-                report = check_hcsp(
+                report = construct_type(
                     gamma=gamma,
                     theta={},
                     configurations=[Configuration({}, Skip())],
                 )
                 self.assertEqual(report.verdict, Verdict.FALSE)
-                self.assertIsNone(report.inferred_type)
+                self.assertIsNone(report.constructed_type)
                 self.assertTrue(
                     any(message in item.message for item in report.diagnostics),
                     report.diagnostics,
@@ -323,7 +324,7 @@ class ContinuousGammaTests(unittest.TestCase):
             calls.append(obligation)
             return Verdict.TRUE
 
-        report = check_hcsp(
+        report = construct_type(
             gamma=_single_ode_gamma(),
             theta={},
             configurations=[
@@ -341,7 +342,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertEqual(calls, [])
         self.assertTrue(
             any("Bool" in item.message for item in report.diagnostics),
@@ -363,7 +364,7 @@ class ContinuousGammaTests(unittest.TestCase):
             ),
             annotation=ODEAnnotation(safety="x >= 0", delay=inf),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma=_single_ode_gamma(),
             theta={"tick": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
@@ -372,7 +373,10 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertEqual(report.inferred_type, OutputType("tick", EndType()))
+        self.assertEqual(
+            report.constructed_type,
+            InfiniteDelayType(OutputType("tick", EndType())),
+        )
         assert_obligation = next(
             item for item in report.obligations if item.rule == "T-Assert"
         )
@@ -393,7 +397,7 @@ class ContinuousGammaTests(unittest.TestCase):
             calls.append(obligation)
             return Verdict.TRUE
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL},
             theta={},
             configurations=[
@@ -410,7 +414,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertEqual(calls, [])
         self.assertFalse(
             any(item.rule.startswith("T-ODE-") for item in report.obligations)
@@ -434,7 +438,7 @@ class ContinuousGammaTests(unittest.TestCase):
                 annotation=ODEAnnotation(delay=inf),
             ),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma=_single_ode_gamma(),
             theta={},
             configurations=[Configuration({"x": 2}, process)],
@@ -442,7 +446,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsNotNone(report.inferred_type)
+        self.assertIsNotNone(report.constructed_type)
         self.assertTrue(any(item.rule == "T-Assign" for item in report.steps))
         ode_step = next(item for item in report.steps if item.rule == "T-ODE")
         self.assertIn(("x", "Real"), ode_step.gamma)
@@ -463,7 +467,7 @@ class ContinuousGammaTests(unittest.TestCase):
                 annotation=ODEAnnotation(delay=inf),
             ),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma=_single_ode_gamma(),
             theta={"reset": ChannelType(BasicType.REAL)},
             configurations=[Configuration({}, process)],
@@ -471,7 +475,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsNotNone(report.inferred_type)
+        self.assertIsNotNone(report.constructed_type)
         self.assertTrue(any(item.rule == "T-In" for item in report.steps))
         ode_step = next(item for item in report.steps if item.rule == "T-ODE")
         self.assertIn(("x", "Real"), ode_step.gamma)
@@ -484,7 +488,7 @@ class ContinuousGammaTests(unittest.TestCase):
     def test_real_variable_needs_no_vector_outside_ode(self) -> None:
         """未参与 ODE 的 Real 变量不应被包装成所谓连续值类型。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL},
             theta={"sample": ChannelType(BasicType.REAL)},
             configurations=[Configuration({"x": 1}, OutputChannel("sample", "x"))],
@@ -492,7 +496,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertEqual(report.inferred_type, OutputType("sample", EndType()))
+        self.assertEqual(report.constructed_type, OutputType("sample", EndType()))
 
     # 测试输入：把独立声明键 ode_x 分别用作 state、赋值目标、输入目标和表达式。
     # 预期行为：四种用法都失败；只有声明成员 x 才具有 Real 当前值。
@@ -530,13 +534,13 @@ class ContinuousGammaTests(unittest.TestCase):
         )
         for name, theta, configuration, message in cases:
             with self.subTest(name=name):
-                report = check_hcsp(
+                report = construct_type(
                     gamma=gamma,
                     theta=theta,
                     configurations=[configuration],
                 )
                 self.assertEqual(report.verdict, Verdict.FALSE)
-                self.assertIsNone(report.inferred_type)
+                self.assertIsNone(report.constructed_type)
                 self.assertTrue(
                     any(message in item.message for item in report.diagnostics),
                     report.diagnostics,
@@ -549,7 +553,7 @@ class ContinuousGammaTests(unittest.TestCase):
     def test_parallel_real_values_are_not_grouped_without_ode(self) -> None:
         """没有 ODE 时，多个 Real 标量不会被连续向量语义强行绑定。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "y": BasicType.REAL},
             theta={
                 "left": ChannelType(BasicType.REAL),
@@ -562,7 +566,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsNotNone(report.inferred_type)
+        self.assertIsNotNone(report.constructed_type)
 
     # 测试输入：全局 Gamma 含 x:Real 和 ode_x 向量声明，局部 Gamma 只保留 x。
     # 预期行为：局部 Gamma 未覆盖独立向量声明，T-parallel 拒绝该分区。
@@ -571,7 +575,7 @@ class ContinuousGammaTests(unittest.TestCase):
     def test_local_gamma_cannot_drop_ode_vector_declaration(self) -> None:
         """局部 Gamma 必须显式保留归属本配置的 ODE 向量声明。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma=_single_ode_gamma(),
             theta={},
             configurations=[
@@ -584,7 +588,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertTrue(
             any("do not cover the global Gamma" in item.message for item in report.diagnostics)
         )
@@ -597,7 +601,7 @@ class ContinuousGammaTests(unittest.TestCase):
         """局部 Gamma 可以用不同顺序书写同一个 ODE 成员集合。"""
 
         trajectory = ContinuousType(variables=("x", "y"))
-        report = check_hcsp(
+        report = construct_type(
             gamma={
                 "x": BasicType.REAL,
                 "y": BasicType.REAL,
@@ -618,7 +622,7 @@ class ContinuousGammaTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsNotNone(report.inferred_type)
+        self.assertIsNotNone(report.constructed_type)
         self.assertFalse(
             any("changes global variable types" in item.message for item in report.diagnostics)
         )

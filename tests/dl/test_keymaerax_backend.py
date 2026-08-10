@@ -11,7 +11,7 @@
 3. Python 外层超时和子进程安全调用参数。
 4. legacy/modern 两代 CLI 的受控自动回退及解析错误识别。
 5. 持久产物的逐义务隔离和配置边界。
-6. ``check_hcsp`` 到内建后端的完整 safety/boundary 调用链。
+6. ``construct_type`` 到内建后端的完整 safety/boundary 调用链。
 7. 公开环境变量到可移植后端配置的完整映射。
 8. Java 可执行文件通过标准 ``JAVA_HOME`` 自动发现。
 
@@ -45,7 +45,7 @@ from hcsp_typechecker._internal import (
     Sequence,
     UntranslatedDLFormula,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 
 
@@ -414,7 +414,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
 
     # 测试输入：artifacts_directory 路径已被一个普通文件占用。
     # 预期行为：后端返回 unknown 和目录错误说明，且不启动 Java 进程。
-    # 检查内容：验证文件系统错误不会越过 DLChecker 接口直接抛给 TypeChecker。
+    # 检查内容：验证文件系统错误不会越过 DLChecker 接口直接抛给 TypeConstructor。
     # 论文对应：工具环境故障不构成 dL premise 的真假结论。
     def test_artifact_io_failure_is_returned_as_unknown(self) -> None:
         """持久目录创建失败必须成为保守结果而不是未捕获异常。"""
@@ -505,11 +505,11 @@ class KeYmaeraXBackendTests(unittest.TestCase):
         self.assertIn("proof-search timeout", result.detail)
 
     # 测试输入：带有限 delay/safety 的 ODE#done!0 和显式后端配置。
-    # 预期行为：内部检查入口返回 true，并调用后端两次。
+    # 预期行为：内部构造入口返回 true，并调用后端两次。
     # 检查内容：核对送出的 dL 义务依次是 safety 与 boundary 且均通过。
     # 论文对应：Section 4.3 ODE 规则从进程推导到外部 dL 证明的完整链路。
-    def test_check_hcsp_uses_configured_keymaerax_backend(self) -> None:
-        """内部检查入口应把 ODE safety/boundary 义务一路交给内建后端。"""
+    def test_construct_type_uses_configured_keymaerax_backend(self) -> None:
+        """内部构造入口应把 ODE safety/boundary 义务一路交给内建后端。"""
 
         backend, _obligation = self._fixture(self.runtime)
         process = Sequence.of(
@@ -531,7 +531,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
             "hcsp_typechecker.typechecking.keymaerax.subprocess.run",
             return_value=completed,
         ) as run:
-            report = check_hcsp(
+            report = construct_type(
                 gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
                 theta={"done": ChannelType(BasicType.INT)},
                 path_condition="x >= 0",

@@ -1,10 +1,10 @@
-r"""项目自有 HCSP 语言的行为类型推导器。
+r"""项目自有 HCSP 语言的行为类型构造器（TypeConstructor）。
 
 核心数据流如下：
 
-``TypingJudgment -> ConclusionJudgment -> RuleExpansion(premises, conclude)
+``TypeConstructionRequest -> ConclusionJudgment -> RuleExpansion(premises, conclude)
 -> 按顺序立即判定 FormulaPremise + 递归求解 ChildJudgmentPremise
--> 由 conclude 组合候选类型 -> 汇总三值 CheckReport``。
+-> 由 conclude 组合候选类型 -> 汇总三值 TypeConstructionReport``。
 
 推导与证明现在是完全顺序的：
 
@@ -12,11 +12,14 @@ r"""项目自有 HCSP 语言的行为类型推导器。
    特别地，T-Assign 在赋值前状态中计算右值，并用“旧路径条件 + 更新后的
    symbols”表示惰性最强后置状态；它不会留下一个未知 ``phi'`` 等待搜索。
 2. 统一求解器遇到 FormulaPremise 时当场调用 Z3/KeYmaera X，将已判定
-   ``ProofObligation`` 立即追加到审计记录。只有结果为 ``true`` 才继续下一
-   premise；``false`` 或 ``unknown`` 都会终止当前推导，不再构造候选类型。
-3. 这种顺序性使 ``ODE; skip`` 能分别试用纯通信规则与自然超时规则，
-   根据各自 dL premise 的实时结果选择唯一可行候选。未选候选的公式仍保留
-   供审计，但标记为 inactive，不污染最终 verdict。
+   ``ProofObligation`` 立即追加到审计记录。``false`` 会否证当前规则并终止
+   该分支；``unknown`` 只表示证明尚未完成，推导会继续构造候选类型，最终
+   报告则保留 ``unknown``，明确说明所得类型尚不可信。
+3. 这种顺序性使 ``ODE; skip`` 能分别试用纯通信规则与自然超时规则。
+   已证明候选优先；若非等价的另一候选仍未决，或者全部候选都未决，选择器
+   会返回一个可审计的暂定类型并报告 ``unknown``。未选候选的公式仍保留但
+   标记为 inactive，不直接污染所选推导的 verdict；候选唯一性问题由专门诊断
+   记录。两条已证明规则若产生非等价类型，仍报告规则歧义而不返回类型。
 
 这不是把 Python 的递归调用直接当作论文推导树。每条 ``rule_t_*`` 规则只分析
 横线下方的结论 judgment，并显式返回横线上方的 premises；统一求解器按顺序
@@ -24,17 +27,17 @@ r"""项目自有 HCSP 语言的行为类型推导器。
 函数组合子结论。配置、系统、顺序进程和事件反应分别有自己的 judgment 类，
 因此其结果层次也不会混淆。
 
-Table 2 的 T-\sqcup 在项目的规范三元 Process AST 上写成以下带公共后继的
+Table 2 的 T-\sqcup 在项目的规范多元 Process AST 上写成以下带公共后继的
 算法化形式：
 
-``P;Q :: T,  P';Q :: T'  /  (P \sqcup P');Q :: T \sqcup T'``  [T-\sqcup]。
+``P_i;Q :: T_i (i in I)  /  (\bigsqcup_i P_i);Q :: \bigsqcup_i T_i``  [T-\sqcup]。
 
-该规则直接匹配 ``InternalChoice(P, P', Q)``。省略第三个构造实参时，Q 会
-缺省为 ``Skip()``，因此 AST 中没有独立的二元选择节点。规则把同一 Q 分别加到
-左右子 judgment，但运行时仍只会执行被选中的一条分支；这也不需要定义
+该规则直接匹配 ``InternalChoice(P_1, ..., P_n, continuation=Q)``。省略公共
+后继时 Q 缺省为 ``Skip()``。规则把同一 Q 分别加到每个子 judgment，但运行时仍
+只会执行被选中的一条分支；这也不需要定义
 通用的类型级 T-Seq。
 
-检查器只接受 :mod:`hcsp_typechecker.process.ast` 中定义的节点，并使用明确的
+类型构造器只接受 :mod:`hcsp_typechecker.process.ast` 中定义的节点，并使用明确的
 ``isinstance`` 分派。外部对象不会因拥有同名字段而被隐式解释为 HCSP。
 """
 
@@ -90,37 +93,36 @@ from .logic import (
 from .keymaerax import KeYmaeraXBackend, KeYmaeraXConfig
 from ..type_system.ast import (
     AngelicType,
-    BottomType,
-    CommunicationTimeoutType,
     ConfigurationType,
-    EndType,
+    EmptyType,
     ExternalChoiceType,
+    FiniteDelayType,
+    InfiniteDelayType,
     InputType,
     InternalChoiceType,
     MuType,
+    NoInterruptType,
     OutputType,
     ParallelType,
     ProcessType,
-    PureDelayType,
-    TimedExternalChoiceType,
     TypeVar,
     make_external_choice,
-    make_timed_type,
+    make_delay_type,
     types_equivalent,
 )
 from .model import (
     BasicType,
     ChannelType,
-    CheckReport,
+    TypeConstructionReport,
     Configuration,
     ContinuousType,
     DLChecker,
     DLCheckResult,
     Diagnostic,
-    InferenceStep,
+    DerivationStep,
     ParameterEnvironment,
     ProofObligation,
-    TypingJudgment,
+    TypeConstructionRequest,
     Verdict,
     GammaType,
     gamma_value_type,
@@ -344,10 +346,10 @@ class _RuleExpansion:
 
 
 @dataclass(frozen=True)
-class _InferenceFailure:
+class _ConstructionFailure:
     r"""表示某个进程片段无法按 Table 2 构造行为类型。
 
-    这是检查器内部的控制状态，不继承 ``BehavioralType``，也不会进入正式的
+    这是类型构造器内部的控制状态，不继承 ``BehavioralType``，也不会进入正式的
     type AST。这样论文中的 ``BottomType``/``\bot`` 就不会再与实现错误、非法
     输入或缺失环境声明混为一谈。
     """
@@ -355,9 +357,9 @@ class _InferenceFailure:
 
 # 所有递归类型规则都返回正式行为类型或内部失败标记。失败标记使用单例，便于
 # 组合规则用身份判断直接向外传播，而不构造含有伪造 ``BottomType`` 的父节点。
-_INFERENCE_FAILURE = _InferenceFailure()
-_ProcessInferenceResult = ProcessType | _InferenceFailure
-_ConfigurationInferenceResult = ConfigurationType | _InferenceFailure
+_CONSTRUCTION_FAILURE = _ConstructionFailure()
+_ProcessConstructionResult = ProcessType | _ConstructionFailure
+_ConfigurationConstructionResult = ConfigurationType | _ConstructionFailure
 
 
 @dataclass(frozen=True)
@@ -365,17 +367,17 @@ class _ODECandidateAttempt:
     """一次 ODE 候选规则的隔离执行结果。"""
 
     mode: _ODETypeRule
-    result: _ProcessInferenceResult
+    result: _ProcessConstructionResult
     verdict: Verdict
     obligations: tuple[ProofObligation, ...]
     diagnostics: tuple[Diagnostic, ...]
-    steps: tuple[InferenceStep, ...]
+    steps: tuple[DerivationStep, ...]
 
 
-class TypeChecker:
+class TypeConstructor:
     """按论文 Table 2 构造并验证 HCSP 行为类型。
 
-    实例可重复调用 ``check``；每次调用都会清空上次报告。ODE 的 safety/delay
+    实例可重复调用 ``construct``；每次调用都会清空上次报告。ODE 的 safety/delay
     直接来自 AST 中唯一的 ``ODEAnnotation``，动态逻辑义务可委托
     ``dl_checker`` 外部后端。非项目 AST 会产生结构诊断，不参与兼容性推断。
     """
@@ -405,18 +407,23 @@ class TypeChecker:
         self.proof_engine = Z3ProofEngine(z3_timeout_ms)
         self.obligations: list[ProofObligation] = []
         self.diagnostics: list[Diagnostic] = []
-        self.steps: list[InferenceStep] = []
+        self.steps: list[DerivationStep] = []
         self._fresh_counter = 0
         self._type_var_counter = 0
 
-    def check(self, judgment: TypingJudgment) -> CheckReport:
-        """执行一次完整判断并返回含全部证据的三值报告。
+    def construct(
+        self,
+        request: TypeConstructionRequest,
+    ) -> TypeConstructionReport:
+        """执行一次完整类型构造并返回含全部证据的三值报告。
 
-        普通建模/类型错误会转换为 ``Diagnostic(FALSE)``。推导一旦遇到
-        ``FALSE`` 或 ``UNKNOWN`` 前提就停止，不再为未验证后继构造正式类型；
-        返回报告仍保留停止点以前的推导步骤、证明义务和部分分量结果。
+        普通建模/类型错误会转换为 ``Diagnostic(FALSE)``。``FALSE`` 前提会
+        否证当前规则并停止相应推导分支；``UNKNOWN`` 证明结果会被完整记录，
+        但不会阻止后续规则继续构造类型。因而报告可能同时包含非空
+        ``constructed_type`` 和 ``UNKNOWN`` verdict：这表示“推导完成，但至少一条
+        必要公式尚未证明”，该类型不能作为可信结论使用。
         """
-        # TypeChecker 实例可复用，但报告和新鲜名计数必须按检查请求隔离。
+        # TypeConstructor 实例可复用，但报告和新鲜名计数必须按构造请求隔离。
         self.obligations = []
         self.diagnostics = []
         self.steps = []
@@ -427,7 +434,7 @@ class TypeChecker:
         try:
             invalid_gamma_names = {
                 repr(name)
-                for name in judgment.gamma
+                for name in request.gamma
                 if not is_hcsp_identifier(name)
             }
             if invalid_gamma_names:
@@ -437,12 +444,12 @@ class TypeChecker:
                 )
             gamma = {
                 name: normalize_gamma_type(value, subject="Gamma entry")
-                for name, value in judgment.gamma.items()
+                for name, value in request.gamma.items()
             }
             self._validate_continuous_vectors(gamma)
             invalid_parameter_names = {
                 repr(name)
-                for name in judgment.parameters.declarations
+                for name in request.parameters.declarations
                 if not is_hcsp_identifier(name)
             }
             if invalid_parameter_names:
@@ -455,7 +462,7 @@ class TypeChecker:
                     value,
                     subject="Parameter declaration",
                 )
-                for name, value in judgment.parameters.declarations.items()
+                for name, value in request.parameters.declarations.items()
             }
             shared_names = set(gamma) & set(parameters)
             if shared_names:
@@ -465,7 +472,7 @@ class TypeChecker:
                 )
             theta = {
                 self._channel_name(name): normalize_channel_type(value)
-                for name, value in judgment.theta.items()
+                for name, value in request.theta.items()
             }
         except (TypeError, ValueError) as exc:
             self._diagnose(Verdict.FALSE, f"Invalid typing environment: {exc}", "environment")
@@ -481,7 +488,7 @@ class TypeChecker:
             for name, value_type in parameters.items():
                 parameter_translator.symbol(name, value_type)
             parameter_constraint_result = parameter_translator.boolean_result(
-                judgment.parameters.constraint
+                request.parameters.constraint
             )
             parameter_condition = conjunction(
                 self._defined_term(parameter_constraint_result),
@@ -505,7 +512,7 @@ class TypeChecker:
         parameter_verdict, parameter_detail = self.proof_engine.satisfiable(
             parameter_condition
         )
-        if parameter_verdict is not Verdict.TRUE:
+        if parameter_verdict is Verdict.FALSE:
             self._diagnose(
                 parameter_verdict,
                 "Shared parameter constraint must be satisfiable: "
@@ -513,6 +520,17 @@ class TypeChecker:
                 "parameters",
             )
             return self._report(None, ())
+        if parameter_verdict is Verdict.UNKNOWN:
+            # 不可满足会让所有后续蕴含式真空成立，必须立即拒绝；求解器未能决定
+            # 可满足性却不等于已经发现矛盾。保留符号约束继续推导，并让最终
+            # UNKNOWN 诊断明确降低候选类型的可信度。
+            self._diagnose(
+                Verdict.UNKNOWN,
+                "Shared parameter constraint satisfiability is unknown; "
+                "type construction continues, but the constructed type is untrusted: "
+                + parameter_detail,
+                "parameters",
+            )
 
         environment_step = self._start_step(
             "environment",
@@ -520,73 +538,70 @@ class TypeChecker:
             "规范化类型环境 Gamma 与 Theta",
             gamma=gamma,
             parameters=parameters,
-            parameter_constraint=judgment.parameters.constraint,
+            parameter_constraint=request.parameters.constraint,
             theta=theta,
-            path=judgment.path_condition,
+            path=request.path_condition,
         )
         self._finish_step(
             environment_step,
-            "环境规范化成功",
-            "后续规则统一使用这里展示的基础类型和通道 refinement type。",
+            (
+                "环境规范化完成；参数约束可满足性未决"
+                if parameter_verdict is Verdict.UNKNOWN
+                else "环境规范化成功"
+            ),
+            (
+                "后续规则统一使用这里展示的基础类型和通道 refinement type。"
+                + (
+                    " 参数约束未被判定为不可满足，因此继续符号推导；"
+                    "最终类型保持 UNKNOWN、不可信。"
+                    if parameter_verdict is Verdict.UNKNOWN
+                    else ""
+                )
+            ),
         )
 
-        if not judgment.configurations:
-            self._diagnose(Verdict.FALSE, "A judgment needs at least one configuration", "T-||")
+        if not request.configurations:
+            self._diagnose(
+                Verdict.FALSE,
+                "A construction request needs at least one configuration",
+                "T-||",
+            )
             return self._report(None, ())
 
         # 即使只有一个配置也经 T-|| 入口处理，以保持 Gamma 分区和 T-sigma 一致。
         parallel_expansion = self.rule_t_parallel(
-            judgment.configurations,
+            request.configurations,
             gamma,
             theta,
-            judgment.path_condition,
+            request.path_condition,
             parameters,
             parameter_symbols,
             parameter_condition,
-            judgment.parameters.constraint,
+            request.parameters.constraint,
         )
-        raw_component_types = self._solve_rule_expansion(parallel_expansion)
+        raw_constructed_component_types = self._solve_rule_expansion(
+            parallel_expansion
+        )
         # 内部失败状态绝不暴露为行为类型；公开报告用 None 保留失败分量的位置。
-        component_types: tuple[ConfigurationType | None, ...] = tuple(
-            None if isinstance(item, _InferenceFailure) else item
-            for item in raw_component_types
+        constructed_component_types: tuple[ConfigurationType | None, ...] = tuple(
+            None if isinstance(item, _ConstructionFailure) else item
+            for item in raw_constructed_component_types
         )
         successful_components = tuple(
-            item for item in component_types if item is not None
+            item for item in constructed_component_types if item is not None
         )
-        inferred: ConfigurationType | None
-        if not component_types or len(successful_components) != len(component_types):
-            inferred = None
+        constructed: ConfigurationType | None
+        if (
+            not constructed_component_types
+            or len(successful_components) != len(constructed_component_types)
+        ):
+            constructed = None
         elif len(successful_components) == 1:
-            inferred = successful_components[0]
+            constructed = successful_components[0]
         else:
-            inferred = ParallelType(successful_components)
+            constructed = ParallelType(successful_components)
 
-        # expected_types 是独立的结果断言，不参与推导，防止“按答案反推类型”。
-        if judgment.expected_types is not None:
-            if len(judgment.expected_types) != len(component_types):
-                self._diagnose(
-                    Verdict.FALSE,
-                    "Expected type list length does not match the number of configurations",
-                    "type-equality",
-                )
-            else:
-                for index, (actual, expected) in enumerate(
-                    zip(component_types, judgment.expected_types), start=1
-                ):
-                    # 该分量的具体失败原因已经由产生失败标记的规则记录；这里不能
-                    # 再拿 None 与正式类型做“类型不等”比较，也不能伪造 bottom。
-                    if actual is None:
-                        continue
-                    if not types_equivalent(actual, expected):
-                        self._diagnose(
-                            Verdict.FALSE,
-                            f"Configuration {index} inferred {actual}, expected {expected}",
-                            "type-equality",
-                            f"K{index}",
-                        )
-
-        return self._report(inferred, component_types)
+        return self._report(constructed, constructed_component_types)
 
     # ------------------------------------------------------------------
     # Configuration and parallel rules
@@ -755,7 +770,7 @@ class TypeChecker:
 
         # ``path_condition`` 是默认路径，不是第二套可与局部路径并存的结论。
         # 全部局部路径存在时，外层 true 表示“由局部合取生成”；部分覆盖或同时
-        # 给出非平凡全局路径都会使同一个 TypingJudgment 含义不唯一。
+        # 给出非平凡全局路径都会使同一个 TypeConstructionRequest 含义不唯一。
         local_path_flags = tuple(
             configuration.path_condition is not None
             for configuration in configurations
@@ -812,16 +827,16 @@ class TypeChecker:
 
         validity = tuple(valid_component_gammas)
 
-        def conclude(children: tuple[Any, ...]) -> list[_ConfigurationInferenceResult]:
+        def conclude(children: tuple[Any, ...]) -> list[_ConfigurationConstructionResult]:
             """把有效配置子结论放回原分量位置并完成顶层 T-|| 轨迹。"""
 
             child_iterator = iter(children)
-            types: list[_ConfigurationInferenceResult] = [
-                next(child_iterator) if valid else _INFERENCE_FAILURE
+            types: list[_ConfigurationConstructionResult] = [
+                next(child_iterator) if valid else _CONSTRUCTION_FAILURE
                 for valid in validity
             ]
             readable_types = ", ".join(
-                "(failed)" if isinstance(item, _InferenceFailure) else str(item)
+                "(failed)" if isinstance(item, _ConstructionFailure) else str(item)
                 for item in types
             )
             self._finish_step(
@@ -852,7 +867,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-sigma",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         assigned_parameters = set(judgment.state) & set(context.parameters)
         if assigned_parameters:
@@ -866,7 +881,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-sigma",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         value_gamma = self._value_gamma(context.gamma)
         undeclared_state_variables = set(judgment.state) - set(value_gamma)
@@ -886,7 +901,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-sigma",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         # 论文配置叶子严格是 (sigma, P)，而不是 (sigma, S1 || S2)。项目仍为
         # 最常见的无状态协议保留 ``Configuration({}, Parallel(...))`` 便捷写法：
@@ -908,7 +923,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-sigma",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         state_premise = self._state_premise(
             "T-sigma",
@@ -941,26 +956,27 @@ class TypeChecker:
     ) -> Any:
         """按写出顺序求解一条规则的全部 premises。
 
-        公式 premise 只有判为 ``true`` 才能继续；``false`` 表示前提已被反例
-        否证，``unknown`` 表示当前工具尚不能建立该前提，二者都不足以形成一棵
-        完整推导树。因此本方法立即返回内部失败标记，并保留停止点之前已经记录
-        的证明义务和步骤。子 judgment 失败时同样不再执行后续兄弟 premise；
-        仅用失败占位补齐 ``conclude`` 所需的子结论形状，使顶层并行报告仍能
-        显示停止点之前已经完成的配置分量，而不会构造父行为类型。
+        ``false`` 表示公式前提已被反例否证，会立即返回内部失败标记；
+        ``unknown`` 仅表示当前证明器尚不能建立该前提，证明义务已经记录后仍会
+        继续求解剩余 premise，并允许 ``conclude`` 构造候选类型。最终报告通过
+        UNKNOWN verdict 告知调用者该类型尚不可信。子 judgment 的结构/静态
+        失败仍会停止后续兄弟 premise；此时仅用失败占位补齐 ``conclude`` 所需
+        的子结论形状，使顶层并行报告能显示此前完成的配置分量，而不会构造
+        含错误子树的父行为类型。
         """
 
         child_results: list[Any] = []
         for index, premise in enumerate(expansion.premises):
             if isinstance(premise, _FormulaPremise):
                 decided = self._decide_proof(premise.request)
-                if decided.verdict != Verdict.TRUE:
-                    return _INFERENCE_FAILURE
+                if decided.verdict is Verdict.FALSE:
+                    return _CONSTRUCTION_FAILURE
             elif isinstance(premise, _ChildJudgmentPremise):
                 child_result = self._solve_child_judgment(premise.judgment)
                 child_results.append(child_result)
-                if isinstance(child_result, _InferenceFailure):
+                if isinstance(child_result, _ConstructionFailure):
                     child_results.extend(
-                        _INFERENCE_FAILURE
+                        _CONSTRUCTION_FAILURE
                         for remaining in expansion.premises[index + 1 :]
                         if isinstance(remaining, _ChildJudgmentPremise)
                     )
@@ -988,7 +1004,7 @@ class TypeChecker:
     def _solve_configuration_judgment(
         self,
         judgment: _ConfigurationJudgment,
-    ) -> _ConfigurationInferenceResult:
+    ) -> _ConfigurationConstructionResult:
         """求解 ``<sigma,S>``；[T-sigma] 本身只负责产生 premises。"""
 
         context = judgment.context
@@ -1002,7 +1018,7 @@ class TypeChecker:
         result = self._solve_rule_expansion(expansion)
         result_text = (
             "推导失败，未构造正式配置类型"
-            if isinstance(result, _InferenceFailure)
+            if isinstance(result, _ConstructionFailure)
             else f"状态前提已当场判定；候选类型 = {result}"
         )
         self._finish_step(
@@ -1015,7 +1031,7 @@ class TypeChecker:
     def _solve_system_judgment(
         self,
         judgment: _SystemJudgment,
-    ) -> _ConfigurationInferenceResult:
+    ) -> _ConfigurationConstructionResult:
         """按 ``S ::= P | S || S'`` 求解显式系统 judgment。"""
 
         system = judgment.system
@@ -1025,7 +1041,7 @@ class TypeChecker:
                 _ProcessJudgment(
                     tuple(self._as_nodes(system)),
                     context,
-                    EndType(),
+                    EmptyType(),
                 )
             )
         if isinstance(system, Parallel):
@@ -1037,12 +1053,12 @@ class TypeChecker:
             "structural",
             context.location,
         )
-        return _INFERENCE_FAILURE
+        return _CONSTRUCTION_FAILURE
 
     def _solve_process_judgment(
         self,
         judgment: _ProcessJudgment,
-    ) -> _ProcessInferenceResult:
+    ) -> _ProcessConstructionResult:
         """展开并求解一个顺序进程 judgment。"""
 
         nodes = judgment.nodes
@@ -1064,10 +1080,6 @@ class TypeChecker:
             return result
 
         head = nodes[0]
-        if isinstance(head, ODE) and self._needs_ode_skip_rule_selection(
-            judgment
-        ):
-            return self._solve_ode_skip_rule_candidates(judgment)
 
         # Table 2 严格区分终端 ``skip`` 的 T-End 与中间 ``skip # P`` 的
         # T-Skip。空 nodes 则是 ch!/assert/assign 等前缀剥离后隐含的终端 skip。
@@ -1116,12 +1128,12 @@ class TypeChecker:
             expansion = _RuleExpansion(
                 "structural",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
 
         result = self._solve_rule_expansion(expansion)
 
-        if isinstance(result, _InferenceFailure):
+        if isinstance(result, _ConstructionFailure):
             result_text = "推导失败，未构造正式行为类型"
         else:
             result_text = f"候选类型 = {result}"
@@ -1188,7 +1200,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-Assert",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         premises.append(
             self._process_premise(
@@ -1249,7 +1261,7 @@ class TypeChecker:
                 return _RuleExpansion(
                     "T-Assign",
                     (),
-                    lambda _children: _INFERENCE_FAILURE,
+                    lambda _children: _CONSTRUCTION_FAILURE,
                 )
             definedness = self._definedness_premise(
                 "T-Assign",
@@ -1285,7 +1297,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-Assign",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         premises.append(
             self._process_premise(
@@ -1323,7 +1335,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-If",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
 
         then_context.path = conjunction(context.path, guard_result.term)
@@ -1350,15 +1362,15 @@ class TypeChecker:
             ),
         ))
 
-        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
+        def conclude(children: tuple[Any, ...]) -> _ProcessConstructionResult:
             """把 then/else 两个子类型组合成内部选择类型。"""
 
             then_type, else_type = children
-            if isinstance(then_type, _InferenceFailure) or isinstance(
+            if isinstance(then_type, _ConstructionFailure) or isinstance(
                 else_type,
-                _InferenceFailure,
+                _ConstructionFailure,
             ):
-                return _INFERENCE_FAILURE
+                return _CONSTRUCTION_FAILURE
             return InternalChoiceType((then_type, else_type))
 
         return _RuleExpansion("T-If", tuple(premises), conclude)
@@ -1386,7 +1398,7 @@ class TypeChecker:
                 "T-In",
                 context.location,
             )
-            return _RuleExpansion("T-In", (), lambda _children: _INFERENCE_FAILURE)
+            return _RuleExpansion("T-In", (), lambda _children: _CONSTRUCTION_FAILURE)
 
         if len(node.targets) != channel_type.arity:
             self._diagnose(
@@ -1396,7 +1408,7 @@ class TypeChecker:
                 "T-In",
                 context.location,
             )
-            return _RuleExpansion("T-In", (), lambda _children: _INFERENCE_FAILURE)
+            return _RuleExpansion("T-In", (), lambda _children: _CONSTRUCTION_FAILURE)
 
         # 输入建立一个带新接收值的顺序后继上下文；兄弟分支仍保留原上下文。
         next_context = context.clone()
@@ -1441,7 +1453,7 @@ class TypeChecker:
                 return _RuleExpansion(
                     "T-In",
                     (),
-                    lambda _children: _INFERENCE_FAILURE,
+                    lambda _children: _CONSTRUCTION_FAILURE,
                 )
 
             for variable, value_type in zip(
@@ -1483,7 +1495,7 @@ class TypeChecker:
             )
         except ExpressionError as exc:
             self._diagnose(Verdict.FALSE, str(exc), "T-In", context.location)
-            return _RuleExpansion("T-In", (), lambda _children: _INFERENCE_FAILURE)
+            return _RuleExpansion("T-In", (), lambda _children: _CONSTRUCTION_FAILURE)
 
         premise = self._process_premise(
             judgment.nodes[1:],
@@ -1491,12 +1503,12 @@ class TypeChecker:
             judgment.terminal,
         )
 
-        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
+        def conclude(children: tuple[Any, ...]) -> _ProcessConstructionResult:
             """在已求得的 continuation 外层添加输入通信前缀。"""
 
             continuation = children[0]
-            if isinstance(continuation, _InferenceFailure):
-                return _INFERENCE_FAILURE
+            if isinstance(continuation, _ConstructionFailure):
+                return _CONSTRUCTION_FAILURE
             return InputType(channel, continuation)
 
         return _RuleExpansion("T-In", (premise,), conclude)
@@ -1524,7 +1536,7 @@ class TypeChecker:
                 "T-Out",
                 context.location,
             )
-            return _RuleExpansion("T-Out", (), lambda _children: _INFERENCE_FAILURE)
+            return _RuleExpansion("T-Out", (), lambda _children: _CONSTRUCTION_FAILURE)
 
         if len(node.payloads) != channel_type.arity:
             self._diagnose(
@@ -1534,7 +1546,7 @@ class TypeChecker:
                 "T-Out",
                 context.location,
             )
-            return _RuleExpansion("T-Out", (), lambda _children: _INFERENCE_FAILURE)
+            return _RuleExpansion("T-Out", (), lambda _children: _CONSTRUCTION_FAILURE)
 
         premises: list[_Premise] = []
         try:
@@ -1561,7 +1573,7 @@ class TypeChecker:
                 return _RuleExpansion(
                     "T-Out",
                     (),
-                    lambda _children: _INFERENCE_FAILURE,
+                    lambda _children: _CONSTRUCTION_FAILURE,
                 )
             refinement = translator.refinement_result(
                 channel_type,
@@ -1584,7 +1596,7 @@ class TypeChecker:
             )
         except ExpressionError as exc:
             self._diagnose(Verdict.FALSE, str(exc), "T-Out", context.location)
-            return _RuleExpansion("T-Out", (), lambda _children: _INFERENCE_FAILURE)
+            return _RuleExpansion("T-Out", (), lambda _children: _CONSTRUCTION_FAILURE)
 
         premises.append(
             self._process_premise(
@@ -1594,12 +1606,12 @@ class TypeChecker:
             )
         )
 
-        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
+        def conclude(children: tuple[Any, ...]) -> _ProcessConstructionResult:
             """在已求得的 continuation 外层添加输出通信前缀。"""
 
             continuation = children[0]
-            if isinstance(continuation, _InferenceFailure):
-                return _INFERENCE_FAILURE
+            if isinstance(continuation, _ConstructionFailure):
+                return _CONSTRUCTION_FAILURE
             return OutputType(channel, continuation)
 
         return _RuleExpansion("T-Out", tuple(premises), conclude)
@@ -1608,45 +1620,33 @@ class TypeChecker:
         self,
         judgment: _ProcessJudgment,
     ) -> _RuleExpansion:
-        r"""[T-sqcup] 分别检查三元内部选择的左右完整行为。
+        r"""[T-sqcup] 分别检查多元内部选择各分支的完整行为。
 
-        将节点的显式 ``continuation`` 同时加到左右子 judgment，得到
-        ``P;Q`` 与 ``P';Q`` 的类型后组合为 ``T \sqcup T'``。省略第三个实参时 Q
+        将节点的显式 ``continuation`` 同时加到每个子 judgment，得到所有
+        ``P_i;Q`` 的类型后组合为 ``T_1 \sqcup ... \sqcup T_n``。省略公共后继时 Q
         已由 AST 构造器缺省为 ``Skip()``。规则只共享推导上的后继，不表示
-        运行时同时执行两个分支。
+        运行时同时执行全部分支。
         """
 
         node = judgment.nodes[0]
         # 规范 AST 中当前选择自己持有 Q；``judgment.nodes[1:]`` 是从外层
-        # judgment 传入的合法顺序尾，例如当前节点作为另一个选择的嵌套分支。
-        # 两部分都必须依次附加到左右分支，才能得到完整的 P;Q 与 P';Q。
+        # judgment 传入的合法顺序尾。两部分都必须依次附加到每个分支。
         tail = tuple(self._as_nodes(node.continuation)) + judgment.nodes[1:]
         context = judgment.context
-        left_context = context.clone(location=f"{context.location}.choice.left")
-        right_context = context.clone(location=f"{context.location}.choice.right")
-        premises = (
+        premises = tuple(
             self._process_premise(
-                tuple(self._as_nodes(node.left)) + tail,
-                left_context,
+                tuple(self._as_nodes(branch)) + tail,
+                context.clone(location=f"{context.location}.choice[{index}]"),
                 judgment.terminal,
-            ),
-            self._process_premise(
-                tuple(self._as_nodes(node.right)) + tail,
-                right_context,
-                judgment.terminal,
-            ),
+            )
+            for index, branch in enumerate(node.branches)
         )
 
-        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
-            """把左右两个子类型组合成内部非确定选择类型。"""
-
-            left_type, right_type = children
-            if isinstance(left_type, _InferenceFailure) or isinstance(
-                right_type,
-                _InferenceFailure,
-            ):
-                return _INFERENCE_FAILURE
-            return InternalChoiceType((left_type, right_type))
+        def conclude(children: tuple[Any, ...]) -> _ProcessConstructionResult:
+            """把全部分支子类型组合成内部非确定选择类型。"""
+            if any(isinstance(child, _ConstructionFailure) for child in children):
+                return _CONSTRUCTION_FAILURE
+            return InternalChoiceType(children)
 
         return _RuleExpansion("T-sqcup", premises, conclude)
 
@@ -1654,7 +1654,7 @@ class TypeChecker:
         self,
         judgment: _EventJudgment,
     ) -> _RuleExpansion:
-        """[T-&] 把事件反应展开为当前通信分支与剩余反应两个子 judgment。
+        """[T-&] 把多元事件反应展开为每个通信分支的子 judgment。
 
         ``EventChoice`` 的构造器已经保证每个分支由输入或输出守卫。论文语法
         没有要求通道名前缀唯一，因此重复前缀仍按不同分支保留。
@@ -1666,7 +1666,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-&",
                 (),
-                lambda _children: EndType(),
+                lambda _children: NoInterruptType(),
             )
         if not isinstance(node, EventChoice):
             raise TypeError(
@@ -1674,64 +1674,37 @@ class TypeChecker:
                 f"{type(node).__name__}"
             )
 
-        branch_context = context.clone(location=f"{context.location}.external")
-        alternative_context = context.clone(
-            location=f"{context.location}.alternative"
-        )
-        premises = (
+        premises = tuple(
             self._process_premise(
-                (node.communication,)
-                + tuple(self._as_nodes(node.continuation))
+                (communication,)
+                + tuple(self._as_nodes(continuation))
                 + judgment.tail,
-                branch_context,
+                context.clone(location=f"{context.location}.external[{index}]"),
                 judgment.terminal,
-            ),
-            _ChildJudgmentPremise(
-                _EventJudgment(
-                    node.alternative,
-                    judgment.tail,
-                    alternative_context,
-                    judgment.terminal,
-                )
-            ),
+            )
+            for index, (communication, continuation) in enumerate(node.branches)
         )
 
-        def conclude(children: tuple[Any, ...]) -> AngelicType | _InferenceFailure:
-            """把当前通信分支与递归得到的剩余分支合成 angelic type。"""
-
-            branch_type, alternative_type = children
-            if isinstance(branch_type, _InferenceFailure) or isinstance(
-                alternative_type,
-                _InferenceFailure,
-            ):
-                return _INFERENCE_FAILURE
-            if not isinstance(branch_type, (InputType, OutputType)):
+        def conclude(children: tuple[Any, ...]) -> AngelicType | _ConstructionFailure:
+            """把全部通信分支合成规范 angelic type。"""
+            if any(isinstance(child, _ConstructionFailure) for child in children):
+                return _CONSTRUCTION_FAILURE
+            if not all(isinstance(child, (InputType, OutputType)) for child in children):
                 self._diagnose(
                     Verdict.FALSE,
-                    f"External branch did not infer a communication prefix: {branch_type}",
+                    "External branch did not construct a communication prefix",
                     "T-&",
-                    branch_context.location,
+                    context.location,
                 )
-                return _INFERENCE_FAILURE
-            if isinstance(alternative_type, EndType):
-                return branch_type
-            if isinstance(alternative_type, (InputType, OutputType)):
-                return make_external_choice((branch_type, alternative_type))
-            if isinstance(alternative_type, ExternalChoiceType):
-                return make_external_choice(
-                    (branch_type, *alternative_type.branches)
-                )
-            raise TypeError(
-                "External choice recursion produced an unsupported angelic type: "
-                f"{type(alternative_type).__name__}"
-            )
+                return _CONSTRUCTION_FAILURE
+            return make_external_choice(children)
 
         return _RuleExpansion("T-&", premises, conclude)
 
     def _solve_event_judgment(
         self,
         judgment: _EventJudgment,
-    ) -> AngelicType | _InferenceFailure:
+    ) -> AngelicType | _ConstructionFailure:
         """求解一个显式事件反应 judgment，并记录其 premises 与结果。"""
 
         node = judgment.reaction
@@ -1742,9 +1715,7 @@ class TypeChecker:
             (
                 "empty event reaction"
                 if isinstance(node, EmptyEvent)
-                else "事件分支 "
-                + self._describe_process_node(node.communication)
-                + " -> P"
+                else f"事件分支表（{len(node.branches)} 个通信分支）"
                 if isinstance(node, EventChoice)
                 else repr(node)
             ),
@@ -1752,7 +1723,7 @@ class TypeChecker:
         )
         expansion = self.rule_t_external_choice(judgment)
         result = self._solve_rule_expansion(expansion)
-        if isinstance(result, _InferenceFailure):
+        if isinstance(result, _ConstructionFailure):
             result_text = "推导失败，事件反应没有正式 angelic type"
         elif isinstance(node, EmptyEvent):
             result_text = f"事件选择递归结束 = {result}"
@@ -1809,7 +1780,7 @@ class TypeChecker:
             candidate_step,
             (
                 "候选未构造正式类型"
-                if isinstance(result, _InferenceFailure)
+                if isinstance(result, _ConstructionFailure)
                 else f"候选类型 = {result}"
             ),
             self._premise_summary(expansion),
@@ -1825,11 +1796,12 @@ class TypeChecker:
         verdict_inputs = [item.verdict for item in obligations]
         verdict_inputs.extend(item.verdict for item in diagnostics)
         if (
-            isinstance(result, _InferenceFailure)
-            and all(item == Verdict.TRUE for item in verdict_inputs)
+            isinstance(result, _ConstructionFailure)
+            and Verdict.FALSE not in verdict_inputs
         ):
-            # 没有公式/诊断解释的结构失败仍必须按 false 处理；若已有 UNKNOWN，
-            # 则失败正是“证明未决导致停止”，不能错误降格成 FALSE。
+            # UNKNOWN 已不再使规则求解停止。因此候选仍返回失败标记时，必然还
+            # 存在一个公式结论之外的结构/静态失败；即使此前也记录了 UNKNOWN，
+            # 该候选仍应按 FALSE 排除，而不能伪装成“只有证明尚未完成”。
             verdict_inputs.append(Verdict.FALSE)
         return _ODECandidateAttempt(
             mode=mode,
@@ -1849,10 +1821,10 @@ class TypeChecker:
         if not attempts:
             return False
         first = attempts[0].result
-        if isinstance(first, _InferenceFailure):
+        if isinstance(first, _ConstructionFailure):
             return False
         return all(
-            not isinstance(attempt.result, _InferenceFailure)
+            not isinstance(attempt.result, _ConstructionFailure)
             and types_equivalent(first, attempt.result)
             for attempt in attempts[1:]
         )
@@ -1886,21 +1858,34 @@ class TypeChecker:
             f"{item.rule}={item.verdict.value}"
             for item in attempt.obligations
         ) or "no formulas"
-        inferred = (
+        constructed = (
             "failure"
-            if isinstance(attempt.result, _InferenceFailure)
+            if isinstance(attempt.result, _ConstructionFailure)
             else str(attempt.result)
         )
         return (
             f"{attempt.mode.value}: verdict={attempt.verdict.value}, "
-            f"type={inferred}, proofs=[{proofs}]"
+            f"type={constructed}, proofs=[{proofs}]"
         )
 
     def _solve_ode_skip_rule_candidates(
         self,
         judgment: _ProcessJudgment,
-    ) -> _ProcessInferenceResult:
-        """顺序试用 ``ODE;skip`` 的两条规则并选择唯一可行类型。"""
+    ) -> _ProcessConstructionResult:
+        """顺序试用 ``ODE;skip`` 的两条规则并选择可审计的候选类型。
+
+        先在已经证明为 TRUE 的候选中按类型等价类选择。两个已证候选若非等价
+        则属于真实规则歧义，不返回类型。一条候选已证、另一条非等价候选仍为
+        UNKNOWN 时，保留已证候选作为暂定类型，但整体仍为 UNKNOWN，因为规则
+        唯一性尚未建立；若未决候选产生的是等价类型，则不影响已证结论。
+
+        没有已证类型时，只要至少一个 UNKNOWN 候选完成了结构推导，就按
+        ``natural-timeout``、``communication-only`` 的固定顺序选择。前者优先
+        是因为当前 AST 明确含有顺序后继 ``skip``，自然超时规则会保留这个后继；
+        这只是未验证临时候选的确定性优先级，不是新增的 Table 2 规则，UNKNOWN
+        诊断会明确禁止把它当作已证类型。两个候选都被 FALSE 排除时才报告无法
+        推导。
+        """
 
         context = judgment.context
         selection_step = self._start_step(
@@ -1921,21 +1906,52 @@ class TypeChecker:
             attempt
             for attempt in attempts
             if attempt.verdict == Verdict.TRUE
-            and not isinstance(attempt.result, _InferenceFailure)
+            and not isinstance(attempt.result, _ConstructionFailure)
         )
         unknown = tuple(
             attempt
             for attempt in attempts
             if attempt.verdict == Verdict.UNKNOWN
+            and not isinstance(attempt.result, _ConstructionFailure)
         )
 
         selected: _ODECandidateAttempt | None = None
-        if proved and not unknown:
-            # UNKNOWN 候选已在自己的未决公式处停止，因而没有正式结果可供等价
-            # 比较；此时即使另一候选已证明，也不能声称结论唯一。只有其余候选
-            # 均被否证，或所有已证明候选产生等价类型时，才能选中正式结论。
-            if self._ode_attempts_have_equivalent_types(proved):
-                selected = proved[0]
+        selection_is_untrusted = False
+        untrusted_reason = ""
+        proved_are_ambiguous = (
+            len(proved) > 1
+            and not self._ode_attempts_have_equivalent_types(proved)
+        )
+        if proved and not proved_are_ambiguous:
+            selected = proved[0]
+            non_equivalent_unknown = tuple(
+                attempt
+                for attempt in unknown
+                if not types_equivalent(selected.result, attempt.result)
+            )
+            if non_equivalent_unknown:
+                # 已证明候选可以提供有用的暂定类型，但另一条非等价规则尚未被
+                # 排除，因此不能把“存在一棵已证推导”误报成“结论已经唯一”。
+                selection_is_untrusted = True
+                unresolved = ", ".join(
+                    attempt.mode.value for attempt in non_equivalent_unknown
+                )
+                untrusted_reason = (
+                    "The selected ODE rule is proved, but the non-equivalent "
+                    f"candidate(s) {unresolved} remain unknown; rule uniqueness "
+                    "has not been established"
+                )
+        elif not proved and unknown:
+            priority = {
+                _ODETypeRule.NATURAL_TIMEOUT: 0,
+                _ODETypeRule.COMMUNICATION_ONLY: 1,
+            }
+            selected = min(unknown, key=lambda attempt: priority[attempt.mode])
+            selection_is_untrusted = True
+            untrusted_reason = (
+                "No ODE rule candidate has been proved; the deterministic "
+                f"temporary candidate {selected.mode.value} was retained"
+            )
 
         self._commit_ode_candidate_evidence(attempts, selected)
         summaries = "; ".join(
@@ -1960,14 +1976,27 @@ class TypeChecker:
                         seen_diagnostics.add(key)
 
         if selected is not None:
+            if selection_is_untrusted:
+                self._diagnose(
+                    Verdict.UNKNOWN,
+                    untrusted_reason
+                    + "; type construction can complete, but the retained type is "
+                    "untrusted until all competing proof obligations are resolved",
+                    "T-ODE-Select",
+                    context.location,
+                )
             self._finish_step(
                 selection_step,
-                f"选中 {selected.mode.value}: {selected.result}",
+                (
+                    f"保留未证候选 {selected.mode.value}: {selected.result}"
+                    if selection_is_untrusted
+                    else f"选中已证候选 {selected.mode.value}: {selected.result}"
+                ),
                 summaries,
             )
             return selected.result
 
-        if len(proved) > 1:
+        if proved_are_ambiguous:
             self._diagnose(
                 Verdict.UNKNOWN,
                 "Both ODE rules were proved but generated non-equivalent types; "
@@ -1976,24 +2005,6 @@ class TypeChecker:
                 context.location,
             )
             result_text = "两个已证候选类型不等价，无法唯一选择"
-        elif proved and unknown:
-            self._diagnose(
-                Verdict.UNKNOWN,
-                "One ODE rule was proved, but another non-equivalent rule "
-                "remains unknown; the Table 2 conclusion is not unique yet",
-                "T-ODE-Select",
-                context.location,
-            )
-            result_text = "另一非等价候选仍未决，暂时无法唯一选择"
-        elif unknown:
-            self._diagnose(
-                Verdict.UNKNOWN,
-                "One or more ODE rule candidates stopped at an unknown premise; "
-                "no complete Table 2 conclusion is available",
-                "T-ODE-Select",
-                context.location,
-            )
-            result_text = "至少一个候选在未决前提处停止，无法形成完整结论"
         else:
             self._diagnose(
                 Verdict.FALSE,
@@ -2003,7 +2014,7 @@ class TypeChecker:
             )
             result_text = "两条 ODE 候选规则均不可用"
         self._finish_step(selection_step, result_text, summaries)
-        return _INFERENCE_FAILURE
+        return _CONSTRUCTION_FAILURE
 
     @staticmethod
     def _validate_continuous_vectors(gamma: Mapping[str, GammaType]) -> None:
@@ -2077,18 +2088,13 @@ class TypeChecker:
             for declaration in gamma.values()
         )
 
-    def rule_t_ode(
-        self,
-        judgment: _ProcessJudgment,
-        candidate: _ODETypeRule | None = None,
-    ) -> _RuleExpansion:
+    def rule_t_ode(self, judgment: _ProcessJudgment) -> _RuleExpansion:
         """实现带 ``safety``/``delay`` 批注的连续演化类型规则。
 
         原始 ODE 语法仍由 ``eqs``、``constraint`` 和 ``interrupts`` 构成；
         Section 4.3 的两个额外输入只从 ``node.annotation`` 读取。延迟 ``d``
-        与推导出的 ``A/T`` 由 ``make_timed_type`` 规范成 PureDelay、通信超时或
-        有限定时外部选择。``d=infinity`` 没有超时迁移，其 fallback 固定为空行为
-        ``bottom`` 并按论文缩写化为 ``A``。dL 安全目标只检查节点自己的
+        与推导出的 ``A/T`` 由 ``make_delay_type`` 统一构造成有限或无穷时延类型。
+        ``d=infinity`` 没有超时迁移，其不可达 fallback 固定为 bottom。dL 安全目标只检查节点自己的
         ``annotation.safety``。Gamma 中的 ODE 分量本身声明为普通 ``Real``，另
         由一个独立 ``ContinuousType`` 项登记允许出现的完整演化变量集合；用户
         左侧必须与其中一个集合精确相等，但方程书写顺序不影响匹配。隐式局部
@@ -2224,13 +2230,13 @@ class TypeChecker:
             )
         except ExpressionError as exc:
             self._diagnose(Verdict.FALSE, str(exc), "T-ODE", context.location)
-            return _RuleExpansion("T-ODE", (), lambda _children: _INFERENCE_FAILURE)
+            return _RuleExpansion("T-ODE", (), lambda _children: _CONSTRUCTION_FAILURE)
 
         if static_type_error:
             return _RuleExpansion(
                 "T-ODE",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
 
         # ODEAnnotation 已在 AST 构造边界保证 d 是非负有理数或正无穷。
@@ -2244,27 +2250,10 @@ class TypeChecker:
             # ODEAnnotation 的另一个合法结果只能是正无穷 math.inf。
             duration = duration_annotation
         infinite_duration = isinstance(duration, float) and duration == inf
-        if candidate == _ODETypeRule.NATURAL_TIMEOUT and (
-            not tail or infinite_duration
-        ):
-            self._diagnose(
-                Verdict.FALSE,
-                "The natural-timeout ODE rule requires a finite delay and a successor",
-                "T-ODE",
-                context.location,
-            )
-            return _RuleExpansion(
-                "T-ODE",
-                (),
-                lambda _children: _INFERENCE_FAILURE,
-            )
-        communication_rule = (
-            candidate == _ODETypeRule.COMMUNICATION_ONLY
-            or (
-                candidate is None
-                and (not tail or infinite_duration)
-            )
-        )
+        # 有限 ODE 总有自然到时后继。若源程序在此结束，空节点序列会由 T-End
+        # 直接构造 EmptyType；不再人为补造 ``Skip()``，以免把“空通信行为”
+        # 错写为某个过程语法糖。正无穷时延没有到时迁移。
+        communication_rule = infinite_duration
 
         # 为 dL 模态建立独立入口快照。它不改变 HCSP AST，也不改变离开 ODE
         # 后的符号状态；仅用于把当前赋值替换后的状态正确嵌入连续演化公式。
@@ -2315,14 +2304,9 @@ class TypeChecker:
         # 真的动力系统中证明 B 保持，即 ``pre -> [F]B``；
         # 若把待验证的性质写进程序域，证明义务会被错误削弱。
         if communication_rule:
-            # ``ODE.wait(d)`` 的表面 constraint 是 true，但其真正 dL 演化域还
-            # 包含由构造器保存的隐藏边界 ``t < d``。因此只有“表面域为 true 且
-            # 不存在隐藏截止边界”时，domain premise 才能在本地直接判真；否则
-            # 必须把完整域交给证明器。这一点对 ODE;skip 的候选规则选择尤其关键。
-            domain_is_trivially_true = (
-                self._is_true(domain)
-                and node.local_clock_deadline is None
-            )
+            # 演化域为 true 时，这项前提可在本地直接判真；否则必须把完整域
+            # 交给证明器。
+            domain_is_trivially_true = self._is_true(domain)
             if domain_is_trivially_true:
                 domain_problem: DLFormula | UntranslatedDLFormula = DLFormula(
                     "true",
@@ -2384,8 +2368,8 @@ class TypeChecker:
             )
 
         if communication_rule:
-            # fallback 固定为 bottom；tail 仍传给通信分支，因为无限演化也可能
-            # 被通信提前中断，分支 continuation 完成后仍应执行外层 tail。
+            # 无限演化没有自然到时后继；tail 仍传给通信分支，因为它可能被通信
+            # 提前中断，分支 continuation 完成后仍应执行外层 tail。
             interrupt_context = self._ode_post_context(
                 node,
                 context,
@@ -2396,7 +2380,7 @@ class TypeChecker:
                 return _RuleExpansion(
                     "T-ODE",
                     (),
-                    lambda _children: _INFERENCE_FAILURE,
+                    lambda _children: _CONSTRUCTION_FAILURE,
                 )
             premises.append(
                 self._event_premise(
@@ -2409,13 +2393,15 @@ class TypeChecker:
 
             def conclude_without_timeout(
                 children: tuple[Any, ...],
-            ) -> _ProcessInferenceResult:
-                """组合无自然超时分支的 ODE 通信反应和正式 bottom fallback。"""
+            ) -> _ProcessConstructionResult:
+                """组合无自然超时分支的 ODE 通信反应。"""
 
                 choices = children[0]
-                if isinstance(choices, _InferenceFailure):
-                    return _INFERENCE_FAILURE
-                return make_timed_type(duration, choices, BottomType())
+                if isinstance(choices, _ConstructionFailure):
+                    return _CONSTRUCTION_FAILURE
+                # 正无穷 delay 的自然到时后继固定为不可达的 BottomType；AST 用
+                # InfiniteDelayType 显式记录该时延，而不把它误降为裸 A。
+                return make_delay_type(duration, choices, EmptyType())
 
             return _RuleExpansion(
                 "T-ODE",
@@ -2435,7 +2421,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-ODE",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         # 当前 Table 2 在通信中断分支只允许使用 safety；自然结束分支则使用
         # ``not B and safety``。不能把纯通信规则的 ``B and safety`` 搬到这里。
@@ -2449,7 +2435,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-ODE",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         premises.extend(
             (
@@ -2469,16 +2455,16 @@ class TypeChecker:
 
         def conclude_with_timeout(
             children: tuple[Any, ...],
-        ) -> _ProcessInferenceResult:
+        ) -> _ProcessConstructionResult:
             """组合 ODE 通信中断子类型与有限时延自然后继子类型。"""
 
             choices, fallback = children
-            if isinstance(choices, _InferenceFailure) or isinstance(
+            if isinstance(choices, _ConstructionFailure) or isinstance(
                 fallback,
-                _InferenceFailure,
+                _ConstructionFailure,
             ):
-                return _INFERENCE_FAILURE
-            return make_timed_type(duration, choices, fallback)
+                return _CONSTRUCTION_FAILURE
+            return make_delay_type(duration, choices, fallback)
 
         return _RuleExpansion("T-ODE", tuple(premises), conclude_with_timeout)
 
@@ -2581,20 +2567,6 @@ class TypeChecker:
             *derivative_definedness,
             *domain_result.definedness,
         )
-        if node.local_clock_deadline is not None:
-            # wait(d) 的隐藏截止条件只在内部 dL 域中出现；普通 ODE 不会因为
-            # delay 批注而自动得到这个边界。用户在源 constraint 中写 t 时会
-            # 读取同一个局部时钟，但不能覆盖它的固定导数。Section 2.1 明确
-            # 使用严格演化域 t<d，使当前 Table 2 能在 t=d 证明 not B。
-            deadline_result = translator.translate(node.local_clock_deadline)
-            domain_definedness = conjunction(
-                domain_definedness,
-                *deadline_result.definedness,
-            )
-            domain = conjunction(
-                domain,
-                clock < deadline_result.term,
-            )
         safety_result = translator.boolean_result(
             node.annotation.safety,
             local_symbols=ode_local_symbols,
@@ -2678,7 +2650,6 @@ class TypeChecker:
                     assumption != _ODEPostAssumption.SAFETY
                     and (
                         node.local_clock.name in node.constraint.get_vars()
-                        or node.local_clock_deadline is not None
                     )
                 )
             )
@@ -2705,19 +2676,6 @@ class TypeChecker:
                 )
                 domain_term = domain_result.term
                 domain_definedness = list(domain_result.definedness)
-                if node.local_clock_deadline is not None:
-                    if post_clock is None:
-                        raise ExpressionError(
-                            "ODE.wait boundary needs its local post-state clock"
-                        )
-                    deadline_result = translator.translate(
-                        node.local_clock_deadline
-                    )
-                    domain_definedness.extend(deadline_result.definedness)
-                    domain_term = conjunction(
-                        domain_term,
-                        post_clock < deadline_result.term,
-                    )
                 if assumption == _ODEPostAssumption.DOMAIN_AND_SAFETY:
                     domain_condition = conjunction(
                         *domain_definedness,
@@ -2774,7 +2732,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-mu",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
 
         source_name = node.variable
@@ -2802,7 +2760,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-mu",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
 
         # 类型变量与源程序变量分开命名，避免 alpha 等价判断受到源名称影响。
@@ -2814,22 +2772,22 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-mu",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         premises.append(
             self._process_premise(
                 tuple(self._as_nodes(body)),
                 body_context,
-                EndType(),
+                EmptyType(),
             )
         )
 
-        def conclude(children: tuple[Any, ...]) -> _ProcessInferenceResult:
+        def conclude(children: tuple[Any, ...]) -> _ProcessConstructionResult:
             """用递归体子类型决定是否需要构造通信保护的 MuType。"""
 
             body_type = children[0]
-            if isinstance(body_type, _InferenceFailure):
-                return _INFERENCE_FAILURE
+            if isinstance(body_type, _ConstructionFailure):
+                return _CONSTRUCTION_FAILURE
             if self._contains_type_var(body_type, type_var.name):
                 if not self._guarded(body_type, type_var.name):
                     self._diagnose(
@@ -2838,7 +2796,7 @@ class TypeChecker:
                         "T-mu",
                         context.location,
                     )
-                    return _INFERENCE_FAILURE
+                    return _CONSTRUCTION_FAILURE
                 return MuType(type_var.name, body_type)
             return body_type
 
@@ -2862,7 +2820,7 @@ class TypeChecker:
                 "T-X",
                 context.location,
             )
-            return _RuleExpansion("T-X", (), lambda _children: _INFERENCE_FAILURE)
+            return _RuleExpansion("T-X", (), lambda _children: _CONSTRUCTION_FAILURE)
         if tail:
             self._diagnose(
                 Verdict.FALSE,
@@ -2873,14 +2831,14 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-X",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         premise = self._recursion_boundary_premise(binding, context)
         if premise is None:
             return _RuleExpansion(
                 "T-X",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         premises = (premise,)
         return _RuleExpansion(
@@ -3090,7 +3048,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-||",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
         overlap = self._process_vars(node.left) & self._process_vars(node.right)
         if overlap:
@@ -3104,7 +3062,7 @@ class TypeChecker:
             return _RuleExpansion(
                 "T-||",
                 (),
-                lambda _children: _INFERENCE_FAILURE,
+                lambda _children: _CONSTRUCTION_FAILURE,
             )
 
         left_context = context.clone(location=f"{context.location}.parallel.left")
@@ -3114,15 +3072,15 @@ class TypeChecker:
             _ChildJudgmentPremise(_SystemJudgment(node.right, right_context)),
         )
 
-        def conclude(children: tuple[Any, ...]) -> _ConfigurationInferenceResult:
+        def conclude(children: tuple[Any, ...]) -> _ConfigurationConstructionResult:
             """把左右系统子类型组合为二元 ParallelType。"""
 
             left_type, right_type = children
-            if isinstance(left_type, _InferenceFailure) or isinstance(
+            if isinstance(left_type, _ConstructionFailure) or isinstance(
                 right_type,
-                _InferenceFailure,
+                _ConstructionFailure,
             ):
-                return _INFERENCE_FAILURE
+                return _CONSTRUCTION_FAILURE
             return ParallelType((left_type, right_type))
 
         return _RuleExpansion("T-||", premises, conclude)
@@ -3130,7 +3088,7 @@ class TypeChecker:
     def _solve_parallel_system_judgment(
         self,
         judgment: _SystemJudgment,
-    ) -> _ConfigurationInferenceResult:
+    ) -> _ConfigurationConstructionResult:
         """求解二元系统并行 judgment，并记录显式左右 premises。"""
 
         context = judgment.context
@@ -3144,7 +3102,7 @@ class TypeChecker:
         result = self._solve_rule_expansion(expansion)
         result_text = (
             "推导失败，至少一个并行系统分支没有正式配置类型"
-            if isinstance(result, _InferenceFailure)
+            if isinstance(result, _ConstructionFailure)
             else f"并行配置类型 = {result}"
         )
         self._finish_step(
@@ -3228,7 +3186,7 @@ class TypeChecker:
         active_theta = context.theta if context is not None else (theta or {})
         active_path = context.path if context is not None else path
         active_symbols = context.symbols if context is not None else (symbols or {})
-        step = InferenceStep(
+        step = DerivationStep(
             number=len(self.steps) + 1,
             rule=rule,
             location=location,
@@ -3342,8 +3300,8 @@ class TypeChecker:
             "T-Out": "逐槽检查输出表达式类型，并证明实际载荷满足 refinement。",
             "T-If": "分别在 phi∧B 和 phi∧¬B 下检查两个分支。",
             "T-sqcup": (
-                "把三元内部选择节点的公共 continuation 分别交给"
-                "两个子 judgment，再组合两个完整分支类型。"
+                "把多元内部选择节点的公共 continuation 分别交给"
+                "全部子 judgment，再组合各个完整分支类型。"
             ),
             "T-ODE": (
                 "核对 Gamma 已登记完整 ODE 演化向量，并仅用节点 safety "
@@ -3482,7 +3440,7 @@ class TypeChecker:
                 subject = (
                     "T-End"
                     if not child.nodes
-                    else TypeChecker._describe_process_node(child.nodes[0])
+                    else TypeConstructor._describe_process_node(child.nodes[0])
                 )
                 descriptions.append(f"process[{subject}]@{child.context.location}")
             elif isinstance(child, _EventJudgment):
@@ -3499,10 +3457,10 @@ class TypeChecker:
         return (
             summary
             + " 惰性最强后置状态: "
-            + f"赋值前 {target}={TypeChecker._display_term(post_state.previous_term)}; "
-            + f"右值={TypeChecker._display_term(post_state.assigned_term)}; "
+            + f"赋值前 {target}={TypeConstructor._display_term(post_state.previous_term)}; "
+            + f"右值={TypeConstructor._display_term(post_state.assigned_term)}; "
             + f"赋值后 symbols[{target}]="
-            + f"{TypeChecker._display_term(post_state.post_context.symbols[target])}; "
+            + f"{TypeConstructor._display_term(post_state.post_context.symbols[target])}; "
             + "phi' 已由该符号映射确定，不需要谓词综合。"
         )
 
@@ -3510,8 +3468,8 @@ class TypeChecker:
         """在当前 premise 位置立即化简、分派、判定并记录一条公式。
 
         ``formula`` 仍保留规则原始生成式，``proof_formula`` 保存实际交给
-        后端的化简式。外部后端异常保守记为 UNKNOWN；调用方看到非 TRUE 结果
-        后会立即终止当前推导，因而报告只包含停止点以前的证据。
+        后端的化简式。外部后端异常保守记为 UNKNOWN；调用方只会在 FALSE 时
+        终止当前规则，UNKNOWN 则保留证据并继续构造一个明确标为不可信的类型。
         """
 
         obligation = request.obligation
@@ -3570,25 +3528,33 @@ class TypeChecker:
         self.obligations.append(decided)
         self._finish_step(
             proof_step,
-            f"立即判定 = {verdict.value}",
+            (
+                "立即判定 = false；当前规则被否证"
+                if verdict is Verdict.FALSE
+                else (
+                    "立即判定 = unknown；记录未决义务并继续推导"
+                    if verdict is Verdict.UNKNOWN
+                    else "立即判定 = true；继续推导"
+                )
+            ),
             f"{obligation.kind.upper()} 义务已按推导顺序处理。{detail}",
         )
         return decided
 
     def _report(
         self,
-        inferred: ConfigurationType | None,
-        component_types: tuple[ConfigurationType | None, ...],
-    ) -> CheckReport:
+        constructed: ConfigurationType | None,
+        constructed_component_types: tuple[ConfigurationType | None, ...],
+    ) -> TypeConstructionReport:
         """合并义务与诊断的三值结果，构造不可变最终报告。"""
         verdict = Verdict.combine(
             [item.verdict for item in self.obligations if item.active]
             + [item.verdict for item in self.diagnostics]
         )
-        return CheckReport(
+        return TypeConstructionReport(
             verdict=verdict,
-            inferred_type=inferred,
-            component_types=component_types,
+            constructed_type=constructed,
+            constructed_component_types=constructed_component_types,
             obligations=tuple(self.obligations),
             diagnostics=tuple(self.diagnostics),
             steps=tuple(self.steps),
@@ -3695,15 +3661,13 @@ class TypeChecker:
                 self._contains_type_var(branch, name)
                 for branch in value.branches
             )
-        if isinstance(value, PureDelayType):
-            return self._contains_type_var(value.continuation, name)
-        if isinstance(value, CommunicationTimeoutType):
-            return self._contains_type_var(value.choices, name)
-        if isinstance(value, TimedExternalChoiceType):
+        if isinstance(value, FiniteDelayType):
             return self._contains_type_var(
-                value.choices,
+                value.interrupts,
                 name,
-            ) or self._contains_type_var(value.fallback, name)
+            ) or self._contains_type_var(value.continuation, name)
+        if isinstance(value, InfiniteDelayType):
+            return self._contains_type_var(value.interrupts, name)
         if isinstance(value, MuType):
             return value.variable != name and self._contains_type_var(
                 value.body,
@@ -3733,16 +3697,14 @@ class TypeChecker:
                 self._guarded(branch, name, under_communication)
                 for branch in value.branches
             )
-        if isinstance(value, PureDelayType):
-            return self._guarded(value.continuation, name, under_communication)
-        if isinstance(value, CommunicationTimeoutType):
-            return self._guarded(value.choices, name, under_communication)
-        if isinstance(value, TimedExternalChoiceType):
+        if isinstance(value, FiniteDelayType):
             return self._guarded(
-                value.choices,
+                value.interrupts,
                 name,
                 under_communication,
-            ) and self._guarded(value.fallback, name, under_communication)
+            ) and self._guarded(value.continuation, name, under_communication)
+        if isinstance(value, InfiniteDelayType):
+            return self._guarded(value.interrupts, name, under_communication)
         if isinstance(value, MuType):
             return value.variable == name or self._guarded(
                 value.body,
@@ -3780,10 +3742,9 @@ class TypeChecker:
                 process.then_branch
             ) | self._process_ode_vectors(process.else_branch)
         if isinstance(process, InternalChoice):
-            return (
-                self._process_ode_vectors(process.left)
-                | self._process_ode_vectors(process.right)
-                | self._process_ode_vectors(process.continuation)
+            return set().union(
+                *(self._process_ode_vectors(branch) for branch in process.branches),
+                self._process_ode_vectors(process.continuation),
             )
         if isinstance(process, Mu):
             return self._process_ode_vectors(process.body)
@@ -3799,9 +3760,10 @@ class TypeChecker:
         if isinstance(reaction, EmptyEvent):
             return set()
         if isinstance(reaction, EventChoice):
-            return self._process_ode_vectors(
-                reaction.continuation
-            ) | self._event_ode_vectors(reaction.alternative)
+            return set().union(
+                *(self._process_ode_vectors(continuation)
+                  for _communication, continuation in reaction.branches)
+            )
         return set()
 
     def _input_bound_vars(self, process: Any) -> set[str]:
@@ -3811,36 +3773,36 @@ class TypeChecker:
         return process.get_input_bound_vars()
 
 
-def check_hcsp(
+def construct_type(
     *,
     gamma: Mapping[str, GammaType] | None,
     theta: Mapping[str, ChannelType | Any] | None,
     configurations: Sequence[Configuration | tuple[Mapping[str, Any], Any] | Any],
     path_condition: Any = True,
     parameters: ParameterEnvironment | Mapping[str, Any] | None = None,
-    expected_types: Sequence[ConfigurationType] | None = None,
     dl_checker: DLChecker | None = None,
     keymaerax_config: KeYmaeraXConfig | None = None,
     z3_timeout_ms: int = 5_000,
-) -> CheckReport:
+) -> TypeConstructionReport:
     """按设计 PPT 的输入形式提供无状态便捷 API。
 
-    该函数负责构造 :class:`TypingJudgment` 和一次性 :class:`TypeChecker`。需要
-    重用 ODE 配置或自定义检查流程时，可直接实例化 ``TypeChecker``。
+    该函数负责构造 :class:`TypeConstructionRequest` 和一次性
+    :class:`TypeConstructor`。需要重用 ODE 配置或自定义构造流程时，可直接
+    实例化 ``TypeConstructor``。
     ``parameters`` 可传入 :class:`ParameterEnvironment`；只传声明映射时
     约束默认为 ``True``。
     """
 
-    judgment = TypingJudgment(
+    request = TypeConstructionRequest(
         gamma=gamma,
         theta=theta,
         configurations=configurations,
         path_condition=path_condition,
         parameters=parameters,
-        expected_types=expected_types,
     )
-    return TypeChecker(
+    return TypeConstructor(
         dl_checker=dl_checker,
         keymaerax_config=keymaerax_config,
         z3_timeout_ms=z3_timeout_ms,
-    ).check(judgment)
+    ).construct(request)
+    NoInterruptType,

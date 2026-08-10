@@ -14,11 +14,12 @@ r"""通过新版公共接口复现论文 Section 5 原始 case study 的 ``unkno
     python -B case_study/case.py
     python -B case_study/case.py --d 3/2
 
-脚本只使用项目承诺兼容的两个公共接口：先把完整用户 source 解析成
-``HCSPProgram``，再尝试推导正式 Type AST。第二接口负责一次性打印 source、
-Process AST、规则轨迹、FOL/dL 义务和停止点，脚本自身只补充案例结论。
-对本问题复现脚本而言，得到 ``unknown`` 是预期结果，退出码为 0；解析错误、
-确定的 ``false``，或者意外成功生成完整 Type AST，退出码均为 1。
+脚本只使用项目承诺兼容的单一公共接口。接口负责一次性打印 source、规则轨迹、
+FOL/dL 义务、完整候选类型及其可信性，脚本自身只补充案例结论。
+对本问题复现脚本而言，预期结果是：证明义务得到 ``unknown`` 后继续完成规则
+构造，并通过 ``HCSPUntrustedTypeConstructionError.untrusted_type`` 给出完整但
+不可信的候选 Type AST。解析错误、确定的 ``false``、未能完成类型结构，或者意外
+得到可信 Type AST，退出码均为 1。
 """
 
 from __future__ import annotations
@@ -40,9 +41,9 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from hcsp_typechecker import (  # noqa: E402 - 搜索路径必须先指向源码根目录
     HCSPInputError,
-    HCSPTypeError,
-    infer_hcsp_type,
-    parse_hcsp_program,
+    HCSPTypeConstructionError,
+    HCSPUntrustedTypeConstructionError,
+    construct_hcsp_type,
 )
 
 
@@ -227,7 +228,7 @@ process {{
                     }}
                 }};
                 dh!(command);
-                wait({duration});
+                ode(flow(), domain(t < {duration}), delay({duration}));
                 call Y
             }} else {{
                 stop!(0)
@@ -266,26 +267,13 @@ def _parse_period(argv: Sequence[str] | None = None) -> Fraction:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """通过两个公共接口解析原始案例，并检查是否得到预期 ``unknown``。"""
+    """检查原始案例是否形成预期的 ``unknown`` 不可信候选类型。"""
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
     period = _parse_period(argv)
     source = _build_original_case_source(period)
-
-    # 第二接口的 full 输出已经内嵌第一阶段结果，因此第一接口保持静默，避免
-    # 重复打印同一份 source、Gamma、Theta 和 Process AST。
-    try:
-        program = parse_hcsp_program(
-            source,
-            source_name=f"case_study/case.py (--d={period})",
-            output="none",
-        )
-    except HCSPInputError as error:
-        print("=== 原始 case study 输入解析失败 ===")
-        print(error.format_diagnostic())
-        return 1
 
     # 公共接口从环境变量读取证明器位置与产物策略。这里只选择本案例的可写
     # 工作目录，不接触内部 KeYmaeraXConfig 类型。
@@ -294,29 +282,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     os.environ["KEYMAERAX_ARTIFACTS"] = str(_KEYMAERAX_ARTIFACTS)
 
     try:
-        infer_hcsp_type(
-            program,
+        construct_hcsp_type(
+            source,
+            source_name=f"case_study/case.py (--d={period})",
             output="full",
             keymaerax_timeout_seconds=180.0,
         )
-    except HCSPTypeError as error:
+    except HCSPInputError:
+        # full 模式已经输出带源码位置的解析诊断。
+        return 1
+    except HCSPUntrustedTypeConstructionError as error:
         print()
         print("=== 原始 case study 结论 ===")
-        if error.verdict == "unknown":
-            print(
-                "已复现预期结果：推导在 unknown 前提处停止；"
-                "具体 dL 公式和证明器证据见上方完整日志。"
-            )
-            return 0
         print(
-            f"未复现预期结果：推导得到 {error.verdict!r}，"
-            "而不是原案例预期的 'unknown'。"
+            "已复现预期结果：unknown 义务没有中断类型构造；"
+            "接口形成了完整但尚未验证的候选 Type AST。"
+        )
+        print(f"不可信候选 Type AST：{error.untrusted_type!r}")
+        print("具体 dL 公式、未决原因和后续推导轨迹见上方完整日志。")
+        return 0
+    except HCSPTypeConstructionError as error:
+        print()
+        print("=== 原始 case study 结论 ===")
+        print(
+            f"未复现预期结果：构造过程得到 {error.verdict!r}，"
+            "但没有形成原案例预期的完整不可信候选类型。"
         )
         return 1
 
     print()
     print("=== 原始 case study 结论 ===")
-    print("未复现预期结果：本次运行意外生成了完整 Type AST。")
+    print("未复现预期结果：本次运行意外生成了可信 Type AST。")
     return 1
 
 

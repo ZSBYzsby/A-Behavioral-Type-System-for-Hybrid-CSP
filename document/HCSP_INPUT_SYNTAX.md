@@ -7,10 +7,11 @@
 
 本文件中的 Process/Expr 子语法已经由内部输入层实现，且不会改变项目中 Python
 AST 节点的语义。普通用户不单独调用片段解析器，而是把本语法放在完整 source 的
-`process` 分节中，再调用包根稳定接口 `parse_hcsp_program(...)`：
+`process` 分节中，再调用包根唯一稳定的 TypeConstructor 接口
+`construct_hcsp_type(...)`：
 
 ```python
-from hcsp_typechecker import parse_hcsp_program
+from hcsp_typechecker import construct_hcsp_type
 
 source = """
 gamma()
@@ -18,14 +19,13 @@ theta(ch: channel(value: Real), out: channel(value: Real))
 process {{ch?(x); out!(x)}}
 """
 
-program = parse_hcsp_program(source, source_name="example.hcsp")
-process_ast = program.process_ast
+type_ast = construct_hcsp_type(source, source_name="example.hcsp")
 ```
 
 解析失败会抛出 `HCSPInputError`，错误信息包含词法或语法阶段、源文件名、行列位置
 和源码指示符。`parse_hcsp(...)`、`parse_expression(...)` 和直接 AST 构造器仍保留
 给实现、测试与语法审计，但属于内部开发接口，不从包根导出，也不承诺兼容性。
-手工修改完整 Gamma、Theta、Process 输入并查看两阶段转换结果时，
+手工修改完整 Gamma、Theta、Process 输入并查看最终 Type AST 时，
 在仓库根目录编辑并运行 `python demo.py`。
 
 ## 1. 总体约定
@@ -97,10 +97,6 @@ output_action
     ::= IDENT "!"
         "(" expression_list ")"
 
-
-wait_statement
-    ::= "wait"
-        "(" finite_duration ")"
 
 
 process_call
@@ -438,7 +434,7 @@ IDENT
 当前保留字包括：
 
 ```text
-skip assert wait call if else choose or mu invariant
+skip assert call if else choose or mu invariant
 ode flow dot domain safety delay interrupt on
 true false inf not and
 None
@@ -452,7 +448,7 @@ Bool Nat Int Rational Real
 ```
 
 这些名称属于完整输入层，不能再作为 Process 中的普通 IDENT。公共入口
-`parse_hcsp_program(...)` 所调用的完整解析流程与内部片段解析器共享同一份
+`construct_hcsp_type(...)` 所调用的完整解析流程与内部片段解析器共享同一份
 保留字表，因此不会在不同解析路径把同一源码名称解释成不同 token。
 
 其中 `None` 是“保留但非法”的词，只用于给出明确的“不支持空值”诊断；它不属于
@@ -516,7 +512,7 @@ lower_block({P1; ...; Pn})
     = Sequence.of(P1, ..., Pn)
 ```
 
-对于内部选择，块中位于选择之后的语句是所有分支的公共后继。解析器必须直接构造当前项目使用的三元 `InternalChoice`，不能先构造二元选择再包一层普通 `Sequence`。
+对于内部选择，块中位于选择之后的语句是所有分支的公共后继。解析器必须直接构造当前项目使用的多元 `InternalChoice`，不能先构造二元选择再包一层普通 `Sequence`。
 
 ### 6.3 通信
 
@@ -531,7 +527,8 @@ lower_block({P1; ...; Pn})
 - `mu X invariant(phi) { ... }` 必须显式提供递归不变量。
 - 无非平凡不变量时写 `invariant(true)`。
 - `call X` 构造进程变量引用 `Var("X")`。
-- 递归作用域、通信守卫、尾位置及 Assumption 2.1/2.2 由 AST 构造和类型检查阶段继续验证。
+- 递归作用域、通信守卫、尾位置及 Assumption 2.1/2.2 由 AST 构造和
+  TypeConstructor 阶段继续验证。
 
 ### 6.5 ODE
 
@@ -546,12 +543,9 @@ lower_block({P1; ...; Pn})
 - `t` 可以用于方程右端、`domain` 和 `safety`，但不能写在用户方程左端。
 - 隐式时钟不计入用户连续变量向量，也不进入中断分支或 ODE 外部后继的作用域。
 - 有限 `delay` 必须求值为非负有理数；普通 ODE 还允许 `delay(inf)`。
-
-### 6.6 wait
-
-- `wait(d)` 是表面语法糖，转换为现有的 `ODE.wait(d)`。
-- `d` 必须是有限非负有理数。
-- 不接受 `wait(inf)`。
+- 不支持 `wait(d)` 语法糖。若要表示有限等待，应显式写
+  `ode(flow(), domain(t < d), delay(d))`；若它位于语句块末尾，构造器将其
+  正常结束解释为隐式 `skip`，因此得到 `delay(d).0`。
 
 ## 7. Expr AST 对应关系
 
@@ -568,7 +562,7 @@ lower_block({P1; ...; Pn})
 
 表达式语法本身不执行类型检查。例如，解析器能够构造 `1 and 2` 的表达式树，但后续类型检查必须因为 `and` 的操作数不是 Bool 而拒绝它。
 
-函数调用在解析阶段允许任意普通函数名和任意数量的位置参数。后续证明后端只对部分函数具有专门语义；不能翻译的函数形式应在类型检查或证明阶段产生明确诊断。
+函数调用在解析阶段允许任意普通函数名和任意数量的位置参数。后续证明后端只对部分函数具有专门语义；不能翻译的函数形式应在表达式静态类型检查或证明阶段产生明确诊断。
 
 ## 8. 明确不支持的表达式
 
@@ -622,21 +616,31 @@ lower_block({P1; ...; Pn})
 
 ## 10. 公共完整入口与内部兼容边界
 
-普通用户的唯一解析入口是：
+普通用户唯一的完整 TypeConstructor 入口是：
 
 ```python
-from hcsp_typechecker import parse_hcsp_program
+from hcsp_typechecker import construct_hcsp_type
 
-program = parse_hcsp_program(
+type_ast = construct_hcsp_type(
     complete_source,
     source_name="example.hcsp",
     output="none",  # 也可为 "result" 或 "full"
 )
 ```
 
-它解析 `GAMMA_THETA_INPUT_SYNTAX.md` 规定的完整 source，返回把参数、Gamma、
-Theta 和 Process AST 绑定在一起的只读 `HCSPProgram`。`output` 只控制打印，
-不改变解析结果；错误仍以公共 `HCSPInputError` 抛出。
+它解析 `GAMMA_THETA_INPUT_SYNTAX.md` 规定的完整 source，在内部构造参数、Gamma、
+Theta 和 Process AST，随后进行类型构造与公式证明。中间 Process AST 不会作为
+公共结果暴露。输入错误会立即终止并抛出 `HCSPInputError`；结构/静态失败或公式
+为 `false` 时立即停止并抛出 `HCSPTypeConstructionError`。公式为 `unknown` 时
+会记录义务并继续构造：若形成完整候选 Type AST，则抛出
+`HCSPUntrustedTypeConstructionError`，候选可从
+异常的 `untrusted_type` 属性读取，但必须视为未验证、不可信。只有构造完整且全部
+义务为 `true` 时才正常返回 `TypeAST`。这是由 HCSP 主动构造类型的
+TypeConstructor；未来接收用户给定 Type 的 TypeChecker 尚未实现。
+
+`output` 只控制显示，不改变上述推导、证明和异常语义。`result` 显示可信结果，
+或显示不可信候选/失败摘要；`full` 还显示全部实际规则轨迹、FOL/dL 公式及未决
+义务；`none` 保持静默。
 
 以下入口只属于内部开发与审计层：
 
@@ -650,7 +654,7 @@ from hcsp_typechecker.input_language import (
 
 - `parse_hcsp(...)` 解析一个非空 `process_system` 片段并 lower 为 Process/Parallel AST；
 - `parse_expression(...)` 使用第 3 节的严格表达式文法构造 `Expr`；
-- `parse_hcsp_source(...)` 是公共门面内部使用的完整解析实现，返回内部
+- `parse_hcsp_source(...)` 是单一公共门面内部使用的完整解析实现，返回内部
   `ParsedHCSPSource`；
 - `parse_expr(...)` 是 Process 表达式节点的旧便捷构造入口。
 

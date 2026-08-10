@@ -1,23 +1,27 @@
-# Process AST 到 Type AST 的实际转换过程参考
+# TypeConstructor：Process AST 到 Type AST 的实际构造过程
 
-本文只描述当前代码真正执行的转换算法和数学操作，不判断这些操作是否与某一版
+本文只描述当前代码真正执行的构造算法和数学操作，不判断这些操作是否与某一版
 论文完全一致。人工比对时，应以本文给出的“代码实际行为”为准，再逐条与论文规则
 比较。
+
+本文描述的功能称为 **TypeConstructor**：输入是带批注的 HCSP、Gamma、Theta、
+参数以及可选初态/路径条件，Type AST 由程序自行构造。未来接收“用户给定 Type”
+并检查该 Type 的 **TypeChecker** 尚未实现；本文不描述那项未来功能。
 
 相关实现主要位于：
 
 - `hcsp_typechecker/process/ast.py`：Process、Event、System AST；
-- `hcsp_typechecker/typechecking/checker.py`：judgment、premise、规则分派和转换算法；
+- `hcsp_typechecker/typechecking/constructor.py`：judgment、premise、规则分派和构造算法；
 - `hcsp_typechecker/typechecking/logic.py`：表达式到 Z3 项的翻译及 FOL/state 判定；
 - `hcsp_typechecker/typechecking/dl.py`：ODE 证明义务到 dL 公式的翻译；
 - `hcsp_typechecker/type_system/ast.py`：最终 Type AST 及规范化构造；
-- `hcsp_typechecker/typechecking/model.py`：Gamma、Theta、检查请求和审计报告。
+- `hcsp_typechecker/typechecking/model.py`：Gamma、Theta、构造请求和审计报告。
 
 ---
 
-## 1. 转换的输入和输出
+## 1. 构造的输入和输出
 
-一次检查请求可以抽象写成：
+一次 `TypeConstructionRequest` 可以抽象写成：
 
 \[
 (\Gamma,\Pi,\Theta,\Phi,K),
@@ -33,25 +37,27 @@
 - 每个 configuration 的 `process` 可以是顺序 `Process`，或者受限的无状态
   `Parallel` 便捷结构。
 
-转换结果不是单独一个 Type AST，而是 `CheckReport`：
+内部构造结果不是单独一个 Type AST，而是 `TypeConstructionReport`：
 
-- `inferred_type`：全部分量均成功时得到的正式 `ConfigurationType`；
-- `component_types`：各 configuration 的分量结果；失败或尚未访问的位置为
+- `constructed_type`：全部分量均完成规则结构推导时得到的 `ConfigurationType`；它在
+  verdict 为 `unknown` 时是完整但未验证的候选类型；
+- `constructed_component_types`：各 configuration 的分量结果；失败或尚未访问的位置为
   `None`；
 - `obligations`：已经实际判定过的 state、FOL、dL 公式；
 - `diagnostics`：结构错误、静态类型错误和未决选择原因；
 - `steps`：按执行顺序保存的规则入口环境和结果；
 - `verdict`：有效证明义务与诊断的 `true / false / unknown` 合并值。
 
-`None` 只表示没有形成正式类型。它与 Type AST 中具有正式含义的
-`BottomType()` 完全不同。
+`None` 只表示没有形成完整类型结构。非空类型是否可信必须同时查看 verdict：
+`true` 表示可信，`unknown` 表示仍有必要义务未验证。两种情况都与 Type AST 中
+预留给未来类型检查功能的 `BottomType()` 完全不同；当前构造器不会输出它。
 
 ---
 
 ## 2. Process AST 构造阶段已经做掉的工作
 
-类型检查器接收的不是任意 Python 对象，而是已经构造好的项目 Process AST。
-进入 `typechecking/checker.py` 之前，`process/ast.py` 已经执行以下操作：
+TypeConstructor 接收的不是任意 Python 对象，而是已经构造好的项目 Process AST。
+进入 `typechecking/constructor.py` 之前，`process/ast.py` 已经执行以下操作：
 
 1. 字符串表达式被解析成项目自己的 `Expr` 节点；
 2. 赋值左端、输入目标和通道名称被检查为合法标识符；
@@ -63,11 +69,9 @@
 7. `ODEAnnotation` 把有限 delay 规范成精确 `Fraction`，并拒绝负数、符号时延、
    NaN 和负无穷；
 8. 每个 `ODE` 自动建立局部时钟 `t`，其初值固定为 0、导数固定为 1；
-9. `ODE.wait(d)` 直接展开为带隐藏截止条件 `t < d` 的 `ODE; Skip`，不存在单独
-   的 `Wait` AST 节点。
 
 因此，某些程序会在“Process AST 构造”阶段失败，根本不会进入 Process 到 Type
-的转换。例如当前实现认为 `ch!x; ch?x` 同时自由使用并绑定 `x`，会直接因
+的类型构造。例如当前实现认为 `ch!x; ch?x` 同时自由使用并绑定 `x`，会直接因
 `fv(P) ∩ bv(P) != empty` 抛出 `ValueError`。
 
 ---
@@ -147,7 +151,7 @@ ODE 的左端分量、导数右端参数、演化域和 safety 中的 Real 量�
   ODE 左端。
 
 Gamma 和 \(\Delta\) 的名称域必须不相交。参数由用户在 HCSP 执行前一次性
-选定，类型检查结果覆盖所有满足 \(H\) 的选择，不保存某组具体参数值。
+选定，类型构造结果覆盖所有满足 \(H\) 的选择，不保存某组具体参数值。
 
 ### 3.3 Theta
 
@@ -169,7 +173,7 @@ Gamma 和 \(\Delta\) 的名称域必须不相交。参数由用户在 HCSP 执�
 
 ### 3.4 每条控制流路径上的 Context
 
-转换器内部为每条控制流路径维护：
+TypeConstructor 内部为每条控制流路径维护：
 
 \[
 C=(\Gamma,\Delta,H,\Theta,\Phi,\rho,\mathcal R,location,valid),
@@ -256,19 +260,23 @@ premise 只有两类：
 
 `conclude` 只负责使用已经求得的子类型构造父 Type AST。
 
-### 5.2 严格顺序和短路
+### 5.2 按序证明、`false` 短路与 `unknown` 保留
 
 `_solve_rule_expansion` 按 premises 的保存顺序逐项处理：
 
 1. 遇到公式 premise，立即交给对应证明器；
-2. 只有 verdict 为 `true` 才继续；
-3. `false` 或 `unknown` 都立即停止当前推导；
-4. 遇到子 judgment，递归求解；
-5. 子 judgment 失败后，后续兄弟 premise 不再访问；
-6. 只有所有 premise 都成功，才调用 `conclude` 构造父类型。
+2. verdict 为 `true` 时照常继续；
+3. verdict 为 `false` 表示该必要 premise 已被反例否证，立即停止当前规则；
+4. verdict 为 `unknown` 只表示当前证明器未能判定：义务及原因写入报告，然后继续
+   求解剩余 premise；
+5. 遇到子 judgment 时递归求解；子 judgment 真正无法形成类型后，后续兄弟
+   premise 不再访问；
+6. 全部所需子类型都已形成时调用 `conclude` 构造父类型；此前出现的 `unknown`
+   不阻止构造，但最终 verdict 会把该类型标为不可信。
 
-所以报告只包含实际到达停止点以前的证明义务和步骤。代码不会先构造一个完整
-“候选类型”，再在最后发现某个必要前提未成立。
+因此代码仍然是一边证明、一边推导，而不是先生成公式池再统一证明。差别在于
+`unknown` 不再被误当成否定：检查器会尽量推导到根节点并保留完整候选 Type AST；
+`false` 和结构/静态失败仍只留下实际停止点以前的证明义务、步骤与部分类型。
 
 ### 5.3 Sequence 没有对应的 Type AST 节点
 
@@ -278,11 +286,11 @@ premise 只有两类：
 [P 的顺序节点..., Q 的顺序节点...]
 ```
 
-转换器每次处理列表头，并把剩余列表作为 continuation 子 judgment。因此代码
+TypeConstructor 每次处理列表头，并把剩余列表作为 continuation 子 judgment。因此代码
 没有通用的 `SequenceType`，也没有“先得到 P 的类型，再把 Q 的类型接到所有
 终点”的后处理算法。后继是在推导 P 时就沿控制流传下去的。
 
-`InternalChoice` 是例外：它自己保存公共 `continuation`，转换时把该后继分别
+`InternalChoice` 是例外：它自己保存公共 `continuation`，构造时把该后继分别
 交给左右两个子 judgment。
 
 ---
@@ -291,7 +299,7 @@ premise 只有两类：
 
 ### 6.1 环境规范化
 
-`TypeChecker.check` 首先统一规范化 Gamma、共享参数和 Theta。非法变量类型、
+`TypeConstructor.construct` 首先统一规范化 Gamma、共享参数和 Theta。非法变量类型、
 非法参数约束、Gamma/参数名称重叠、非法通道名和非法通道签名都会在
 进入 Process 规则以前得到失败诊断。不可满足的参数约束也会直接被拒绝。
 
@@ -326,8 +334,11 @@ process 真正包含已登记 ODE 时，匹配的独立 `ContinuousType` 声明�
 局部路径条件要么所有 configuration 都提供，要么都不提供。若使用局部路径，
 外层路径必须是默认 `true`。
 
-各 configuration 按输入顺序形成子 judgment。某一分量失败后，后续分量不再
-推导；已经成功的前缀仍保留在 `component_types` 中，失败和未访问位置为 `None`。
+各 configuration 按输入顺序形成子 judgment。某一分量因 `false` 或结构/静态
+错误而无法形成类型后，后续分量不再推导；已经完成的前缀仍保留在
+`constructed_component_types` 中，失败和未访问位置为 `None`。某个公式仅为
+`unknown` 时，该分量仍继续构造，并可在 `constructed_component_types` 中保留
+不可信的完整候选类型。
 
 若全部成功：
 
@@ -369,7 +380,7 @@ state 通过后，才进入 system/process 子 judgment。
 
 ---
 
-## 7. 每一种离散 Process 节点的转换
+## 7. 每一种离散 Process 节点的类型构造
 
 ### 7.1 终端 `Skip` 和隐式终端
 
@@ -379,7 +390,7 @@ state 通过后，才进入 system/process 子 judgment。
 skip \longmapsto terminal.
 \]
 
-普通顶层的 `terminal` 是 `EndType()`，所以得到 `0`。
+普通顶层的 `terminal` 是 `EmptyType()`，所以得到空通信行为 `0`。
 
 规则没有 premise，也不修改 Context。
 
@@ -550,11 +561,12 @@ InternalChoiceType((T1, T2))
 ```
 
 内部选择构造器会压平嵌套 `InternalChoiceType`，但保留分支顺序。由于求解器
-严格顺序执行，then 分支失败时 else 分支不会继续检查。
+严格顺序执行，then 分支因 `false` 或结构/静态错误而无法形成类型时，else 分支
+不会继续检查；then 分支只有未决公式时仍会形成候选子类型，else 分支会继续推导。
 
-### 7.8 三元 `InternalChoice(P1,P2,Q)`
+### 7.8 多元 `InternalChoice(P1,...,Pn, continuation=Q)`
 
-该节点表示左右选择共享同一个后继。代码分别推导：
+该节点表示全部选择分支共享同一个后继。代码分别推导：
 
 \[
 T_1=type(P_1;Q;tail,C_1),
@@ -576,23 +588,23 @@ EventReaction 只在 ODE 的 interrupts 字段中出现。
 
 ### 8.1 `EmptyEvent`
 
-空事件反应转换为 `EndType()`。在 ODE 定时类型构造中，这个 `EndType` 表示
-没有通信选择，而不是 ODE 自身已经正常终止。
+空事件反应构造为 `NoInterruptType()`。它表示 ODE 没有通信中断；这和
+`EmptyType()` 表示的过程空通信行为不同。
 
-### 8.2 `EventChoice(communication,P,E)`
+### 8.2 `EventChoice((communication_1,P_1),...,(communication_n,P_n))`
 
-对当前事件分支，代码构造完整顺序行为：
+对每个事件分支，代码构造完整顺序行为：
 
 ```text
 communication; P; ODE 外层 tail
 ```
 
 因为 `communication` 必须是输入或输出，成功结果必须是 `InputType` 或
-`OutputType`。其余事件 `E` 递归转换。
+`OutputType`。其余事件 `E` 递归构造。
 
 分支合并使用 `make_external_choice`：
 
-- 零分支 -> `EndType()`；
+- 零分支 -> `NoInterruptType()`；
 - 一个通信分支 -> 直接返回该 `InputType/OutputType`；
 - 两个及以上 -> `ExternalChoiceType((branch1,...,branchn))`。
 
@@ -601,7 +613,7 @@ communication; P; ODE 外层 tail
 
 ---
 
-## 9. ODE 的完整转换
+## 9. ODE 的完整类型构造
 
 设 Process 节点包含：
 
@@ -673,15 +685,11 @@ V_{ODE}=\{x_1,\ldots,x_n\}.
 检查器要求 Gamma 中存在 `variables` 恰好等于 \(V_{ODE}\) 的独立
 `ContinuousType` 声明。没有精确匹配时 T-ODE 静态失败；匹配
 成功只表示这个 ODE 演化向量允许在 process 中出现，不会向 dL 公式添加性质。
-没有用户方程的 `ODE.wait(d)` 使用空向量，不需要 Gamma 声明。dL 连续程序始终
+没有用户方程的空 flow ODE 使用空向量，不需要 Gamma 声明。dL 连续程序始终
 使用上面的无假设动力系统 \(F^*\)。
 
-普通 ODE 的 delay 批注不会自动添加到演化域。只有 `ODE.wait(d)` 的私有
-`local_clock_deadline` 会把实际域扩展为：
-
-\[
-B^*=B\land\tau<d.
-\]
+ODE 的 delay 批注不会自动添加到演化域；若要在给定时间边界自然结束，必须在
+用户演化域中显式写出相应的时钟条件。
 
 ### 9.3 safety dL 义务
 
@@ -719,8 +727,8 @@ KeYmaera X；这一步的捷径判断没有包含 \(D_B\)。只有未走捷径�
 Pre\Rightarrow[F^*](D_F\land D_B\land B^*).
 \]
 
-`B*` 是这条公式要证明的不变量，不放入 dL 程序域。若域整体语法为 true，且
-不是带隐藏截止边界的 `ODE.wait`，该义务直接判 true。
+`B*` 是这条公式要证明的不变量，不放入 dL 程序域。若域整体语法为 true，该义务
+直接判 true。
 
 ### 9.5 自然 timeout 规则的 boundary 义务
 
@@ -796,60 +804,57 @@ ODE 的 dL 证明义务不直接计算解析解。离开 ODE 时，代码把每�
 事件反应得到 angelic type \(A\)，自然后继得到 process type \(T\)，随后调用：
 
 ```python
-make_timed_type(d, A, T)
+make_delay_type(d, A, T)
 ```
 
 有限 \(d\) 的唯一规范形为：
 
 | `A` | `T` | 实际 Type AST |
 |---|---|---|
-| `EndType()` | 任意 `T` | `PureDelayType(d,T)` |
-| 非空通信选择 | `BottomType()` | `CommunicationTimeoutType(d,A)` |
-| 非空通信选择 | 非 Bottom `T` | `TimedExternalChoiceType(d,A,T)` |
+| `NoInterruptType()` | 任意 `T` | `FiniteDelayType(d,A,T)`，打印为 `delay(d).T` |
+| 非空通信选择 | `EmptyType()` | `FiniteDelayType(d,A,T)`，打印为 `delay(d) \unrhd A` |
+| 非空通信选择 | 非空通信后继 `T` | `FiniteDelayType(d,A,T)`，打印为完整式 |
 
-特别地，无事件、无自然后继的有限 ODE 得到：
+特别地，位于语句块末尾、无事件的有限 ODE 隐式以正常 `skip` 结束，得到：
 
 ```python
-PureDelayType(d, BottomType())
+FiniteDelayType(d, NoInterruptType(), EmptyType())
 ```
 
-正无穷 delay 直接返回 \(A\)，任何 fallback 都被视为永远不可达。因此：
+正无穷 delay 构造 `InfiniteDelayType(A)`；其自然到时后继固定为不可达的
+`BottomType()`，不作为普通字段存储。因此：
 
-- 有通信事件时，结果是相应 `InputType/OutputType/ExternalChoiceType`；
-- 没有事件时，\(A=EndType()\)，当前实现返回 `EndType()`。
+- 有通信事件时，结果是 `InfiniteDelayType(InputType/OutputType/ExternalChoiceType)`；
+- 没有事件时，结果是 `InfiniteDelayType(NoInterruptType())`。
 
 无限 ODE 即使具有外层 tail，自然 timeout 也不会进入 tail；但通信提前中断的
 每个事件分支仍会在自己的 continuation 后执行该 tail。
 
-### 9.8 有限 `ODE; Skip` 的双规则选择
+### 9.8 末尾有限 ODE 的空边界后继
 
-有限 ODE 后精确只有一个终端 `Skip` 时，代码认为两种 ODE 规则在语法形状上
-可能重叠，因此不会预先固定规则，而是按顺序隔离执行：
+有限 ODE 总是采用带自然到时后继的规则。若它位于语句块末尾，构造器不会补造
+`Skip()`；而是让空的后继节点序列直接经过 `[T-End]`，得到 `EmptyType()`。
 
-1. `communication-only` 候选；
-2. `natural-timeout` 候选。
+因此以下两种源码位置在行为类型的通信抽象上得到相同的边界后继：
 
-每个候选拥有独立 obligations、diagnostics 和 steps。候选执行后先回滚公共报告，
-再由选择器统一决定：
+```text
+ode(..., delay(d))
+ode(..., delay(d)); skip
+```
 
-- 只有已证明候选，其他候选均 false：选择已证明候选；
-- 多个已证明候选生成 alpha 等价类型：选择第一个；
-- 多个已证明候选类型不等价：总体 unknown；
-- 一个已证明而另一个 unknown：总体 unknown；
-- 没有已证明候选但存在 unknown：总体 unknown；
-- 所有候选均 false：总体 false。
-
-全部候选的证明义务都会留在报告中，但只有选中候选标记为 `active=True` 并参与
-最终 verdict；未选候选只作为审计证据。
+前者不会因为缺少显式语法节点而丢失 `T`，也不会把正常自然结束写成
+`BottomType()`。无穷时延则没有自然到时迁移，使用上一节的
+`InfiniteDelayType(A)` 规则。
 
 ---
 
-## 10. 递归 Process 的转换
+## 10. 递归 Process 的类型构造
 
 ### 10.1 `Mu(X,P,invariant=I)`
 
-当前实现只支持没有外层顺序 tail 的递归节点。若出现 `Mu(...); Q`，返回
-unknown 诊断并停止。
+当前实现只支持没有外层顺序 tail 的递归节点。若出现 `Mu(...); Q`，会因该结构
+超出当前递归构造能力而产生 `unknown` 诊断且无法形成父类型。这里是缺少结构推导
+规则，不是“证明器对一条已生成公式返回 unknown”，因此没有可继续构造的递归类型。
 
 递归入口先证明：
 
@@ -885,7 +890,7 @@ H\land I\land Def(I)\land TypeDomain(\Gamma).
 \Phi_{body}\Rightarrow Def(I)\land I.
 \]
 
-证明成功后，`Var(X)` 转换为相应 `TypeVar("t1")`。
+证明成功后，`Var(X)` 构造为相应 `TypeVar("t1")`。
 
 ### 10.3 是否保留 `MuType`
 
@@ -903,15 +908,15 @@ Delay、内部选择和并行本身不算通信守卫；只有输入/输出类�
 
 ## 11. Type AST 的规范化规则
 
-转换规则不会任意构造多个等价形状，而是通过 Type AST 构造器保持以下规范：
+类型构造规则不会任意构造多个等价形状，而是通过 Type AST 构造器保持以下规范：
 
-1. 正常终止只有 `EndType()`；
-2. `BottomType()` 是正式底行为，不表示错误；
-3. 外部选择：零分支为 `EndType`，单分支直接使用通信类型，多分支才使用
+1. 正常终止只有 `EmptyType()`；
+2. `BottomType()` 仅保留为 Type AST 的论文节点，当前 TypeConstructor 不生成它；
+3. 外部选择：零分支为 `NoInterruptType`，单分支直接使用通信类型，多分支才使用
    `ExternalChoiceType`；
 4. 嵌套 `InternalChoiceType` 按结合结构压平，但不排序；
-5. 三类有限 delay 节点互斥：纯等待、通信超时、完整定时选择；
-6. 正无穷 delay 不构造 delay 节点，直接规范成 angelic type `A`；
+5. 所有有限 delay 均使用 `FiniteDelayType(d,A,T)`；三种论文缩写只影响显示；
+6. 正无穷 delay 由 `InfiniteDelayType(A)` 显式保存，普通后继固定为不可达 bottom；
 7. `ParallelType` 压平嵌套并行，但不排序；
 8. `MuType` 的绑定变量支持 alpha 改名。
 
@@ -955,7 +960,8 @@ dL 公式交给配置的 KeYmaera X 后端或调用方注入的 `dl_checker`。�
 safety/domain 可以本地直接判 true。后端缺失、翻译不支持、超时或未完成证明
 都保守成为 unknown。
 
-任何非 true 结果都会阻止当前规则构造正式类型。
+`false` 会阻止当前规则构造类型；`unknown` 会作为待证明义务保留，但不会阻止
+规则继续构造候选类型。只有 `true` 结论对应的最终类型才是可信类型。
 
 ---
 
@@ -974,11 +980,18 @@ false > unknown > true.
 
 但是“总体 verdict 的合并”和“是否形成类型”是两件事：
 
-- 某个必要 premise 为 false/unknown 时，推导已经短路，`inferred_type=None`；
+- 某个必要 premise 为 `false` 时，推导短路，通常有 `constructed_type=None`；
+- 某个公式 premise 为 `unknown` 时继续推导；若所有结构步骤仍可完成，最终同时
+  得到 `verdict=unknown` 与非空 `constructed_type`，后者是完整但不可信的候选；
+- 结构规则本身无法展开时也可能得到 `unknown` 且 `constructed_type=None`；
 - ODE 未选候选的 obligation 即使 false/unknown，也因 `active=False` 不影响最终
   verdict；
-- 正式 `BottomType` 可以出现在 verdict=true 的合法结果中；
-- `expected_types` 只在推导完成后做结果断言，不参与反向推导。
+- 当前 TypeConstructor 的合法结果不包含 `BottomType`；
+
+公共单入口不会把 `verdict=unknown` 的候选伪装成正常返回值。推导完整时它抛出
+`HCSPUntrustedTypeConstructionError`，并将候选放在 `error.untrusted_type`；未形成
+完整类型时抛出普通 `HCSPTypeConstructionError`。两者的详细日志均保留实际证明
+公式和三值结论。
 
 ---
 
@@ -991,11 +1004,11 @@ false > unknown > true.
 1. T-In 建立新鲜值 \(r\)，得到 `Gamma={x:Real}`、`symbols[x]=r`；
 2. 输入 refinement 加入路径；
 3. T-Out 读取同一个 \(r\)，证明输出 refinement；
-4. 终端得到 `EndType()`；
+4. 终端得到 `EmptyType()`；
 5. 逐层包装：
 
 ```python
-InputType("ch", OutputType("ch", EndType()))
+InputType("ch", OutputType("ch", EmptyType()))
 ```
 
 显示为：
@@ -1025,8 +1038,8 @@ ch!.(0)
 
 ```python
 InternalChoiceType((
-    OutputType("ch1", EndType()),
-    OutputType("ch2", EndType()),
+    OutputType("ch1", EmptyType()),
+    OutputType("ch2", EmptyType()),
 ))
 ```
 
@@ -1036,13 +1049,13 @@ InternalChoiceType((
 选中，则：
 
 ```python
-make_timed_type(d, EndType(), T)
+make_delay_type(d, NoInterruptType(), T)
 ```
 
 规范结果是：
 
 ```python
-PureDelayType(d, T)
+FiniteDelayType(d, NoInterruptType(), T)
 ```
 
 ---
@@ -1057,11 +1070,12 @@ PureDelayType(d, T)
 3. 当前 `T-Assign-post` 的实际证明公式是 \(\Phi\Rightarrow\Phi\)；
 4. 输入已有变量的类型检查使用双向“可比较”关系，而输出使用单向子类型关系；
 5. 输入 refinement 被加入路径作为假设，输出 refinement 必须证明；
-6. If 和 InternalChoice 的兄弟子 judgment 按顺序求解，第一个失败会阻止第二个；
+6. If 和 InternalChoice 的兄弟子 judgment 按顺序求解；第一个因 `false` 或结构
+   错误而无法形成类型时会阻止第二个，但公式 `unknown` 不会；
 7. ODE 后状态不计算解析解，而用新鲜变量和 `B/safety` 条件抽象；
 8. ODE 的三类后继分别使用 `B∧safety`、`safety`、`¬B∧safety`；
 9. safety/domain/boundary 的 dL 程序均使用不带演化域的动力系统；
-10. 有限 `ODE;Skip` 同时试用两个候选规则，并要求得到唯一已证结论；
-11. 正无穷 delay 直接返回 angelic type，超时后继不会保留在 Type AST；
+10. 有限末尾 ODE 的空后继直接经 `[T-End]` 构造为 `EmptyType()`，不补造 `Skip()`；
+11. 正无穷 delay 由 `InfiniteDelayType` 保存；不可达的 bottom 后继不作为可改写字段；
 12. 递归体从仅满足不变量的新鲜抽象状态开始，不继承进入 `Mu` 前的具体符号项；
 13. Type 等价只忽略递归绑定变量改名，选择和并行的次序仍参与比较。

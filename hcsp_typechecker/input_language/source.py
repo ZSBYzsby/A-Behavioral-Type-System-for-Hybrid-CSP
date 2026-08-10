@@ -4,7 +4,7 @@
 AST。它只把同一份 source 中解析得到的现有
 ``ParameterEnvironment``、Gamma/Theta 映射和 Process/System AST 绑定在一起，
 使调用方不会误配不同输入的对象。初始状态和路径条件仍不属于
-concrete syntax，因此本记录不冒充 ``TypingJudgment``。
+concrete syntax，因此本记录不冒充内部 ``TypeConstructionRequest``。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class ParsedHCSPSource:
     字段中的只读映射已经完成用户输入层能够独立执行的结构检查：声明名不重复，
     ``ContinuousType`` 的成员均有同一 Gamma 中的 ``Real`` 标量声明，并且每个
     ``ChannelType`` 都具有显式、互异且与槽位一一对应的 refinement binders。
-    refinement 的自由变量解析和 Bool 类型检查仍由完整类型判断上下文负责。
+    refinement 的自由变量解析和 Bool 静态检查仍由完整类型构造上下文负责。
     """
 
     gamma: Mapping[str, GammaType]

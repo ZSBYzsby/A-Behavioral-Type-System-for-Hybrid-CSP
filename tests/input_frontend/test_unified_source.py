@@ -9,7 +9,7 @@
 
 论文对应
 --------
-本文件验证用户文本到类型检查器输入对象的边界：Gamma 项转换为 BasicType 或
+本文件验证用户文本到类型构造器输入对象的边界：Gamma 项转换为 BasicType 或
 ContinuousType，Theta 项转换为带 binders/refinement 的 ChannelType，Process
 部分仍转换为 Section 2.1 对应的正式 HCSP AST。本文件不执行 Table 2 推导，
 也不在前端重复检查 Process 通信实参与 Theta 签名的元数或 refinement 类型。
@@ -240,7 +240,7 @@ process {{skip}}"""
     # 预期行为：统一前端只保存合法 Expr，不抢先重复完整判断上下文的类型工作。
     # 检查内容：精确比较 ChannelType.refinement 与严格表达式入口生成的 AST。
     # 论文对应：Theta 的公式类型和自由名最终由含 Gamma/参数的类型判断检查。
-    def test_refinement_semantics_remain_for_the_type_checker(self) -> None:
+    def test_refinement_semantics_remain_for_the_type_constructor(self) -> None:
         """语法合法的 refinement 应被无损保存，即使其后仍可能类型错误。"""
 
         source = _source_with(

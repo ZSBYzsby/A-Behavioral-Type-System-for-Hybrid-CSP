@@ -33,29 +33,31 @@ import unittest
 from hcsp_typechecker._internal import (
     Assign,
     BasicType,
-    BottomType,
     ChannelType,
     Configuration,
     ContinuousType,
+    EmptyType,
     EndType,
     Expr,
     InputChannel,
+    InfiniteDelayType,
     Literal,
     Mu,
     MuType,
+    NoInterruptType,
     ODE,
     ODEAnnotation,
     ODELocalClock,
     OutputChannel,
     OutputType,
-    PureDelayType,
+    FiniteDelayType,
     RecursionAnnotation,
     Sequence,
     Skip,
     TypeVar,
     Var,
     Verdict,
-    check_hcsp,
+    construct_type,
     types_equivalent,
 )
 
@@ -205,17 +207,11 @@ class AnnotationAstTests(unittest.TestCase):
                 "interrupts",
                 "annotation",
                 "local_clock",
-                "local_clock_deadline",
             ),
         )
         clock_field = next(field for field in fields(ODE) if field.name == "local_clock")
-        deadline_field = next(
-            field for field in fields(ODE) if field.name == "local_clock_deadline"
-        )
         self.assertFalse(clock_field.init)
         self.assertFalse(clock_field.compare)
-        self.assertFalse(deadline_field.init)
-        self.assertTrue(deadline_field.compare)
 
     # 测试输入：构造两个没有用户方程的 ODE，不传入任何时钟参数。
     # 预期行为：两者自动获得不同 ODELocalClock，且名称/初值/导数固定为 t/0/1。
@@ -233,20 +229,12 @@ class AnnotationAstTests(unittest.TestCase):
         self.assertEqual(first.local_clock.name, "t")
         self.assertEqual(first.local_clock.initial_value, Literal(Fraction(0)))
         self.assertEqual(first.local_clock.derivative, Literal(Fraction(1)))
-        self.assertIsNone(first.local_clock_deadline)
         with self.assertRaises(TypeError):
             ODE(  # type: ignore[call-arg]
                 [],
                 True,
                 annotation=ODEAnnotation(delay=1),
                 local_clock=ODELocalClock(),
-            )
-        with self.assertRaises(TypeError):
-            ODE(  # type: ignore[call-arg]
-                [],
-                True,
-                annotation=ODEAnnotation(delay=1),
-                local_clock_deadline=Literal(1),
             )
 
 
@@ -265,13 +253,16 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             True,
             annotation=ODEAnnotation(safety=True, delay=math.inf),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
         )
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertIsInstance(report.inferred_type, EndType)
+        self.assertEqual(
+            report.constructed_type,
+            InfiniteDelayType(NoInterruptType()),
+        )
         safety_obligations = [
             item for item in report.obligations if item.rule == "T-ODE-safety"
         ]
@@ -279,11 +270,11 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         self.assertEqual(safety_obligations[0].verdict, Verdict.TRUE)
 
     # 测试输入：静止 ODE，批注明确给出精确有理 delay=1/2。
-    # 预期行为：可信 dL 后端批准域前提后，得到 PureDelayType(1/2, bottom)。
-    # 检查内容：比较完整类型与精确 duration；无自然后继时只登记 domain，
-    #           不登记 boundary，也不生成多余的 T-ODE-delay 义务。
-    # 论文对应：Section 4.3 纯通信中断形式的外部时延批注。
-    def test_delay_annotation_appears_in_the_inferred_type(self) -> None:
+    # 预期行为：可信 dL 后端批准域前提后，得到以 EmptyType 为边界后继的
+    #           FiniteDelayType(1/2, NoInterruptType(), EmptyType())。
+    # 检查内容：末尾 ODE 直接通过 T-End 得到空通信行为，不依赖补造 Skip。
+    # 论文对应：Section 4.3 的有限自然到时分支与 Table 2 [T-End]。
+    def test_delay_annotation_appears_in_the_constructed_type(self) -> None:
         """有限有理 d 必须精确形成 delay(d)，而不是由检查器重新计算。"""
 
         process = ODE(
@@ -291,25 +282,28 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             True,
             annotation=ODEAnnotation(delay="1 / 2"),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             dl_checker=_approve_dl,
         )
-        expected = PureDelayType(Fraction(1, 2), BottomType())
+        expected = FiniteDelayType(
+            Fraction(1, 2), NoInterruptType(), EmptyType()
+        )
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertTrue(types_equivalent(report.inferred_type, expected))
-        self.assertIsInstance(report.inferred_type, PureDelayType)
-        self.assertEqual(report.inferred_type.duration, Fraction(1, 2))
+        self.assertTrue(types_equivalent(report.constructed_type, expected))
+        self.assertIsInstance(report.constructed_type, FiniteDelayType)
+        self.assertEqual(report.constructed_type.duration, Fraction(1, 2))
+        self.assertIsInstance(report.constructed_type.continuation, EmptyType)
         rules = {item.rule for item in report.obligations}
-        self.assertIn("T-ODE-domain", rules)
-        self.assertNotIn("T-ODE-boundary", rules)
+        self.assertIn("T-ODE-boundary", rules)
+        self.assertNotIn("T-ODE-domain", rules)
         self.assertNotIn("T-ODE-delay", rules)
 
     # 测试输入：x'=1、域 x<=10、安全式 x<=8、delay=2。
     # 预期行为：可信 mock 后端批准后结果为 true。
-    # 检查内容：报告必须同时含 T-ODE-safety 和 T-ODE-domain 义务。
+    # 检查内容：报告必须同时含 T-ODE-safety 和 T-ODE-boundary 义务。
     # 论文对应：T-ODE 与带安全性质的连续演化规则需要 dL 验证。
     def test_nontrivial_safety_generates_a_dl_obligation(self) -> None:
         """非恒真安全性质必须交给 dL 后端验证。"""
@@ -319,7 +313,7 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             "x <= 10",
             annotation=ODEAnnotation(safety="x <= 8", delay=2),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
@@ -329,10 +323,10 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         rules = {item.rule for item in report.obligations}
         self.assertIn("T-ODE-safety", rules)
-        self.assertIn("T-ODE-domain", rules)
+        self.assertIn("T-ODE-boundary", rules)
 
     # 测试输入：有限时延 ODE 后顺序连接具有 Int 载荷的 ``done!0``。
-    # 预期行为：无通信分支使结果成为 PureDelayType，continuation 是 done!。
+    # 预期行为：无通信中断使结果成为 FiniteDelayType，continuation 是 done!。
     # 检查内容：比较 duration 和 OutputType continuation 的完整结构。
     # 论文对应：新版 Table 2 带自然结束后继的第二条 T-\unrhd 规则。
     def test_outer_sequence_becomes_the_ode_fallback(self) -> None:
@@ -346,19 +340,20 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             ),
             OutputChannel("done", 0),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
             dl_checker=_approve_dl,
         )
-        expected = PureDelayType(
+        expected = FiniteDelayType(
             1,
+            NoInterruptType(),
             OutputType("done", EndType()),
         )
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertTrue(types_equivalent(report.inferred_type, expected))
+        self.assertTrue(types_equivalent(report.constructed_type, expected))
 
     # 测试输入：delay=infinity 的无中断 ODE 后仍顺序连接 Skip。
     # 预期行为：结果为 true，超时后继 Skip 被设置为 bottom，最终 A 为 0。
@@ -375,14 +370,17 @@ class ODEAnnotationTypingTests(unittest.TestCase):
             ),
             Skip(),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             dl_checker=_approve_dl,
         )
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertEqual(report.inferred_type, EndType())
+        self.assertEqual(
+            report.constructed_type,
+            InfiniteDelayType(NoInterruptType()),
+        )
         self.assertFalse(
             any(item.rule == "T-ODE-boundary" for item in report.obligations)
         )
@@ -407,7 +405,7 @@ class RecursionAnnotationTypingTests(unittest.TestCase):
             ),
             annotation=RecursionAnnotation("x >= 0"),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.INT},
             theta={"tick": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
@@ -416,7 +414,7 @@ class RecursionAnnotationTypingTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(
             types_equivalent(
-                report.inferred_type,
+                report.constructed_type,
                 MuType("T", OutputType("tick", TypeVar("T"))),
             )
         )
@@ -440,7 +438,7 @@ class RecursionAnnotationTypingTests(unittest.TestCase):
             ),
             annotation=RecursionAnnotation("x >= 0"),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.INT},
             theta={"tick": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
@@ -471,7 +469,7 @@ class RecursionAnnotationTypingTests(unittest.TestCase):
             ),
             annotation=RecursionAnnotation("x <= 1"),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"tick": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],

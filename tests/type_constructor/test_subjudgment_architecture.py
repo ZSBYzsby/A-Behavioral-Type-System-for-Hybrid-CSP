@@ -1,7 +1,8 @@
-"""验证类型检查器采用显式子 judgment 推导架构。
+"""验证类型构造器采用显式子 judgment 推导架构。
 
 测试内容：
 
+* 构造器对象只提供 ``construct(request)``，不保留旧 ``check`` 兼容入口；
 * 每个 ``rule_t_*`` 方法是否只返回 ``RuleExpansion``；
 * 规则函数是否保持只展开一层，不直接求解子规则或调用证明器；
 * 一次含 ODE 的真实推导是否依次经过 configuration、system、process 和 event
@@ -22,12 +23,13 @@ import inspect
 import unittest
 from typing import Any, get_type_hints
 
-import hcsp_typechecker.typechecking.checker as checker_module
+import hcsp_typechecker.typechecking.constructor as constructor_module
 from hcsp_typechecker._internal import (
     Configuration,
     ODE,
-    TypeChecker,
-    TypingJudgment,
+    ODEAnnotation,
+    TypeConstructor,
+    TypeConstructionRequest,
     Verdict,
 )
 
@@ -35,7 +37,17 @@ from hcsp_typechecker._internal import (
 class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
     """锁定“规则展开”和“premise 求解”之间的架构边界。"""
 
-    # 测试输入：checker.py 中当前全部 rule_t_* 方法的 Python AST 和类型标注。
+    # 测试输入：TypeConstructor 的公开实例方法集合。
+    # 预期行为：正式入口命名为 construct；旧 check 名称完全不存在。
+    # 检查内容：同时防止兼容别名悄悄恢复，给未来 TypeChecker 留出独立语义。
+    # 论文对应：当前对象负责从推导请求构造类型，而不是检查用户给定的类型。
+    def test_constructor_uses_construct_entrypoint_without_check_alias(self) -> None:
+        """TypeConstructor 的动词应准确表达“构造类型”职责。"""
+
+        self.assertTrue(callable(getattr(TypeConstructor, "construct", None)))
+        self.assertFalse(hasattr(TypeConstructor, "check"))
+
+    # 测试输入：constructor.py 中当前全部 rule_t_* 方法的 Python AST 和类型标注。
     # 预期行为：所有规则返回 _RuleExpansion，且规则体不调用任何 _solve_*/_infer_*
     #           入口、不直接调用 _decide_proof，也不递归调用其他 rule_t_* 方法。
     # 检查内容：返回类型以及规则函数调用图中的禁止边。
@@ -43,7 +55,7 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
     def test_rules_only_expand_conclusions_into_premises(self) -> None:
         """规则函数必须保持为纯粹的一层推导展开入口。"""
 
-        source = inspect.getsource(checker_module.TypeChecker)
+        source = inspect.getsource(constructor_module.TypeConstructor)
         tree = ast.parse(source)
         class_node = tree.body[0]
         self.assertIsInstance(class_node, ast.ClassDef)
@@ -57,9 +69,9 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
 
         for rule in rules:
             with self.subTest(rule=rule.name):
-                method = getattr(TypeChecker, rule.name)
-                hints = get_type_hints(method, vars(checker_module))
-                self.assertIs(hints["return"], checker_module._RuleExpansion)
+                method = getattr(TypeConstructor, rule.name)
+                hints = get_type_hints(method, vars(constructor_module))
+                self.assertIs(hints["return"], constructor_module._RuleExpansion)
 
                 forbidden_calls: list[str] = []
                 for call in (node for node in ast.walk(rule) if isinstance(node, ast.Call)):
@@ -73,7 +85,7 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
                         forbidden_calls.append(called)
                 self.assertEqual(forbidden_calls, [])
 
-    # 测试输入：ODE.wait(1)，其规则同时产生 dL 公式、事件反应和自然后继。
+    # 测试输入：带显式时钟边界的有限 ODE，其规则同时产生 dL 公式、事件反应和自然后继。
     # 预期行为：统一分派器实际看到四层 judgment；报告中的 T-sigma/T-ODE 说明
     #           分别列出 state formula、system、dL formula、event 和 process premise。
     # 检查内容：运行时 judgment 类别、候选类型、premise 轨迹，以及后端调用
@@ -85,7 +97,7 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
         proof_observations: list[
             tuple[str, tuple[str, ...], tuple[str, ...]]
         ] = []
-        checker: TypeChecker
+        constructor: TypeConstructor
 
         # 功能：记录后端被调用时的执行轨迹，并唯一证明 boundary 候选。
         def observing_backend(obligation: Any) -> bool:
@@ -95,15 +107,15 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
             proof_observations.append(
                 (
                     role,
-                    tuple(step.rule for step in checker.steps),
-                    tuple(item.rule for item in checker.obligations),
+                    tuple(step.rule for step in constructor.steps),
+                    tuple(item.rule for item in constructor.obligations),
                 )
             )
             return role == "boundary"
 
-        checker = TypeChecker(dl_checker=observing_backend)
+        constructor = TypeConstructor(dl_checker=observing_backend)
         visited: list[str] = []
-        original_solver = checker._solve_child_judgment
+        original_solver = constructor._solve_child_judgment
 
         def observing_solver(judgment):
             """记录统一分派器收到的 judgment 类别，再保持原求解语义。"""
@@ -111,12 +123,17 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
             visited.append(type(judgment).__name__)
             return original_solver(judgment)
 
-        checker._solve_child_judgment = observing_solver  # type: ignore[method-assign]
-        report = checker.check(
-            TypingJudgment(
+        constructor._solve_child_judgment = observing_solver  # type: ignore[method-assign]
+        report = constructor.construct(
+            TypeConstructionRequest(
                 gamma={},
                 theta={},
-                configurations=[Configuration({}, ODE.wait(1))],
+                configurations=[
+                    Configuration(
+                        {},
+                        ODE((), "t < 1", annotation=ODEAnnotation(delay=1)),
+                    )
+                ],
             )
         )
 
@@ -137,13 +154,13 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
         self.assertIn("formula[dl:T-ODE-safety]", ode_step.detail)
         self.assertIn("formula[dl:T-ODE-boundary]", ode_step.detail)
         self.assertIn("event[E]", ode_step.detail)
-        self.assertIn("process[skip]", ode_step.detail)
+        self.assertIn("process[T-End]", ode_step.detail)
         step_rules = tuple(step.rule for step in report.steps)
-        self.assertIn("T-ODE-Select", step_rules)
+        self.assertNotIn("T-ODE-Select", step_rules)
         self.assertIn("Proof", step_rules)
         self.assertEqual(
             tuple(item[0] for item in proof_observations),
-            ("domain", "boundary"),
+            ("boundary",),
         )
         for _role, rules_at_call, obligations_at_call in proof_observations:
             with self.subTest(role=_role):

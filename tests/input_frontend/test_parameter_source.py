@@ -117,8 +117,8 @@ process {{skip}}"""
     # 预期行为：前端保存名称范围合法的 Expr，不提前执行完整表达式类型判断。
     # 检查内容：精确比较 constraint 与独立表达式入口生成的 AST。
     # 论文对应：H 只能引用自身声明；公式的 Bool 类型仍由 typing environment 检查。
-    def test_constraint_semantics_are_preserved_for_the_type_checker(self) -> None:
-        """语法转换不应丢失随后由 checker 拒绝的约束表达式。"""
+    def test_constraint_semantics_are_preserved_for_the_type_constructor(self) -> None:
+        """语法转换不应丢失随后由 TypeConstructor 拒绝的约束表达式。"""
 
         parsed = parse_hcsp_source(
             """gamma()
@@ -219,7 +219,7 @@ class ParameterSourceValidationTests(unittest.TestCase):
                 self.assertIn(expected_message, str(context.exception))
 
     # 测试输入：参数约束引用声明列表中不存在的 missing。
-    # 预期行为：在 where token 处产生 validation 错误，不把未定型名称交给 checker。
+    # 预期行为：在 where token 处产生 validation 错误，不把未定型名称交给 TypeConstructor。
     # 检查内容：核对错误阶段、全局行列及明确列出的未声明名称。
     # 论文对应：参数背景 H 的自由变量定义域必须包含于共享参数声明域。
     def test_parameter_constraint_may_only_reference_declared_parameters(self) -> None:

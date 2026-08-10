@@ -25,8 +25,8 @@ from hcsp_typechecker._internal import (
     BasicType,
     Configuration,
     Sequence,
-    TypeChecker,
-    TypingJudgment,
+    TypeConstructor,
+    TypeConstructionRequest,
     Verdict,
 )
 
@@ -48,9 +48,9 @@ class AssignmentPostStateTests(unittest.TestCase):
             Assign("y", "2 * x"),
             Assert("y == 2 * x"),
         )
-        checker = TypeChecker(dl_checker=lambda _obligation: True)
-        report = checker.check(
-            TypingJudgment(
+        constructor = TypeConstructor(dl_checker=lambda _obligation: True)
+        report = constructor.construct(
+            TypeConstructionRequest(
                 gamma={"x": BasicType.INT, "y": BasicType.INT},
                 theta={},
                 configurations=[Configuration({"x": 3, "y": 0}, process)],
@@ -91,9 +91,9 @@ class AssignmentPostStateTests(unittest.TestCase):
             Assign("x", "x + 1"),
             Assert("x >= 1"),
         )
-        checker = TypeChecker(dl_checker=lambda _obligation: True)
-        report = checker.check(
-            TypingJudgment(
+        constructor = TypeConstructor(dl_checker=lambda _obligation: True)
+        report = constructor.construct(
+            TypeConstructionRequest(
                 gamma={"x": BasicType.INT},
                 theta={},
                 configurations=[Configuration({"x": 0}, process)],
@@ -128,9 +128,9 @@ class AssignmentPostStateTests(unittest.TestCase):
     def test_partial_rhs_adds_only_concrete_definedness_formula(self) -> None:
         """顺序证明可判定具体 T-Assign 公式，但不搜索未知后置谓词。"""
 
-        checker = TypeChecker(dl_checker=lambda _obligation: True)
-        report = checker.check(
-            TypingJudgment(
+        constructor = TypeConstructor(dl_checker=lambda _obligation: True)
+        report = constructor.construct(
+            TypeConstructionRequest(
                 gamma={"x": BasicType.REAL, "y": BasicType.REAL},
                 theta={},
                 configurations=[

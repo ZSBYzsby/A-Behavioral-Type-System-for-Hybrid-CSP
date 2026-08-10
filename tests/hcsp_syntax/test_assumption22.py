@@ -70,7 +70,7 @@ class Assumption22ConstructionTests(unittest.TestCase):
 
     # 测试输入：直接自环 ``mu X.X``。
     # 预期行为：Mu 构造器立即抛出带 Assumption 2.2 标识的 ValueError。
-    # 检查内容：核对变量名和违规位置均进入诊断，不推迟到类型检查阶段。
+    # 检查内容：核对变量名和违规位置均进入诊断，不推迟到类型构造阶段。
     # 论文对应：绑定点到 X 的路径没有经过任何输入或输出通信。
     def test_direct_unguarded_recursive_call_is_rejected(self) -> None:
         """直接递归回边不满足通信守卫。"""
@@ -137,7 +137,7 @@ class Assumption22ConstructionTests(unittest.TestCase):
             Sequence.of(InputChannel("in", "v"), Var("X")),
             Var("X"),
         )
-        with self.assertRaisesRegex(ValueError, r"body\.right"):
+        with self.assertRaisesRegex(ValueError, r"body\.branches\[1\]"):
             Mu("X", body)
 
     # 测试输入：内部选择两支分别以输入和输出开头，随后都回到 X。
@@ -153,7 +153,7 @@ class Assumption22ConstructionTests(unittest.TestCase):
         )
         self.assertIsInstance(Mu("X", body), Mu)
 
-    # 测试输入：三元内部选择的两个分支都通信，公共 continuation 为 X。
+    # 测试输入：多元内部选择的两个分支都通信，公共 continuation 为 X。
     # 预期行为：Mu 成功构造，因为到达公共 X 的两条路径都已受通信保护。
     # 检查内容：确认 Assumption 2.2 把左右出口状态分别传入第三字段。
     # 论文对应：``(P \sqcup P');Q`` 中每条到 Q 内递归回边的路径都必须通信。
@@ -163,7 +163,7 @@ class Assumption22ConstructionTests(unittest.TestCase):
         body = InternalChoice(
             InputChannel("left", "v"),
             OutputChannel("right", 1),
-            Var("X"),
+            continuation=Var("X"),
         )
         self.assertIsInstance(Mu("X", body), Mu)
 
@@ -180,7 +180,7 @@ class Assumption22ConstructionTests(unittest.TestCase):
                 InternalChoice(
                     InputChannel("left", "v"),
                     Skip(),
-                    Var("X"),
+                    continuation=Var("X"),
                 ),
             )
 
@@ -221,13 +221,8 @@ class Assumption22ConstructionTests(unittest.TestCase):
         """ODE 事件分支的通信前缀保护该分支 continuation。"""
 
         events = EventChoice(
-            InputChannel("stop", "v"),
-            Var("X"),
-            EventChoice(
-                OutputChannel("alarm", 1),
-                Var("X"),
-                EmptyEvent(),
-            ),
+            (InputChannel("stop", "v"), Var("X")),
+            (OutputChannel("alarm", 1), Var("X")),
         )
         body = ODE(
             [("x", 1)],
@@ -244,11 +239,7 @@ class Assumption22ConstructionTests(unittest.TestCase):
     def test_ode_does_not_guard_its_sequential_fallback(self) -> None:
         """ODE 中存在事件分支也不能保护其自然结束后的公共后继。"""
 
-        events = EventChoice(
-            InputChannel("stop", "v"),
-            Skip(),
-            EmptyEvent(),
-        )
+        events = EventChoice((InputChannel("stop", "v"), Skip()))
         flow = ODE(
             [("x", 1)],
             "x <= 1",

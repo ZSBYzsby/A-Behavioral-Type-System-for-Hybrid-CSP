@@ -28,10 +28,11 @@ r"""Type System 层中 Section 4.1/4.2 行为类型的规范化抽象语法树�
 本模块不使用一个含 ``duration/choices/fallback`` 的通用节点，而把上述互斥情况
 规范化为：
 
-* ``EndType``、``InputType``、``OutputType``、``ExternalChoiceType`` 表示 ``A``；
-* ``PureDelayType`` 表示 ``delay(d).T``，即没有通信分支的纯等待；
-* ``CommunicationTimeoutType`` 表示 ``delay(d) \unrhd A``，其正常后继为 ``\bot``；
-* ``TimedExternalChoiceType`` 表示同时具有非空 ``A`` 和正常后继 ``T`` 的完整式；
+* ``NoInterruptType``、``InputType``、``OutputType``、``ExternalChoiceType`` 表示 ``A``；
+* ``EmptyType`` 表示没有可观察信道通信的过程行为；``skip`` 构造它；
+* ``FiniteDelayType`` 统一保存有限时延 ``delay(d) \unrhd A \triangleright T``；
+  它的打印形式会按字段值采用论文缩写；
+* ``InfiniteDelayType`` 显式保存 ``delay(infinity) \unrhd A \triangleright \bot``；
 * ``InternalChoiceType``、``TypeVar``、``MuType``、``BottomType`` 表示其余 ``T``；
 * ``ParallelType`` 表示 Section 4.2 的组合配置类型 ``mathcal T``。
 
@@ -53,17 +54,16 @@ Python 继承层次显式保存论文 ``mathcal T``、``T``、``A`` 的包含方
     `-- ConfigurationType                         mathcal T
         |-- ProcessType                           T
         |   |-- AngelicType                       A
-        |   |   |-- EndType                       0
+        |   |   |-- NoInterruptType               empty A
         |   |   |-- InputType                     ch?.T
         |   |   |-- OutputType                    ch!.T
         |   |   `-- ExternalChoiceType            A1 \sqcap ... \sqcap An
+        |   |-- EmptyType                         0 (empty communication behavior)
         |   |-- BottomType                        \bot
         |   |-- TypeVar                           t
         |   |-- InternalChoiceType                T \sqcup T'
-        |   |-- PureDelayType                     delay(d).T
-        |   |-- CommunicationTimeoutType          delay(d) \unrhd A
-        |   |-- TimedExternalChoiceType           delay(d) \unrhd A
-        |   |                                      \triangleright T
+        |   |-- FiniteDelayType                   delay(d) \unrhd A \triangleright T
+        |   |-- InfiniteDelayType                 delay(infinity) \unrhd A
         |   `-- MuType                            mu t.T
         `-- ParallelType                          mathcal T | mathcal T
 
@@ -77,32 +77,30 @@ Python 继承层次显式保存论文 ``mathcal T``、``T``、``A`` 的包含方
 
 .. code-block:: text
 
-    branches = 0       -> EndType()
+    branches = 0       -> NoInterruptType()
     branches = 1       -> InputType(...) 或 OutputType(...)
     branches >= 2      -> ExternalChoiceType(...)
 
-``make_timed_type(delta, A, T)`` 再完整划分统一 delay 产生式的状态空间：
+``make_delay_type(delta, A, T)`` 直接构造统一 delay 产生式：
 
 .. code-block:: text
 
-    delta = infinity                       -> A（超时后继固定为 \bot）
-    delta < infinity, A = 0                -> PureDelayType(delta, T)
-    delta < infinity, A != 0, T = \bot     -> CommunicationTimeoutType(delta, A)
-    delta < infinity, A != 0, T != \bot    -> TimedExternalChoiceType(delta, A, T)
+    delta = infinity                       -> InfiniteDelayType(A)
+    delta < infinity                       -> FiniteDelayType(delta, A, T)
 
-四种条件互斥且完备。具体 delay 节点的构造器还会拒绝属于其他分支的字段组合，
-例如空 ``A`` 不能形成 ``CommunicationTimeoutType``，``\bot`` 后继不能形成
-``TimedExternalChoiceType``。因此同一种论文类型不会出现多个 AST 表示。
+有限时延的普通后继绝不能是 ``\bot``；缺省后继与空通信后继统一为
+``EmptyType``。因此类型构造不会把正常终止误写成错误行为，也无需先决定
+它应属于哪种缩写类别。
 
 ────────────────── 构造责任与检查边界 ──────────────────────────────────────
 
 ``ConfigurationType`` 对应 ``mathcal T``，``ProcessType`` 对应 ``T``，
 ``AngelicType`` 对应可按论文缩写嵌入 ``T`` 的 ``A``。输入/输出节点是单分支
-``A``；至少两个通信分支才使用 ``ExternalChoiceType``，而 ``EndType`` 是 ``0``
-的唯一表示。
+``A``；至少两个通信分支才使用 ``ExternalChoiceType``，空中断集合则使用
+``NoInterruptType``。过程终止/无通信行为由独立的 ``EmptyType`` 表示。
 
 本文件只定义不可变类型 AST、规范化工厂与 alpha 等价比较，不执行 Table 2
-类型推导。Gamma、Theta、路径条件和证明义务由 ``checker.py``、``logic.py``
+类型构造。Gamma、Theta、路径条件和证明义务由 ``constructor.py``、``logic.py``
 与 dL 后端检查。每个具体节点只检查不依赖推导上下文即可判断的语法类别、
 分支数、有限时延和递归通信守卫条件。
 
@@ -153,7 +151,7 @@ class ProcessType(ConfigurationType, ABC):
 
 # --------------------------------------------------------------------------
 # 论文对应：Section 4.1 的 angelic type A；论文定义 A 为无限等待过程类型的缩写。
-# 构造方式：使用 EndType、InputType、OutputType 或 ExternalChoiceType。
+# 构造方式：使用 NoInterruptType、InputType、OutputType 或 ExternalChoiceType。
 # 构造检查：本层保持抽象；四个具体节点给 A 建立唯一规范表示。
 # --------------------------------------------------------------------------
 class AngelicType(ProcessType, ABC):
@@ -161,24 +159,46 @@ class AngelicType(ProcessType, ABC):
 
 
 # --------------------------------------------------------------------------
-# 论文对应：A ::= 0；Table 2 [T-End] 也把终端 skip 推导为同一个 0。
-# 构造方式：EndType()。
-# 构造检查：无字段；这是 0 的唯一 AST 表示，空 ExternalChoiceType 被禁止。
+# 论文对应：A 的空中断集合；它与 Table 2 [T-End] 的空过程行为分开建模。
+# 构造方式：NoInterruptType()。
+# 构造检查：无字段；空 ExternalChoiceType 被禁止并规范到此节点。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
-class EndType(AngelicType):
-    """空 angelic choice／正常终止类型 ``0``。"""
+class NoInterruptType(AngelicType):
+    """没有可发生通信中断的 angelic type ``0``。
+
+    该节点只可出现在 ``A`` 位置：它表示 ODE 的中断集合为空，不能表示
+    ``skip`` 或任意已经结束的过程行为。
+    """
 
     def __str__(self) -> str:
-        """使用论文记号显示唯一的 ``0``。"""
+        """以空集显示没有可发生的通信中断。"""
+        return r"\emptyset"
+
+
+@dataclass(frozen=True)
+class EmptyType(ProcessType):
+    """不再发生信道通信的空过程行为 ``epsilon``。
+
+    Table 2 的 ``skip``、赋值和断言等静默过程的终点均构造此节点。它和
+    ``NoInterruptType`` 分属 ``T``、``A`` 两个不同语法范畴，因而不能互换。
+    """
+
+    def __str__(self) -> str:
+        """保留 Table 2 对 skip/空过程通信行为使用的 ``0`` 记号。"""
         return "0"
+
+
+# 旧的内部审计脚本曾把 ``EndType`` 用作过程终止。保留该私有兼容别名，
+# 但 TypeConstructor 与规范化工厂均不再使用它；新代码必须使用 EmptyType。
+EndType = EmptyType
 
 
 # --------------------------------------------------------------------------
 # 论文对应：Section 4.1 的底行为 \bot，即空 demonic choice/异常终止。
 # 构造方式：BottomType()。
 # 构造检查：无字段；它是正式过程类型，不等同于 Verdict.FALSE，也绝不作为
-#           类型推导失败的恢复占位符；推导失败在 CheckReport 中表示为 None。
+#           类型构造失败的恢复占位符；失败在 TypeConstructionReport 中表示为 None。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class BottomType(ProcessType):
@@ -191,7 +211,7 @@ class BottomType(ProcessType):
 
 # --------------------------------------------------------------------------
 # 论文对应：过程类型变量 t；Table 2 [T-X] 从递归进程变量推导它。
-# 构造方式：TypeVar("t")，正常由 TypeChecker 分配新鲜名称。
+# 构造方式：TypeVar("t")，正常由 TypeConstructor 分配新鲜名称。
 # 构造检查：名称必须满足项目 ASCII IDENT；自由/绑定关系由 MuType 与 _type_key 解释。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -269,8 +289,8 @@ CommunicationType = InputType | OutputType
 # --------------------------------------------------------------------------
 # 论文对应：至少两个通信分支组成的 A1 \sqcap ... \sqcap An。
 # 构造方式：ExternalChoiceType((InputType(...), OutputType(...), ...))。
-# 构造检查：至少两个分支且每个分支必须是 InputType/OutputType；0 和单分支分别
-#           由 EndType、InputType/OutputType 唯一表示。
+# 构造检查：至少两个分支且每个分支必须是 InputType/OutputType；空和单分支分别
+#           由 NoInterruptType、InputType/OutputType 唯一表示。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ExternalChoiceType(AngelicType):
@@ -284,7 +304,7 @@ class ExternalChoiceType(AngelicType):
         if len(items) < 2:
             raise ValueError(
                 "ExternalChoiceType requires at least two communication branches; "
-                "use EndType/InputType/OutputType for zero or one branch"
+                "use NoInterruptType/InputType/OutputType for zero or one branch"
             )
         if not all(isinstance(item, (InputType, OutputType)) for item in items):
             raise TypeError(
@@ -307,7 +327,7 @@ def make_external_choice(branches: Iterable[CommunicationType]) -> AngelicType:
     if not all(isinstance(item, (InputType, OutputType)) for item in items):
         raise TypeError("Angelic choice branches must be InputType or OutputType")
     if not items:
-        return EndType()
+        return NoInterruptType()
     if len(items) == 1:
         return items[0]
     return ExternalChoiceType(items)
@@ -345,7 +365,7 @@ class InternalChoiceType(ProcessType):
 
 # 论文对应：所有有限 delay 构造均要求 0 <= d < infinity，且 d 是常量。
 # 功能：把常用 Python 有理输入规范化为精确 Fraction。
-# 构造检查：拒绝 Bool、负数、NaN、无穷和非数值对象；无穷由 make_timed_type 处理。
+# 构造检查：拒绝 Bool、负数、NaN、无穷和非数值对象；无穷由 make_delay_type 处理。
 def _normalize_finite_duration(duration: Any) -> Fraction:
     """验证并返回一个精确的非负有限有理时延。"""
 
@@ -370,132 +390,103 @@ def _normalize_finite_duration(duration: Any) -> Fraction:
     return value
 
 
-# 论文对应：缩写 delay(d).T := delay(d) \unrhd 0 \triangleright T。
-# 构造方式：PureDelayType(duration, continuation)。
-# 构造检查：duration 必须有限非负，continuation 必须是 T；它允许 BottomType，
-#           从而唯一表示 delay(d) \unrhd 0 的退化情况。
+# 论文对应：有限统一产生式 delay(d) \unrhd A \triangleright T。
+# 构造方式：FiniteDelayType(duration, interrupts, continuation)。
+# 构造检查：d 为有限非负有理数；A 必须是 angelic type，T 必须是 process type；
+#           T 不能是 BottomType。NoInterruptType 和 EmptyType 是字段的合法值，
+#           不再被拆成多个互斥 Python 类。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
-class PureDelayType(ProcessType):
-    """没有通信分支、到时后进入 ``T`` 的纯等待类型 ``delay(d).T``。"""
+class FiniteDelayType(ProcessType):
+    r"""有限时延的统一行为类型 ``delay(d) \unrhd A \triangleright T``。"""
 
     duration: Fraction
+    interrupts: AngelicType
     continuation: ProcessType
-
-    def __init__(self, duration: Any, continuation: ProcessType):
-        """规范化有限时延并验证纯等待的过程类型后继。"""
-        if not isinstance(continuation, ProcessType):
-            raise TypeError("Pure delay continuation must be a process type T")
-        object.__setattr__(self, "duration", _normalize_finite_duration(duration))
-        object.__setattr__(self, "continuation", continuation)
-
-    def __str__(self) -> str:
-        """使用论文的点号缩写显示纯等待。"""
-        return f"delay({self.duration}).({self.continuation})"
-
-
-# 论文对应：缩写 delay(d) \unrhd A := delay(d) \unrhd A \triangleright \bot。
-# 构造方式：CommunicationTimeoutType(duration, choices)。
-# 构造检查：duration 必须有限非负；A 必须非空，因为空 A 由 PureDelayType(d, \bot)
-#           唯一表示。
-# --------------------------------------------------------------------------
-@dataclass(frozen=True)
-class CommunicationTimeoutType(ProcessType):
-    r"""必须在有限 ``d`` 内通信、否则进入 ``\bot`` 的超时类型。"""
-
-    duration: Fraction
-    choices: AngelicType
-
-    def __init__(self, duration: Any, choices: AngelicType):
-        """规范化有限时延，并要求至少存在一个通信分支。"""
-        if not isinstance(choices, AngelicType):
-            raise TypeError("Communication timeout choices must be an angelic type A")
-        if isinstance(choices, EndType):
-            raise ValueError(
-                "Empty timeout choices must use PureDelayType(duration, BottomType())"
-            )
-        object.__setattr__(self, "duration", _normalize_finite_duration(duration))
-        object.__setattr__(self, "choices", choices)
-
-    def __str__(self) -> str:
-        """显示通信超时缩写，并用括号标出完整的通信选择 ``A``。"""
-        return f"delay({self.duration}) \\unrhd ({self.choices})"
-
-
-# 论文对应：完整的 delay(d) \unrhd A \triangleright T，其中 A 非空且 T != \bot。
-# 构造方式：TimedExternalChoiceType(duration, choices, fallback)。
-# 构造检查：duration 必须有限非负；空 A 应使用 PureDelayType，bottom fallback
-#           应使用 CommunicationTimeoutType，从而保持三个 delay 节点互斥。
-# --------------------------------------------------------------------------
-@dataclass(frozen=True)
-class TimedExternalChoiceType(ProcessType):
-    """同时具有通信分支和正常到时后继的有限定时外部选择。"""
-
-    duration: Fraction
-    choices: AngelicType
-    fallback: ProcessType
 
     def __init__(
         self,
         duration: Any,
-        choices: AngelicType,
-        fallback: ProcessType,
+        interrupts: AngelicType,
+        continuation: ProcessType,
     ):
-        """验证完整定时选择不是纯等待或无 fallback 的缩写情况。"""
-        if not isinstance(choices, AngelicType):
-            raise TypeError("Timed choices must be an angelic type A")
-        if isinstance(choices, EndType):
-            raise ValueError("Empty timed choices must use PureDelayType")
-        if not isinstance(fallback, ProcessType):
-            raise TypeError("Timed fallback must be a process type T")
-        if isinstance(fallback, BottomType):
-            raise ValueError("Bottom fallback must use CommunicationTimeoutType")
+        """验证统一有限时延的时长、中断集合和自然到时后继。"""
+        if not isinstance(interrupts, AngelicType):
+            raise TypeError("Finite delay interrupts must be an angelic type A")
+        if not isinstance(continuation, ProcessType):
+            raise TypeError("Finite delay continuation must be a process type T")
+        if isinstance(continuation, BottomType):
+            raise ValueError("Finite delay continuation must not be BottomType")
         object.__setattr__(self, "duration", _normalize_finite_duration(duration))
-        object.__setattr__(self, "choices", choices)
-        object.__setattr__(self, "fallback", fallback)
+        object.__setattr__(self, "interrupts", interrupts)
+        object.__setattr__(self, "continuation", continuation)
 
     def __str__(self) -> str:
-        """完整显示定时选择，并分别括住通信选择与正常到时后继。"""
+        """按 A/T 的取值使用论文的三个有限时延缩写。"""
+        if isinstance(self.interrupts, NoInterruptType):
+            return f"delay({self.duration}).({self.continuation})"
+        if isinstance(self.continuation, EmptyType):
+            return f"delay({self.duration}) \\unrhd ({self.interrupts})"
         return (
-            f"delay({self.duration}) \\unrhd ({self.choices}) "
-            f"\\triangleright ({self.fallback})"
+            f"delay({self.duration}) \\unrhd ({self.interrupts}) "
+            f"\\triangleright ({self.continuation})"
         )
 
 
-# 论文对应：统一产生式 delay(delta) \unrhd A \triangleright T 及三个定义式缩写。
-# 功能：把推导规则的 delta/A/T 结果分派成互斥具体节点；本函数不是 AST 节点。
-# 构造检查：正无穷把不可达的超时后继规范为 bottom 并返回 A；有限情况按 A
-#           是否为空、T 是否为 bottom 分派。
-def make_timed_type(
-    duration: Any,
-    choices: AngelicType,
-    fallback: ProcessType,
-) -> ProcessType:
-    """把论文统一时延产生式规范成一个语义明确的具体类型节点。"""
+# 论文对应：无穷时延 delay(infinity) \unrhd A \triangleright \bot。
+# 功能：显式保留无穷时延，避免把它和单独的 A（通信选择）混为一类 AST。
+# 构造检查：只保存 A；不可达的 \bot 后继是该节点的固定语义，不能由调用者改写。
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class InfiniteDelayType(ProcessType):
+    """无穷时延及其通信中断集合；其自然到时后继固定为不可达的 bottom。"""
 
-    if not isinstance(choices, AngelicType):
-        raise TypeError("Timed choices must be an angelic type A")
-    if not isinstance(fallback, ProcessType):
-        raise TypeError("Timed fallback must be a process type T")
+    interrupts: AngelicType
+
+    def __post_init__(self) -> None:
+        """无穷时延只能携带论文范畴 A 中的通信中断集合。"""
+        if not isinstance(self.interrupts, AngelicType):
+            raise TypeError("Infinite delay interrupts must be an angelic type A")
+
+    def __str__(self) -> str:
+        """显示无穷时延；空中断集合只显示 delay(infinity)。"""
+        if isinstance(self.interrupts, NoInterruptType):
+            return "delay(infinity)"
+        return f"delay(infinity) \\unrhd ({self.interrupts})"
+
+
+# 论文对应：统一产生式 delay(delta) \unrhd A \triangleright T。
+# 功能：按时延是否无穷构造两种正式 delay AST 节点；本函数不是 AST 节点。
+# 构造检查：有限 T 不得为 BottomType；无穷情形的 BottomType 后继由
+#           InfiniteDelayType 固定表达，调用方传入的普通 continuation 不进入结果。
+def make_delay_type(
+    duration: Any,
+    interrupts: AngelicType,
+    continuation: ProcessType,
+) -> ProcessType:
+    """把 Table 2 的 d、A、T 构造成有限或无穷时延节点。"""
+
+    if not isinstance(interrupts, AngelicType):
+        raise TypeError("Delay interrupts must be an angelic type A")
+    if not isinstance(continuation, ProcessType):
+        raise TypeError("Delay continuation must be a process type T")
 
     if isinstance(duration, float) and isinf(duration):
         if duration > 0:
             # 论文的无限等待没有超时迁移；转换时把任何候选 fallback 规范为
             # bottom，再使用 A := delay(infinity) \unrhd A \triangleright bottom。
-            return choices
+            return InfiniteDelayType(interrupts)
         raise ValueError("Type duration cannot be negative infinity")
     if isinstance(duration, Decimal) and duration.is_infinite():
         if duration > 0:
             # Decimal 正无穷与 float 正无穷遵循同一不可超时语义。
-            return choices
+            return InfiniteDelayType(interrupts)
         raise ValueError("Type duration cannot be negative infinity")
 
     finite = _normalize_finite_duration(duration)
-    if isinstance(choices, EndType):
-        return PureDelayType(finite, fallback)
-    if isinstance(fallback, BottomType):
-        return CommunicationTimeoutType(finite, choices)
-    return TimedExternalChoiceType(finite, choices, fallback)
+    if isinstance(continuation, BottomType):
+        raise ValueError("Finite delay continuation must not be BottomType")
+    return FiniteDelayType(finite, interrupts, continuation)
 
 
 # --------------------------------------------------------------------------
@@ -575,15 +566,13 @@ def _contains_type_var(value: BehavioralType, name: str) -> bool:
         return _contains_type_var(value.continuation, name)
     if isinstance(value, (ExternalChoiceType, InternalChoiceType)):
         return any(_contains_type_var(branch, name) for branch in value.branches)
-    if isinstance(value, PureDelayType):
-        return _contains_type_var(value.continuation, name)
-    if isinstance(value, CommunicationTimeoutType):
-        return _contains_type_var(value.choices, name)
-    if isinstance(value, TimedExternalChoiceType):
+    if isinstance(value, FiniteDelayType):
         return _contains_type_var(
-            value.choices,
+            value.interrupts,
             name,
-        ) or _contains_type_var(value.fallback, name)
+        ) or _contains_type_var(value.continuation, name)
+    if isinstance(value, InfiniteDelayType):
+        return _contains_type_var(value.interrupts, name)
     if isinstance(value, MuType):
         return value.variable != name and _contains_type_var(value.body, name)
     if isinstance(value, ParallelType):
@@ -612,16 +601,14 @@ def _type_var_guarded(
             _type_var_guarded(branch, name, under_communication)
             for branch in value.branches
         )
-    if isinstance(value, PureDelayType):
-        return _type_var_guarded(value.continuation, name, under_communication)
-    if isinstance(value, CommunicationTimeoutType):
-        return _type_var_guarded(value.choices, name, under_communication)
-    if isinstance(value, TimedExternalChoiceType):
+    if isinstance(value, FiniteDelayType):
         return _type_var_guarded(
-            value.choices,
+            value.interrupts,
             name,
             under_communication,
-        ) and _type_var_guarded(value.fallback, name, under_communication)
+        ) and _type_var_guarded(value.continuation, name, under_communication)
+    if isinstance(value, InfiniteDelayType):
+        return _type_var_guarded(value.interrupts, name, under_communication)
     if isinstance(value, MuType):
         return value.variable == name or _type_var_guarded(
             value.body,
@@ -650,8 +637,10 @@ def _type_key(value: BehavioralType, bound: Mapping[str, int] | None = None) -> 
     """递归生成忽略递归绑定变量改名的规范结构键。"""
 
     current_bound = {} if bound is None else dict(bound)
-    if isinstance(value, EndType):
-        return ("end",)
+    if isinstance(value, NoInterruptType):
+        return ("no-interrupt",)
+    if isinstance(value, EmptyType):
+        return ("empty",)
     if isinstance(value, BottomType):
         return ("bottom",)
     if isinstance(value, TypeVar):
@@ -680,25 +669,15 @@ def _type_key(value: BehavioralType, bound: Mapping[str, int] | None = None) -> 
             "internal",
             tuple(_type_key(branch, current_bound) for branch in value.branches),
         )
-    if isinstance(value, PureDelayType):
+    if isinstance(value, FiniteDelayType):
         return (
-            "pure-delay",
+            "finite-delay",
             _duration_key(value.duration),
+            _type_key(value.interrupts, current_bound),
             _type_key(value.continuation, current_bound),
         )
-    if isinstance(value, CommunicationTimeoutType):
-        return (
-            "communication-timeout",
-            _duration_key(value.duration),
-            _type_key(value.choices, current_bound),
-        )
-    if isinstance(value, TimedExternalChoiceType):
-        return (
-            "timed-external-choice",
-            _duration_key(value.duration),
-            _type_key(value.choices, current_bound),
-            _type_key(value.fallback, current_bound),
-        )
+    if isinstance(value, InfiniteDelayType):
+        return ("infinite-delay", _type_key(value.interrupts, current_bound))
     if isinstance(value, MuType):
         nested_bound = dict(current_bound)
         nested_bound[value.variable] = len(current_bound)

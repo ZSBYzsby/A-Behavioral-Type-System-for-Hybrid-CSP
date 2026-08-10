@@ -3,49 +3,53 @@ r"""公式和子 judgment 失败后的严格短路测试。
 测试内容
 --------
 1. T-Assert 的公式为 false 时，不再访问顺序后继；
-2. T-ODE 的 dL 公式为 unknown 时，不再构造 ODE 后继类型；
+2. T-ODE 的 dL 公式为 unknown 时，保留未决义务并继续构造完整候选类型；
 3. T-If 的第一个子 judgment 失败时，不再检查第二个兄弟分支；
 4. 顶层 T-|| 在某配置失败后停止后续配置，同时保留此前完成的分量类型。
 
 预期行为
 --------
-每个 premise 只有判为 true 才允许推导继续。false/unknown 义务、或失败的子
-judgment，都会令当前规则返回内部失败标记；最终 ``inferred_type`` 为 None。
-报告只包含停止点以前实际产生的 obligations/steps/diagnostics，未访问代码不能
-留下规则步骤或次生错误。顶层多配置报告仍用 ``component_types`` 保存已经完成
-的前缀分量，停止点及其后的分量均为 None。
+``false`` 义务或失败的子 judgment 会令当前规则返回内部失败
+标记，并保留停止点以前的 obligations/steps/diagnostics。``unknown`` 只表示
+证明器尚未建立公式：推导必须继续访问后续 judgment，得到完整但不可信的
+``constructed_type``，同时保留 UNKNOWN verdict。顶层多配置的真正失败仍用
+``constructed_component_types`` 保存已完成的前缀分量，失败点及其后的分量为 None。
 
 论文对应
 --------
-Table 2 的一条类型规则只有在横线上方的全部 premises 都成立时才能使用。本文件
-测试实现层的求解顺序与失败传播，不为论文规则增加新的逻辑前提。
+Table 2 的一条类型规则只有在横线上方的全部 premises 都成立时才是已证
+结论。项目在工具层允许尚未证明的 premise 继续生成候选推导树，但必须把其结果
+标记为 UNKNOWN/不可信；已否证的 premise 仍然使规则失败。
 """
 
 from __future__ import annotations
 
-from math import inf
 import unittest
 
 from hcsp_typechecker._internal import (
     Assert,
     BasicType,
+    ChannelType,
     Configuration,
     ContinuousType,
     EndType,
     If,
     InputChannel,
+    InputType,
+    NoInterruptType,
     ODE,
     ODEAnnotation,
     OutputChannel,
+    FiniteDelayType,
     Sequence,
     Skip,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 
 
 class DerivationShortCircuitTests(unittest.TestCase):
-    """验证非真公式和失败子判断都只留下推导前缀。"""
+    """区分已否证前提的短路与未决前提的继续推导。"""
 
     # 测试输入：assert(false) 后接一个未在 Theta 声明的输出通道。
     # 预期行为：T-Assert 义务为 false 后立即停止；T-Out 永远不会被访问，
@@ -55,7 +59,7 @@ class DerivationShortCircuitTests(unittest.TestCase):
     def test_false_formula_stops_before_sequential_successor(self) -> None:
         """已否证的断言不能继续检查或包装其顺序后继。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -67,7 +71,7 @@ class DerivationShortCircuitTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertEqual(
             tuple(item.rule for item in report.obligations),
             ("T-sigma", "T-Assert"),
@@ -77,42 +81,47 @@ class DerivationShortCircuitTests(unittest.TestCase):
             any("missing" in item.message for item in report.diagnostics)
         )
 
-    # 测试输入：无限 delay ODE 的 safety 为 x>=0，dL 后端返回 unknown；后继
-    #           是一个未声明通道输入。
-    # 预期行为：ODE-safety 记录 unknown 后停止，不再生成 domain 义务、事件
-    #           类型或输入通道诊断，最终类型为 None。
-    # 检查内容：只保留一条 unknown safety 义务，不访问 T-In。
-    # 论文对应：T-ODE 的 safety dL premise 未建立时不能使用规则结论。
-    def test_unknown_formula_stops_ode_before_its_successor(self) -> None:
-        """证明器未知不是成功，不能保守地拼接 ODE 候选类型。"""
+    # 测试输入：有限 ODE 的 safety/boundary 由 dL 后端返回 unknown；
+    #           自然到时后执行已在 Theta 声明的 ch?received。
+    # 预期行为：两条 ODE 义务保留 unknown，但 T-In 仍被访问，并生成
+    #           delay(1).(ch?.0) 完整候选类型；总体 verdict 仍为 unknown。
+    # 检查内容：候选类型、两条未决 dL 义务以及后继 T-In 步骤同时存在。
+    # 论文对应：横线上方公式未证明时，所得只是不可信的候选推导。
+    def test_unknown_formula_is_recorded_while_ode_successor_is_constructed(self) -> None:
+        """UNKNOWN 只降低候选类型的可信性，不得截断后继推导。"""
 
         process = Sequence.of(
             ODE(
                 [("x", 1)],
-                True,
-                annotation=ODEAnnotation(safety="x >= 0", delay=inf),
+                "t < 1",
+                annotation=ODEAnnotation(safety="x >= 0", delay=1),
             ),
-            InputChannel("missing", "received"),
+            InputChannel("ch", "received"),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
-            theta={},
+            theta={"ch": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
             dl_checker=lambda _obligation: None,
         )
 
         self.assertEqual(report.verdict, Verdict.UNKNOWN)
-        self.assertIsNone(report.inferred_type)
+        self.assertEqual(
+            report.constructed_type,
+            FiniteDelayType(1, NoInterruptType(), InputType("ch", EndType())),
+        )
         ode_obligations = tuple(
             item for item in report.obligations if item.rule.startswith("T-ODE")
         )
-        self.assertEqual(len(ode_obligations), 1)
-        self.assertEqual(ode_obligations[0].rule, "T-ODE-safety")
-        self.assertEqual(ode_obligations[0].verdict, Verdict.UNKNOWN)
-        self.assertFalse(any(item.rule == "T-In" for item in report.steps))
-        self.assertFalse(
-            any("missing" in item.message for item in report.diagnostics)
+        self.assertEqual(
+            tuple(item.rule for item in ode_obligations),
+            ("T-ODE-safety", "T-ODE-boundary"),
         )
+        self.assertTrue(
+            all(item.verdict is Verdict.UNKNOWN for item in ode_obligations)
+        )
+        self.assertTrue(any(item.rule == "T-In" for item in report.steps))
+        self.assertFalse(report.diagnostics)
 
     # 测试输入：if true then assert(false) else missing?x。
     # 预期行为：then 子 judgment 失败后，T-If 不再访问 else 兄弟 premise；
@@ -122,7 +131,7 @@ class DerivationShortCircuitTests(unittest.TestCase):
     def test_failed_child_stops_later_sibling_premise(self) -> None:
         """子 judgment 失败必须向父规则传播并截断后续兄弟分支。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -134,7 +143,7 @@ class DerivationShortCircuitTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         self.assertFalse(any(item.rule == "T-In" for item in report.steps))
         self.assertFalse(
             any("missing" in item.message for item in report.diagnostics)
@@ -148,7 +157,7 @@ class DerivationShortCircuitTests(unittest.TestCase):
     def test_parallel_report_keeps_only_completed_prefix(self) -> None:
         """顶层失败既不丢失已完成分量，也不继续运行后续配置。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[
@@ -159,8 +168,8 @@ class DerivationShortCircuitTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
-        self.assertEqual(report.component_types, (EndType(), None, None))
+        self.assertIsNone(report.constructed_type)
+        self.assertEqual(report.constructed_component_types, (EndType(), None, None))
         self.assertFalse(any(item.location == "K3" for item in report.steps))
         self.assertFalse(
             any("missing" in item.message for item in report.diagnostics)

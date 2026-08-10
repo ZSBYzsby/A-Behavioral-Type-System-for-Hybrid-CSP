@@ -1,9 +1,10 @@
-# HCSP Behavioral Type Checker
+# HCSP Behavioral Type Constructor
 
-本项目把一份带 Parameters、Gamma、Theta 与批注 HCSP Process 的用户文本转换为
-Process AST，并按照项目实现的类型规则推导正式 Type AST。普通用户只需要包根的
-两个接口；Process/Type AST 构造器、判断对象、证明义务和证明器适配器均属于内部
-实现，不构成稳定调用协议。
+本项目把一份带 Parameters、Gamma、Theta 与批注 HCSP Process 的用户文本直接
+转换为正式 Type AST，并证明构造过程中产生的必要公式。普通用户只需要包根的
+单一接口 `construct_hcsp_type(...)`；解析时
+生成的 Process AST、具体 Type AST 构造器、判断对象、证明义务和证明器适配器均
+属于内部实现，不构成稳定调用协议。
 
 ## 运行环境
 
@@ -19,17 +20,22 @@ python -m hcsp_typechecker
 ```
 
 缺少 KeYmaera X 不影响离散程序和恒真 ODE 义务；需要外部 dL 证明的程序会保守
-得到 `unknown`。使用 `python -m hcsp_typechecker --require-keymaerax` 可把证明器
-缺失视为环境错误。
+得到 `unknown`。TypeConstructor 会记录这类未决义务并继续规则构造，尽量形成完整候选
+Type AST，但该候选会被明确标为未验证、不可信。使用
+`python -m hcsp_typechecker --require-keymaerax` 可把证明器缺失视为环境错误。
 
-## 两个稳定用户接口
+## 唯一稳定用户接口
+
+包根稳定白名单只有 `HCSPInputError`、`HCSPTypeConstructionError`、
+`HCSPUntrustedTypeConstructionError`、`OutputMode`、`TypeAST` 和
+`construct_hcsp_type` 这六个名称。
 
 ```python
 from hcsp_typechecker import (
     HCSPInputError,
-    HCSPTypeError,
-    infer_hcsp_type,
-    parse_hcsp_program,
+    HCSPTypeConstructionError,
+    HCSPUntrustedTypeConstructionError,
+    construct_hcsp_type,
 )
 
 source = """
@@ -40,37 +46,39 @@ process {{ch?(x); ch!(x)}}
 """
 
 try:
-    program = parse_hcsp_program(
+    type_ast = construct_hcsp_type(
         source,
         source_name="example.hcsp",
-        output="result",
+        output="none",  # 捕获后自行显示；也可改为 "result" 或 "full"
     )
-    type_ast = infer_hcsp_type(program, output="result")
+    print(type_ast)
 except HCSPInputError as error:
     print(error.format_diagnostic())
-except HCSPTypeError as error:
+except HCSPUntrustedTypeConstructionError as error:
+    # 类型结构已经构造完成，但至少一条必要公式仍未证明。
+    print("完整但不可信的候选类型：", error.untrusted_type)
+    print(error.format_full())
+except HCSPTypeConstructionError as error:
     print(error.format_full())
 ```
 
-### `parse_hcsp_program`
+`construct_hcsp_type(...)` 在内部依次解析完整 source、建立 Process AST 和构造配置，
+并在展开规则的过程中依次证明公式。Process AST 不作为公共返回值暴露。三种结果
+必须区分：
 
-第一接口返回只读 `HCSPProgram`，其中同源绑定：
+- 词法、语法或输入结构错误会立即终止并抛出 `HCSPInputError`，类型构造不会启动；
+- 结构/静态前提失败或必要公式得到 `false` 时，当前推导立即停止并抛出
+  `HCSPTypeConstructionError`；异常保留原因、已形成的部分类型和停止前的审计日志；
+- 必要公式得到 `unknown` 时，只记录未决义务并继续推导。若最终形成完整候选
+  Type AST，接口抛出 `HCSPUntrustedTypeConstructionError`；其 `untrusted_type`
+  属性可供审计或外部补证，但它没有通过证明验证，不能当作可信返回值。若因其他
+  原因仍未形成完整类型，则抛出普通 `HCSPTypeConstructionError`。
 
-- `parameters`：共享只读参数声明和约束；
-- `gamma`：状态类型与连续向量环境；
-- `theta`：通道签名及 refinement 环境；
-- `process_ast`：正式 Process 或 Parallel AST；
-- `process_components`：按源码顺序展开的顶层 Process 分量。
-
-该聚合对象是第二接口唯一接受的程序参数，避免用户把不同 source 的环境和 AST
-误配。Gamma、Theta 在内部表示为只读有限映射，而不是另一套重复 AST。
-
-### `infer_hcsp_type`
-
-第二接口自动为 `process_components` 建立配置、分割 Gamma、加入共享参数背景并
-执行证明。只有总体结论为 `true` 时才直接返回正式 `TypeAST`。`false` 或
-`unknown` 会抛出 `HCSPTypeError`；异常保留 `verdict`、首要原因、已经形成的
-分量类型和完整审计日志，不会用 `BottomType` 或候选类型冒充成功结果。
+只有构造完整且全部有效义务均为 `true` 时，接口才正常返回可信 `TypeAST`。
+`HCSPUntrustedTypeConstructionError` 是 `HCSPTypeConstructionError` 的子类；
+需要读取 `untrusted_type` 时应像
+示例一样先捕获它。`BottomType` 保留在 Type AST 中供将来用户给定类型的检查功能使用，
+当前 TypeConstructor 不会把它作为已构造 HCSP 行为的结果。
 
 常用可选参数：
 
@@ -85,14 +93,20 @@ except HCSPTypeError as error:
 
 ### 输出模式
 
-两个接口均支持：
+唯一接口支持：
 
 - `output="none"`：默认，不打印；
-- `output="result"`：只打印本阶段最终结果；
-- `output="full"`：打印输入模型、规则轨迹、FOL/dL 公式、证明器结论和停止原因。
+- `output="result"`：打印最终结论；成功时显示可信类型，`unknown` 且构造完整时
+  显示完整候选类型及“不可信”标记，其他失败显示原因和部分进度；
+- `output="full"`：打印原始输入、环境摘要、内部构造完成说明、规则轨迹、FOL/dL
+  公式、每条证明器结论、未决义务和最终可信性；不会打印或返回 Process AST
+  对象/repr。
 
 也可以使用 `OutputMode.NONE/RESULT/FULL`。`stream=` 可把文本写入文件或
-`io.StringIO`；输出模式只改变展示，不改变解析、推导或返回值。
+`io.StringIO`；输出模式只改变展示，不改变解析、推导、证明或异常语义。发生
+`false` 时，`full` 显示实际停止点以前的轨迹；发生 `unknown` 时，它显示继续推导
+得到的全部轨迹、完整候选类型（如能形成）以及仍待证明的公式。`none` 不打印，
+但异常对象仍提供相应格式化信息。
 
 ## 完整用户输入格式
 
@@ -153,7 +167,7 @@ process {{data!(x, v)}}
 - 不支持字符串、Unit、tuple/list/dict/set、属性、下标、lambda、关键字参数、
   表达式级条件、赋值表达式或任意 Python 代码。
 - 语法树本身不区分数值式与 Bool 式；具体位置所需类型和除零、平方根定义域等
-  条件由第二阶段检查。
+  条件由类型构造过程中的表达式静态类型检查处理。
 
 ### Process、递归与 ODE
 
@@ -167,19 +181,32 @@ process {{data!(x, v)}}
   方程右端、domain 和 safety 中读取，不进入 Gamma，也不能写在 `dot` 左端。
 - 非空 ODE 的用户方程左端集合必须与 Gamma 中某个 `continuous(...)` 集合恰好
   相等；隐藏时钟不参与比较。
-- `wait(d)` 是有限非负有理时延语法糖，不增加新的 Process AST 节点。
+- 不支持 `wait(d)`。有限等待请显式写空 flow ODE，例如
+  `ode(flow(), domain(t < 1), delay(1))`。
 
 ### 证明边界
 
 - Z3 处理项目支持的一阶逻辑片段；不可靠或不支持的翻译不会猜测结论。
 - 非平凡 ODE 证明由 KeYmaera X 完成；证明器缺失、超时或公式超出可靠翻译
-  子集时得到 `unknown`，不会被当作成功。
+  子集时得到 `unknown`。规则构造继续进行，但最终候选会作为不可信异常结果，
+  不会被当作成功。
 - Python callable、原始 Z3 项和自定义 dL 回调只属于内部开发接口，不能写入
   用户 source。
 
+## TypeConstructor 与未来 TypeChecker
+
+当前项目实现的是 **TypeConstructor**：用户给出带批注的 HCSP、Gamma、Theta 和
+参数环境，程序自行构造 Type AST，并证明这一构造所需的公式。尚未实现的
+**TypeChecker** 将接收用户另外给出的 Type，并检查该 Type 是否适用于 HCSP；这是
+不同的入口与工作流，当前公共 API 不接受用户提供的 Type。
+
+顶层 Python 包名 ``hcsp_typechecker`` 作为整个行为类型项目的总命名空间保留，
+以便未来同时容纳 TypeConstructor 与 TypeChecker；当前包根只导出上面列出的
+TypeConstructor 接口，不存在名为 ``TypeChecker`` 的实现或兼容别名。
+
 ## 示例、测试与更多文档
 
-- `python demo.py`：运行几个无需外部证明器的简短示例，展示完整的两阶段接口；
+- `python demo.py`：运行若干简短示例和一个复杂 ODE/delay 示例，展示完整的单接口流程；
 - `python -m unittest discover -s tests -p "test_*.py"`：运行全部自动化测试；
 - `python scripts/check_repository.py`：运行隐私扫描、环境检查和全部测试。
 

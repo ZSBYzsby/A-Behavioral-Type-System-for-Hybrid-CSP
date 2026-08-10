@@ -40,7 +40,7 @@ from hcsp_typechecker._internal import (
     Sequence,
     UntranslatedDLFormula,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 
 
@@ -101,9 +101,9 @@ class DLFormulaGenerationTests(unittest.TestCase):
         process = ODE(
             [("x", "t + 1")],
             "t <= 10 and x <= 10",
-            annotation=ODEAnnotation(safety="x >= t and t <= 2", delay=2),
+            annotation=ODEAnnotation(safety="x >= t and t <= 2", delay=inf),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
@@ -125,7 +125,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
         domain_clock = _local_clock_name(self, domain)
         self.assertIn(f"{safety_clock}'=1", safety.source)
         self.assertIn(f"'=({safety_clock} + 1)", safety.source)
-        self.assertIn(f"{safety_clock}<=2 ->", safety.source)
+        self.assertNotIn(f"{safety_clock}<=2 ->", safety.source)
         self.assertIn(f" >= {safety_clock}", safety.source)
         self.assertTrue(
             f"{safety_clock} = 0" in safety.source
@@ -170,7 +170,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             ),
             OutputChannel("done", 0),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
@@ -212,7 +212,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             ),
             OutputChannel("done", 0),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"done": ChannelType(BasicType.INT)},
             configurations=[Configuration({"x": 0}, process)],
@@ -247,7 +247,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
                 annotation=ODEAnnotation(safety="x >= 1", delay=1),
             ),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
@@ -283,7 +283,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             "x >= 0",
             annotation=ODEAnnotation(safety="x >= 0", delay=inf),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
@@ -305,17 +305,17 @@ class DLFormulaGenerationTests(unittest.TestCase):
             or f"0 = {clock}" in safety.source
         )
 
-    # 测试输入：没有任何用户 ODE 分量或向量声明的 ``ODE.wait(1)``。
+    # 测试输入：没有任何用户 ODE 分量或向量声明的空 flow 有限 ODE。
     # 预期行为：dL 可构造；自动局部时钟是 ODE 模态中的唯一微分方程。
     # 检查内容：要求公式含 t=0、t'=1、t<1 -> B 和 t=1 -> not B；其中
-    #           wait 的 B 正是隐藏的严格边界 t<1。
-    # 论文对应：wait(d) 的局部 t 由规则隐式引入，并在 d 时到达演化边界。
+    #           演化域 B 显式写为严格边界 t<1。
+    # 论文对应：ODE 的局部 t 由规则隐式引入，并在 d 时到达演化边界。
     def test_hidden_clock_supports_ode_without_user_equations(self) -> None:
         """空用户方程仍应通过自动 t'=1 形成正式的 boundary 公式。"""
 
         captured: list[object] = []
-        process = ODE.wait(1)
-        report = check_hcsp(
+        process = ODE((), "t < 1", annotation=ODEAnnotation(delay=1))
+        report = construct_type(
             gamma={},
             theta={},
             configurations=[Configuration({}, process)],
@@ -355,7 +355,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             ),
             OutputChannel("done", 0),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={
                 "x": BasicType.REAL,
                 "y": BasicType.REAL,
@@ -389,7 +389,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             True,
             annotation=ODEAnnotation(safety="x >= 0", delay=1),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
@@ -417,7 +417,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             True,
             annotation=ODEAnnotation(safety="x >= 0", delay=1),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={
                 "x": BasicType.REAL,
                 "flag": BasicType.BOOL,

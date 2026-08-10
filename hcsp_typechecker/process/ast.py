@@ -12,16 +12,16 @@ r"""HCSP process AST、构造期良构检查及 Section 4.2/4.3 批注。
 作为 ``If``、``Sequence``、``Mu`` 等要求 ``P`` 的位置。
 
 文件正文依次定义离散进程与事件节点、ODE 批注和隐藏时钟、递归及
-Assumption 2.2、并行系统及 Assumption 2.1。类型推导不在本文件执行，而在
-``checker.py`` 中按 Table 2 完成。
+Assumption 2.2、并行系统及 Assumption 2.1。类型构造不在本文件执行，而在
+``typechecking/constructor.py`` 中按 Table 2 完成。
 
 ────────────────── 基础语法与多标量通信扩展 ────────────────────────────────
 
 除通信参数表和内部选择的规范 AST 形状外，下面的 E/P/S 结构对应论文
 Section 2.1。项目把论文的单值通信扩展为一次传递一个或多个独立标量；
-同时把论文可通过顺序组合写出的 ``(P \sqcup P'); Q`` 规范化为唯一三元
-``InternalChoice(P, P_prime, Q)``。构造时可省略第三个实参，但 AST 对象的
-第三字段仍会保存 ``Skip()``。
+同时把论文可通过顺序组合写出的 ``(P_1 \sqcup ... \sqcup P_n); Q`` 规范化为
+唯一多元 ``InternalChoice(P_1, ..., P_n, continuation=Q)``。省略公共后继时，
+AST 对象仍会保存 ``Skip()``。
 不易用 ASCII 准确表示的运算符写成未渲染的 LaTeX 命令。字符串表达式会立即通过
 ``ensure_expr`` 转为项目自己的 ``Expr``。
 
@@ -32,10 +32,8 @@ Section 2.1。项目把论文的单值通信扩展为一次传递一个或多个
         | (ch!(e1, ..., en) -> P) \Box E
 
     empty                         EmptyEvent()
-    (ch?(x1,...,xn) -> P) \Box E
-        EventChoice(InputChannel("ch", ("x1", ..., "xn")), P, E)
-    (ch!(e1,...,en) -> P) \Box E
-        EventChoice(OutputChannel("ch", (e1, ..., en)), P, E)
+    (ch_1★ -> P_1) \Box ... \Box (ch_n★ -> P_n)
+        EventChoice((InputChannel(...), P_1), ..., (OutputChannel(...), P_n))
 
     P ::= skip
         | x := e
@@ -58,8 +56,9 @@ Section 2.1。项目把论文的单值通信扩展为一次传递一个或多个
     <dot(v)=e & B> \unrhd E       ODE([("v", e)], B, E,
                                       annotation=ODEAnnotation(...))
     P; P'                         Sequence(P, P_prime)
-    (P \sqcup P'); P''            InternalChoice(P, P_prime, P_double_prime)
-    P \sqcup P'                   InternalChoice(P, P_prime)  # Q = Skip()
+    (P_1 \sqcup ... \sqcup P_n); Q
+                                    InternalChoice(P_1, ..., P_n, continuation=Q)
+    P_1 \sqcup ... \sqcup P_n    InternalChoice(P_1, ..., P_n)  # Q = Skip()
     X                             Var("X")
     mu X.P                        Mu("X", P,
                                       annotation=RecursionAnnotation(...))
@@ -154,8 +153,8 @@ Section 4.2/4.3 不增加新的 ``P`` 节点，而是在既有 ODE/Mu 节点上�
 
 ────────────────── Python 语法糖与规范 AST ─────────────────────────────────
 
-下式左侧统一写便捷输入，右侧统一写规范 AST。多项组合和 ``wait(d)`` 均作为
-对应 AST 类的类方法提供；直接调用类本身仍只构造论文规定的二元或递归节点。
+下式左侧统一写便捷输入，右侧统一写规范 AST。多项组合由对应 AST 类的类方法
+提供；直接调用类本身仍只构造论文规定的二元或递归节点。
 单参数通信直接复用 AST 类的构造器。等号表示构造规范化，不是新增 AST
 产生式。
 
@@ -174,29 +173,19 @@ Section 4.2/4.3 不增加新的 ``P`` 节点，而是在既有 ODE/Mu 节点上�
       = Sequence(P1, ... Sequence(Pn-1, Pn) ...)
 
     InternalChoice.of(P1, ..., Pn, continuation=Q)
-      = InternalChoice(P1, ... InternalChoice(Pn-1, Pn) ..., Q)
+      = InternalChoice(P1, ..., Pn, continuation=Q)
 
     EventChoice.of()
       = EmptyEvent()
 
     EventChoice.of((comm1, P1), ..., (commn, Pn))
-      = EventChoice(comm1, P1, ...
-          EventChoice(commn, Pn, EmptyEvent()) ...)
+      = EventChoice((comm1, P1), ..., (commn, Pn))
 
     Parallel.of(S1, ..., Sn)
       = Parallel(S1, ... Parallel(Sn-1, Sn) ...)
 
-    ODE.wait(d)
-      = Sequence(ODE._for_wait(d), Skip())
-
 这里 ``e`` 若是字符串 ``"x"``，会按表达式规则解析为 ``Variable("x")``，
-不是字符串值。``ODE._for_wait`` 是 ``ODE.wait`` 专用的私有初始化入口，
-不是新的 AST 节点：它产生的仍是 ``ODE``，其规范源字段等价于
-``ODE((), True, EmptyEvent(), annotation=ODEAnnotation(safety=True, delay=d))``，
-并把隐藏 ``local_clock_deadline`` 设为规范化后的有限 ``d``。
-
-``ODE.wait(d)`` 只实现源级 ``wait(d)`` 语法糖，不增加新的进程节点。
-Table 2 的有限时延 ODE 证明前提使用新鲜时钟 ``t``。为了让所有 ODE 采用
+不是字符串值。Table 2 的有限时延 ODE 证明前提使用新鲜时钟 ``t``。为了让所有 ODE 采用
 统一结构，项目使每个 ``ODE`` 节点都自动拥有一个独立的 ``ODELocalClock``。
 该隐藏时钟进入 ODE 时自动取 0，并以导数 1 随连续时间演化。在该 ODE 的
 方程右端、演化域 ``B`` 和安全批注 ``safety`` 中，保留名 ``t`` 表示这个
@@ -204,7 +193,7 @@ Table 2 的有限时延 ODE 证明前提使用新鲜时钟 ``t``。为了让所�
 节点自动提供。这个局部名不进入 Gamma、fv、bv、``get_vars()`` 或并行分区
 V，因此不同 ODE（包括并行 ODE）的时钟不会发生名称碰撞。
 
-类型检查器在构造 dL 义务时才把这个抽象时钟实体化为新鲜 Real 符号，并加入
+TypeConstructor 在构造 dL 义务时才把这个抽象时钟实体化为新鲜 Real 符号，并加入
 入口等式 ``t=0`` 与演化方程 ``t'=1``。用户不再需要仅为了在本 ODE 的公式
 中读取演化时间而显式声明、初始化辅助时钟。局部 ``t`` 的作用域不包含事件
 分支 continuation 或 ODE 的顺序后继；那些位置若需要持久可观察的时钟，仍应
@@ -212,8 +201,9 @@ V，因此不同 ODE（包括并行 ODE）的时钟不会发生名称碰撞。
 
 AST 节点类别仍与论文 Section 2.1 的 E/P/S 构造类别一致；项目差异是通信
 参数表的多标量扩展、既有 ODE/Mu 节点上的批注字段，以及内部选择将论文中
-等价的 ``Sequence(InternalChoice(P, P'), Q)`` 规范保存为三元
-``InternalChoice(P, P', Q)``。这只改变 AST 的唯一表示，不改变 HCSP 运行语义。
+等价的 ``Sequence(InternalChoice(P_1, ..., P_n), Q)`` 规范保存为多元
+``InternalChoice(P_1, ..., P_n, continuation=Q)``。这只改变 AST 的唯一表示，
+不改变 HCSP 运行语义。
 
 ────────────────────────────────────────────────────────────────────────────
 
@@ -255,7 +245,7 @@ class HCSP(ABC):
 
     # 功能：抽象收集系统中全部用户可见的值变量名称，既包括自由使用，
     #       也包括 ch?(x1,...,xn) 引入的全部输入目标；进程变量 X 不属于此返回值。
-    # 检查/论文关系：类型检查器用结果投影/检查 Gamma；Parallel 另由内部
+    # 构造/论文关系：TypeConstructor 用结果投影/验证 Gamma；Parallel 另由内部
     #                fv/bv 分析同时检查值变量和进程变量的 V 分离条件。
     @abstractmethod
     def get_vars(self) -> set[str]:
@@ -378,7 +368,7 @@ class Skip(Process):
     """空进程 ``skip``。"""
 
     # 功能：报告 skip 不读取也不写入任何用户值变量。
-    # 检查/论文关系：返回空集；T-End/T-Skip 的行为在类型推导阶段决定。
+    # 构造/论文关系：返回空集；T-End/T-Skip 的行为在类型构造阶段决定。
     def get_vars(self) -> set[str]:
         """Skip 不读写用户值变量。"""
         return set()
@@ -425,7 +415,7 @@ class Assert(Process):
 
     # 功能：把断言条件规范化为项目表达式 AST。
     # 检查/论文关系：这里只检查表达式语法，
-    #                论文前提 phi => B 留给类型检查器。
+    #                论文前提 phi => B 留给 TypeConstructor 生成并证明。
     def __init__(self, condition: ExprLike):
         """把断言条件转换为严格表达式。"""
         object.__setattr__(self, "condition", ensure_expr(condition))
@@ -613,95 +603,78 @@ class EmptyEvent(EventReaction):
 
 
 # --------------------------------------------------------------------------
-# 论文对应：Section 2.1 的 E ::= (ch★ \rightarrow P) \Box E。
-# 构造方式：EventChoice(communication, continuation, alternative)。
-# 构造检查：前缀只能是多标量输入/输出，后继必须是 P，余项必须是 E；
-#           alternative=None 立即规范化为 EmptyEvent。输入前缀只绑定本分支
-#           continuation；与 alternative 的自由/绑定重名由 Assumption 2.1 拒绝。
+# 论文对应：Table 2 的多分支外部选择 E；Section 2.1 的递归 E 语法在 AST 中
+#           规范化为一个事件分支表。
+# 构造方式：EventChoice((communication_1, continuation_1), ...)。
+# 构造检查：分支表非空；每个前缀只能是多标量输入/输出，后继必须是 P。输入
+#           前缀只绑定自己的 continuation；不同分支的自由/绑定重名由
+#           Assumption 2.1 拒绝。空事件仍唯一表示为 EmptyEvent()。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class EventChoice(EventReaction):
-    r"""一个事件分支 ``(ch★ \rightarrow P) \Box E``。"""
+    r"""非空多分支事件反应 ``(ch_1★ -> P_1) \Box ... \Box (ch_n★ -> P_n)``。"""
 
-    communication: InputChannel | OutputChannel
-    continuation: Process
-    alternative: EventReaction
+    branches: tuple[tuple[InputChannel | OutputChannel, Process], ...]
 
-    # 功能：构造一个通信守卫的外部选择分支，并连接递归事件余项。
-    # 检查/论文关系：逐层保证 Table 2 的外部选择规则
-    #                所处理的每个分支都以通信开头。
+    # 功能：构造一个完整的通信守卫事件分支表。
+    # 检查/论文关系：直接对应 Table 2 [T-\sqcap] 的多前提形式；不在 AST 中
+    #                保存人为的二元 alternative 链。
     def __init__(
         self,
-        communication: InputChannel | OutputChannel,
-        continuation: Process,
-        alternative: EventReaction | None = None,
+        *branches: tuple[InputChannel | OutputChannel, Process],
     ):
-        """验证通信前缀、其专属后继以及并列的递归事件余项。"""
-        if not isinstance(communication, (InputChannel, OutputChannel)):
-            raise TypeError("EventChoice prefix must be an input or output action")
-        if not isinstance(continuation, Process):
-            raise TypeError("EventChoice continuation must be a Process")
-        if alternative is not None and not isinstance(alternative, EventReaction):
-            raise TypeError("EventChoice alternative must be an EventReaction")
-        object.__setattr__(self, "communication", communication)
-        object.__setattr__(self, "continuation", continuation)
-        object.__setattr__(
-            self,
-            "alternative",
-            EmptyEvent() if alternative is None else alternative,
-        )
+        """验证非空事件分支表及其逐分支的通信/后继类别。"""
+        if not branches:
+            raise ValueError("EventChoice requires at least one event branch")
+        normalized: list[tuple[InputChannel | OutputChannel, Process]] = []
+        for index, branch in enumerate(branches):
+            if not isinstance(branch, tuple) or len(branch) != 2:
+                raise TypeError(
+                    "EventChoice branches must be "
+                    "(communication, continuation) tuples"
+                )
+            communication, continuation = branch
+            if not isinstance(communication, (InputChannel, OutputChannel)):
+                raise TypeError(
+                    f"EventChoice branch {index} prefix must be an input or output action"
+                )
+            if not isinstance(continuation, Process):
+                raise TypeError(
+                    f"EventChoice branch {index} continuation must be a Process"
+                )
+            normalized.append((communication, continuation))
+        object.__setattr__(self, "branches", tuple(normalized))
         _validate_assumption21(self)
 
     # 功能：合并通信动作、分支后继和其余事件选择中的用户值变量。
     # 检查/论文关系：只收集变量，不检查各分支通道在 Theta 中的声明。
     def get_vars(self) -> set[str]:
-        """合并当前事件、后继和其余选择分支的变量。"""
+        """合并全部事件分支使用的变量。"""
         return set(_assumption21_info(self).value_variables)
 
     # 功能：递归合并当前分支及剩余分支中的输入绑定变量。
     # 检查/论文关系：结果用于 Gamma 缺失声明豁免和并行变量域计算；每个
     #                分支的局部扩展仍由其实际通信前缀进入 T-In 时完成。
     def get_input_bound_vars(self) -> set[str]:
-        """合并当前事件路径和其余分支引入的输入变量。"""
+        """合并全部事件分支引入的输入变量。"""
         return set(_assumption21_info(self).bound_value_variables)
 
-    # 功能：把零个或多个事件分支右结合为递归的 EventChoice/EmptyEvent 树。
-    # 检查/论文关系：零分支精确得到 E ::= empty；每个非空分支仍由类构造器
-    #                执行通信前缀、P continuation、E alternative 和假设检查。
+    # 功能：以统一入口构造零个或多个事件分支。
+    # 检查/论文关系：零分支精确得到 EmptyEvent；非空表由本类直接保存并检查。
     @classmethod
     def of(
         cls,
         *branches: tuple[InputChannel | OutputChannel, Process],
     ) -> EventReaction:
-        """把事件分支表展开成论文的递归事件反应 ``E``。"""
-
-        for branch in branches:
-            if not isinstance(branch, tuple) or len(branch) != 2:
-                raise TypeError(
-                    "EventChoice.of branches must be "
-                    "(communication, continuation) tuples"
-                )
-            communication, continuation = branch
-            if not isinstance(communication, (InputChannel, OutputChannel)):
-                raise TypeError(
-                    "EventChoice.of branch prefixes must be input or output actions"
-                )
-            if not isinstance(continuation, Process):
-                raise TypeError(
-                    "EventChoice.of branch continuations must be Process nodes"
-                )
-
-        reaction: EventReaction = EmptyEvent()
-        for communication, continuation in reversed(branches):
-            reaction = cls(communication, continuation, reaction)
-        return reaction
+        """把零个或多个事件分支规范为 EmptyEvent 或多元 EventChoice。"""
+        return EmptyEvent() if not branches else cls(*branches)
 
 
 # --------------------------------------------------------------------------
 # 论文对应：Section 2.1 的二元顺序组合 P ::= P; P'。
 # 构造方式：Sequence(first, second)。
 # 构造检查：立即要求两个操作数都是 Process，并按 first 的输入作用域计算
-#           second 的 fv，随后检查 Assumption 2.1。为保持内部选择的三元规范形，
+#           second 的 fv，随后检查 Assumption 2.1。为保持内部选择的多元规范形，
 #           first 的顺序末端不能是 InternalChoice；其公共后继应直接写入该节点。
 #           若 first 是其他复合进程，项目采用各分支输入绑定集合的并集处理公共
 #           second，详见文件头约定。
@@ -727,7 +700,7 @@ class Sequence(Process):
         if isinstance(trailing, InternalChoice):
             raise ValueError(
                 "InternalChoice owns its common continuation; use "
-                "InternalChoice(left, right, continuation) instead of "
+                "InternalChoice(*branches, continuation=...) instead of "
                 "placing an InternalChoice before a later Sequence continuation"
             )
         object.__setattr__(self, "first", first)
@@ -736,7 +709,7 @@ class Sequence(Process):
 
     # 功能：合并前后两个顺序进程使用的用户值变量。
     # 检查/论文关系：集合不表达执行先后；
-    #                符号状态更新由类型检查器按顺序处理。
+    #                符号状态更新由 TypeConstructor 按顺序处理。
     def get_vars(self) -> set[str]:
         """合并两个顺序项使用的变量。"""
         return set(_assumption21_info(self).value_variables)
@@ -765,79 +738,66 @@ class Sequence(Process):
         return result
 
 # --------------------------------------------------------------------------
-# 论文对应：Section 2.1 中等价的 ``(P \sqcup P'); Q``；Table 2
-#           经顺序后继补全的 T-\sqcup。
-# 构造方式：InternalChoice(left, right, continuation=Skip())。
-# 构造检查：左分支、右分支和公共后继都必须属于 Process，并对完整
-#           三元子树检查 Assumption 2.1。二元调用只是 continuation
-#           缺省为 Skip() 的构造器形式，AST 对象始终含第三个字段。
+# 论文对应：Table 2 可自然推广的 n 分支内部选择，以及等价的
+#           ``(P_1 \sqcup ... \sqcup P_n); Q``。
+# 构造方式：InternalChoice(P_1, ..., P_n, continuation=Q)。
+# 构造检查：分支表至少两个元素，所有分支与公共后继均为 Process；完整节点
+#           立即检查 Assumption 2.1。省略 continuation 时规范为 Skip()。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class InternalChoice(Process):
-    r"""三元内部选择 ``(P \sqcup P'); Q``。"""
+    r"""多分支内部选择 ``(P_1 \sqcup ... \sqcup P_n); Q``。"""
 
-    left: Process
-    right: Process
-    continuation: Process = field(default_factory=Skip)
+    branches: tuple[Process, ...]
+    continuation: Process
 
-    # 功能：验证两个选择分支和它们共享的顺序后继。
+    # 功能：验证多个选择分支和它们共享的顺序后继。
     # 检查/论文关系：拒绝 E 和 Parallel；T-\sqcup 将 continuation 同时
-    #                交给左右子 judgment，不需要通用 T-Seq。
-    def __post_init__(self) -> None:
-        """两个分支与公共后继都必须是顺序进程。"""
-        if not isinstance(self.left, Process) or not isinstance(self.right, Process):
+    #                交给每个子 judgment，不需要通用 T-Seq。
+    def __init__(
+        self,
+        *branches: Process,
+        continuation: Process | None = None,
+    ) -> None:
+        """验证至少两个顺序分支，并规范化可省略的公共后继。"""
+        if len(branches) < 2:
+            raise ValueError("InternalChoice requires at least two Process branches")
+        if not all(isinstance(branch, Process) for branch in branches):
             raise TypeError("InternalChoice branches must be Process nodes")
-        if not isinstance(self.continuation, Process):
+        common_tail = Skip() if continuation is None else continuation
+        if not isinstance(common_tail, Process):
             raise TypeError("InternalChoice continuation must be a Process node")
+        object.__setattr__(self, "branches", tuple(branches))
+        object.__setattr__(self, "continuation", common_tail)
         _validate_assumption21(self)
 
-    # 功能：合并两个非确定分支及公共后继的用户值变量。
-    # 检查/论文关系：不选择具体分支；类型检查器会保留两个带同一
+    # 功能：合并所有非确定分支及公共后继的用户值变量。
+    # 构造/论文关系：不选择具体分支；TypeConstructor 会保留各个带同一
     #                continuation 的完整行为类型。
     def get_vars(self) -> set[str]:
-        """合并两个选择分支及其公共后继使用的变量。"""
+        """合并所有选择分支及其公共后继使用的变量。"""
         return set(_assumption21_info(self).value_variables)
 
-    # 功能：合并两个分支和公共后继中的输入绑定变量。
+    # 功能：合并所有分支和公共后继中的输入绑定变量。
     # 检查/论文关系：分支输入可捕获 continuation 中的同名变量；此方法只用于
     #                环境收集，不选择实际运行分支。
     def get_input_bound_vars(self) -> set[str]:
-        """合并两个选择分支及其公共后继引入的输入变量。"""
+        """合并所有选择分支及其公共后继引入的输入变量。"""
         return set(_assumption21_info(self).bound_value_variables)
 
-    # 功能：把一个或多个分支右结合，并把公共 continuation 存入最外层。
-    # 检查/论文关系：零分支拒绝；单分支退化为普通顺序组合；多分支的
-    #                每一层仍由三字段 cls 构造器执行范畴和 Assumption 2.1 检查。
+    # 功能：兼容统一的多分支构造入口。
+    # 检查/论文关系：选择语法至少两个分支；不再把 n 分支编码为嵌套二元树。
     @classmethod
     def of(
         cls,
         *branches: Process,
         continuation: Process | None = None,
-    ) -> Process:
-        """把多个分支右结合，并把公共后继存入最外层三元节点。"""
-
-        if not branches:
-            raise ValueError("InternalChoice.of needs at least one branch")
-        if not all(isinstance(branch, Process) for branch in branches):
-            raise TypeError("InternalChoice.of branches must be Process nodes")
-        common_tail = Skip() if continuation is None else continuation
-        if not isinstance(common_tail, Process):
-            raise TypeError("InternalChoice.of continuation must be a Process node")
-        if len(branches) == 1:
-            return (
-                branches[0]
-                if isinstance(common_tail, Skip)
-                else Sequence.of(branches[0], common_tail)
-            )
-        result: Process = branches[-1]
-        for branch in reversed(branches[:-1]):
-            result = cls(branch, result)
-        if not isinstance(result, InternalChoice):
-            raise AssertionError("multiple branches must produce InternalChoice")
-        return cls(result.left, result.right, common_tail)
+    ) -> "InternalChoice":
+        """以唯一的多元 AST 表示构造内部选择。"""
+        return cls(*branches, continuation=continuation)
 
 
-# 功能：把一个顺序后继追加到已有进程，同时保持内部选择三元规范形。
+# 功能：把一个顺序后继追加到已有进程，同时保持内部选择多元规范形。
 # 检查/论文关系：普通顺序树按结合律向右追加；若执行前缀最后是
 #                InternalChoice，后继必须进入其 continuation 字段，不产生被禁止的
 #                外置 ``Sequence(InternalChoice(...), Q)`` 形状。
@@ -856,7 +816,7 @@ def _append_sequence_continuation(
                 continuation,
             )
         )
-        return InternalChoice(prefix.left, prefix.right, combined)
+        return InternalChoice(*prefix.branches, continuation=combined)
     if isinstance(prefix, Sequence):
         return Sequence(
             prefix.first,
@@ -865,7 +825,7 @@ def _append_sequence_continuation(
     return Sequence(prefix, continuation)
 
 
-# ────────────────── ODE 批注、局部时钟与 wait ──────────────────────────────
+# ───────────────────── ODE 批注与局部时钟 ──────────────────────────────────
 
 # 每个 ODE 的自动时钟在 ODE 公式范围内使用这个固定源级名称。它不是用户状态
 # 变量声明：变量分析会把该名称从方程右端、演化域和 safety 的自由变量中消去，
@@ -1077,8 +1037,7 @@ class ODELocalClock:
 # 构造方式：ODE(eqs, B, E, annotation=ODEAnnotation(...))。
 # 构造检查：立即规范化方程和 B，要求中断属于 E 且批注存在、类型正确；
 #           自动建立名为 t、初值 0、导数 1 的局部时钟，并禁止用户方程覆盖它；
-#           普通 ODE 的隐藏截止边界为 None，仅 ODE.wait(d) 使用的私有工厂
-#           在初始化节点时把它设为有限 d，两个隐藏字段都不是用户参数；
+#           隐藏局部时钟不是用户参数；
 #           同时检查连续状态/公式的 fv 与事件输入 bv 不交；Real 类型、
 #           重复导数、B/phi 的 Bool 类型和 dL 义务由 T-ODE 检查。
 # --------------------------------------------------------------------------
@@ -1093,14 +1052,9 @@ class ODE(Process):
     # 局部时钟按对象身份保持新鲜，但不参与 ODE 的源语法结构相等性；否则两个
     # 文字完全相同的 ODE 会仅因内部行政变量不同而比较为不等。
     local_clock: ODELocalClock = field(compare=False, init=False)
-    # 普通 ODE 没有内部截止边界；ODE.wait(d) 把这里设为规范化后的有限 d。
-    # 该字段影响演化语义和结构相等性，但不接受 ODE(...) 调用方直接传入。
-    local_clock_deadline: Literal | None = field(default=None, init=False)
-
     # 功能：把原始 ODE 产生式、唯一批注对象和自动局部时钟组合为不可变节点。
     # 检查/论文关系：缺省中断规范化为 empty；项目要求包含外部 d 的批注对象；
-    #                local_clock/local_clock_deadline 不开放构造参数，
-    #                避免用户伪造时钟的初值、速率、保留名或演化截止边界。
+    #                local_clock 不开放构造参数，避免用户伪造时钟的初值、速率或保留名。
     def __init__(
         self,
         eqs: Iterable[tuple[str, ExprLike]],
@@ -1116,22 +1070,19 @@ class ODE(Process):
             constraint,
             interrupts,
             annotation,
-            local_clock_deadline=None,
         )
 
     # 功能：以单一原子路径写入 ODE 全部字段，再执行构造期检查。
-    # 检查/论文关系：普通入口传 None；ODE.wait(d) 的私有工厂传有限 d，
-    #                避免对已经构造完毕的冻结 AST 再做二次修改。
+    # 检查/论文关系：所有入口均在这里一次性完成节点初始化，避免对冻结 AST
+    #                再做二次修改。
     def _initialize(
         self,
         eqs: Iterable[tuple[str, ExprLike]],
         constraint: ExprLike,
         interrupts: EventReaction | None,
         annotation: ODEAnnotation | None,
-        *,
-        local_clock_deadline: Literal | None,
     ) -> None:
-        """原子初始化普通 ODE 或 ``ODE.wait(d)`` 的内部 ODE。"""
+        """原子初始化带批注和隐藏局部时钟的 ODE。"""
 
         if interrupts is not None and not isinstance(interrupts, EventReaction):
             raise TypeError("ODE interrupts must be an EventReaction")
@@ -1141,13 +1092,6 @@ class ODE(Process):
             )
         if not isinstance(annotation, ODEAnnotation):
             raise TypeError("ODE annotation must be an ODEAnnotation")
-        if local_clock_deadline is not None:
-            if not isinstance(local_clock_deadline, Literal):
-                raise TypeError("ODE local-clock deadline must be a Literal")
-            if local_clock_deadline != annotation.delay:
-                raise ValueError(
-                    "ODE local-clock deadline must equal its finite delay"
-                )
         object.__setattr__(self, "eqs", _normalize_equations(eqs))
         object.__setattr__(self, "constraint", ensure_expr(constraint))
         object.__setattr__(
@@ -1161,44 +1105,7 @@ class ODE(Process):
             annotation,
         )
         object.__setattr__(self, "local_clock", ODELocalClock())
-        object.__setattr__(
-            self,
-            "local_clock_deadline",
-            local_clock_deadline,
-        )
         _validate_assumption21(self)
-
-    # 功能：为 ODE.wait(d) 一次性构造带隐藏截止边界的 ODE。
-    # 检查/论文关系：复用 ODEAnnotation 的精确有理数检查，并额外
-    #                拒绝普通 ODE 可接受、但 ODE.wait(d) 不接受的正无穷。
-    @classmethod
-    def _for_wait(cls, duration: ExprLike) -> "ODE":
-        """构造 ``ODE.wait(d)`` 展开中的有限截止 ODE。"""
-
-        annotation = ODEAnnotation(safety=True, delay=duration)
-        if not isinstance(annotation.delay, Literal):
-            raise ValueError(
-                "wait duration must be a finite non-negative rational number"
-            )
-        evolution = object.__new__(cls)
-        evolution._initialize(
-            (),
-            True,
-            None,
-            annotation,
-            local_clock_deadline=annotation.delay,
-        )
-        return evolution
-
-    # 功能：把源级 ``wait(d)`` 展开为带隐藏截止时钟的 ODE; Skip。
-    # 检查/论文关系：Section 2.1 使用严格演化域 ``t<d``；d 必须是
-    #                有限非负有理数，返回值仍是规范二元 Sequence，不引入
-    #                Wait 节点。
-    @classmethod
-    def wait(cls, duration: ExprLike) -> Sequence:
-        """构造源级 ``wait(d)`` 的规范核心 AST 展开。"""
-
-        return Sequence(cls._for_wait(duration), Skip())
 
     # 功能：收集演化左端、导数、演化域、批注和中断分支的用户值变量。
     # 检查/论文关系：为 Gamma 和 dL 声明提供源变量域；隐藏 local_clock 具有
@@ -1371,22 +1278,21 @@ def _assumption22_exit_states(
         return frozenset(result)
 
     if isinstance(node, InternalChoice):
-        # 内部选择的一个分支不能借用另一个分支的通信；左右分支
-        # 的每种出口状态都必须分别传入同一个 continuation。
-        left_states = _assumption22_exit_states(
-            node.left,
-            variable,
-            guarded,
-            f"{location}.left",
-        )
-        right_states = _assumption22_exit_states(
-            node.right,
-            variable,
-            guarded,
-            f"{location}.right",
-        )
+        # 内部选择的一个分支不能借用其他分支的通信；每个分支的所有出口
+        # 状态都必须分别传入同一个 continuation。
         result: set[bool] = set()
-        for state in sorted(left_states | right_states):
+        for index, branch in enumerate(node.branches):
+            result.update(
+                _assumption22_exit_states(
+                    branch,
+                    variable,
+                    guarded,
+                    f"{location}.branches[{index}]",
+                )
+            )
+        continuation_states = set(result)
+        result.clear()
+        for state in sorted(continuation_states):
             result.update(
                 _assumption22_exit_states(
                     node.continuation,
@@ -1426,9 +1332,8 @@ def _assumption22_exit_states(
 
 
 # 功能：递归检查 ODE 事件反应中由通信前缀引出的 continuation。
-# 检查/论文关系：EventChoice 的多标量输入/输出前缀本身满足一次通信；
-#                alternative 是并列事件分支，只保留 ODE 入口原有状态，
-#                不能继承前一事件分支的通信。
+# 检查/论文关系：EventChoice 的每个多标量输入/输出前缀本身满足一次通信；
+#                各分支彼此并列，不能继承其他分支的通信保护状态。
 def _validate_assumption22_event(
     reaction: EventReaction,
     variable: str | None,
@@ -1445,18 +1350,13 @@ def _validate_assumption22_event(
     if isinstance(reaction, EmptyEvent):
         return
     if isinstance(reaction, EventChoice):
-        _assumption22_exit_states(
-            reaction.continuation,
-            variable,
-            True,
-            f"{location}.continuation",
-        )
-        _validate_assumption22_event(
-            reaction.alternative,
-            variable,
-            guarded,
-            f"{location}.alternative",
-        )
+        for index, (_communication, continuation) in enumerate(reaction.branches):
+            _assumption22_exit_states(
+                continuation,
+                variable,
+                True,
+                f"{location}.branches[{index}].continuation",
+            )
         return
     raise TypeError(
         "Assumption 2.2 analysis received an unsupported EventReaction: "
@@ -1483,7 +1383,7 @@ def _validate_assumption22(variable: str, body: Process) -> None:
 # 构造检查：立即要求左右均属于 HCSP，先检查完整系统的 fv 与 bv 不相交，
 #           再检查两个分量的 V、iCh 和 oCh 分别不相交；
 #           一入一出的互补通道仍可用于同步。仅两侧都自由读取的已声明
-#           共享参数可从 V 交集中排除；参数写入仍由 TypeChecker 拒绝。
+#           共享参数可从 V 交集中排除；参数写入仍由 TypeConstructor 拒绝。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Parallel(HCSP):
@@ -1525,7 +1425,7 @@ class Parallel(HCSP):
 
     # 功能：返回两个分量中出现的全部用户值名称并集。
     # 检查/论文关系：裸 Process AST 无法从名称本身区分 Gamma 状态和共享
-    #                只读参数，因此本接口如实返回两者；TypeChecker 再依
+    #                只读参数，因此本接口如实返回两者；TypeConstructor 再依
     #                ParameterEnvironment 排除参数并投影各分量 Gamma。
     def get_vars(self) -> set[str]:
         """合并两个并行系统使用的全部用户值名称。"""
@@ -1728,15 +1628,16 @@ def _assumption21_info(
     if isinstance(node, EmptyEvent):
         return _Assumption21Info()
     if isinstance(node, EventChoice):
-        # 输入事件前缀只顺序绑定本分支 continuation；alternative 与该分支
-        # 并列合并，因此不能被当前通信前缀捕获。
-        branch = _sequence_assumption21_info(
-            _assumption21_info(node.communication),
-            _assumption21_info(node.continuation),
-        )
+        # 输入事件前缀只顺序绑定自己的 continuation；全部事件分支随后
+        # 并列合并，不能互相捕获。
         return _merge_assumption21_info(
-            branch,
-            _assumption21_info(node.alternative),
+            *(
+                _sequence_assumption21_info(
+                    _assumption21_info(communication),
+                    _assumption21_info(continuation),
+                )
+                for communication, continuation in node.branches
+            )
         )
     if isinstance(node, Sequence):
         # 只有顺序产生式需要执行前项输入对后项自由值变量的捕获。
@@ -1745,11 +1646,10 @@ def _assumption21_info(
             _assumption21_info(node.second),
         )
     if isinstance(node, InternalChoice):
-        # 左右分支先并列合并，之后作为一个复合顺序前缀绑定公共
+        # 全部分支先并列合并，之后作为一个复合顺序前缀绑定公共
         # continuation；这与原 ``Sequence(InternalChoice(...), Q)`` 形状一致。
         branches = _merge_assumption21_info(
-            _assumption21_info(node.left),
-            _assumption21_info(node.right),
+            *(_assumption21_info(branch) for branch in node.branches),
         )
         return _sequence_assumption21_info(
             branches,

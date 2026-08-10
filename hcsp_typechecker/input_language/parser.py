@@ -3,7 +3,7 @@
 完整入口按 ``document/GAMMA_THETA_INPUT_SYNTAX.md`` 从同一 token 流中依次构造
 Gamma、可选共享参数环境、Theta 和 Process AST；Process/Expr 子语法仍由
 ``document/HCSP_INPUT_SYNTAX.md`` 定义。语句块统一交给 ``Sequence.of`` lowering，
-使内部选择后面的公共后继进入三元 ``InternalChoice.continuation``，
+使内部选择后面的公共后继进入多元 ``InternalChoice.continuation``，
 而不会形成项目禁止的外置 ``Sequence(InternalChoice(...), Q)`` 结构。
 """
 
@@ -437,8 +437,6 @@ class Parser:
             return self._parse_identifier_statement()
         if kind == "assert":
             return self._parse_assertion()
-        if kind == "wait":
-            return self._parse_wait()
         if kind == "call":
             return self._parse_process_call()
         if kind == "if":
@@ -489,15 +487,6 @@ class Parser:
         condition = self._parse_expression()
         self._expect(")")
         return self._construct(start, lambda: Assert(condition))
-
-    def _parse_wait(self) -> Process:
-        """解析有限有理时延的 ``wait`` 语法糖。"""
-
-        start = self._expect("wait")
-        self._expect("(")
-        duration = self._parse_rational_expression()
-        self._expect(")")
-        return self._construct(start, lambda: ODE.wait(duration))
 
     def _parse_process_call(self) -> Process:
         """解析显式进程变量调用 ``call X``。"""

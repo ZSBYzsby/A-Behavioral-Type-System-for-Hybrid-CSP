@@ -3,9 +3,9 @@
 本模块刻意不定义新的 HCSP 语法，也不修改
 :mod:`hcsp_typechecker.process.ast` 或
 :mod:`hcsp_typechecker.type_system.ast`。
-它处于类型检查器和外部证明器之间，只负责两件事：
+它处于 TypeConstructor 和外部证明器之间，只负责两件事：
 
-* 把检查器已经建立的 Z3 符号状态翻译成 differential dynamic logic (dL)；
+* 把类型构造器已经建立的 Z3 符号状态翻译成 differential dynamic logic (dL)；
 * 把一条 dL 公式包装成 KeYmaera X 接受的 ``.kyx`` archive。
 
 传入本模块的入口路径、ODE 方程、演化域、安全性质和时延都已经由类型规则
@@ -131,9 +131,9 @@ class UntranslatedDLFormula:
 
 
 class _Z3ToKeYmaeraX:
-    """把检查器使用的 Z3 算术/布尔子集打印为 KeYmaera X 语法。
+    """把类型构造器使用的 Z3 算术/布尔子集打印为 KeYmaera X 语法。
 
-    这里不调用 Z3 求解。Z3 AST 只是类型检查器当前符号状态的无歧义中间表示。
+    这里不调用 Z3 求解。Z3 AST 只是类型构造器当前符号状态的无歧义中间表示。
     每个自由数值常量都会被重命名为 ``kxvN``，从而避开 KeYmaera X 对下划线
     和索引的特殊词法规则。
     """

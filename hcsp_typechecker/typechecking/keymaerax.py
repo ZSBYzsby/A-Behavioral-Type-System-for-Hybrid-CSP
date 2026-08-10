@@ -1,6 +1,7 @@
 """KeYmaera X 命令行后端。
 
-类型检查器只把 :class:`~hcsp_typechecker.typechecking.dl.DLFormula` 交给本模块。后端将
+TypeConstructor 只把 :class:`~hcsp_typechecker.typechecking.dl.DLFormula`
+交给本模块。后端将
 公式写入临时 ``.kyx`` archive，以独立进程运行官方 ``keymaerax.jar``，再把
 命令行状态映射为项目的三值
 :class:`~hcsp_typechecker.typechecking.model.Verdict`：
@@ -37,7 +38,7 @@ from .model import DLCheckResult, ProofObligation, Verdict
 
 # 功能：解析命令行工具常见的环境变量布尔写法。
 # 配置关系：非法或缺失文本采用调用方给出的默认值，避免可选的证明后端
-#           因一项展示/产物设置阻止核心类型检查器启动。
+#           因一项展示/产物设置阻止核心 TypeConstructor 启动。
 def _environment_flag(name: str, *, default: bool = False) -> bool:
     """读取一个环境变量布尔值，并对未知文本采用保守默认值。"""
 

@@ -1,11 +1,12 @@
-r"""用几个小程序演示项目的两阶段公共接口。
+r"""用几个小程序演示项目的单一公共 TypeConstructor 接口。
 
-每个示例都从一段完整的用户输入开始：第一阶段调用
-``parse_hcsp_program`` 得到绑定了 Gamma、Theta、参数和 Process AST 的
-``HCSPProgram``；第二阶段调用 ``infer_hcsp_type`` 得到正式 Type AST。
+每个示例都把包含 Parameters、Gamma、Theta 和 Process 的完整用户输入直接交给
+``construct_hcsp_type``；接口在内部完成解析、类型构造和必要公式证明，成功时
+返回正式 Type AST。
 
-这些示例只包含离散 HCSP 行为，证明义务由内置的一阶逻辑后端处理，因此运行
-本文件不需要启动 KeYmaera X。请在项目根目录执行：
+前四个示例是离散 HCSP；第五个示例使用空 flow 和恒真性质展示本地即可判定的
+有限 delay；第六个示例则包含二阶微分方程、隐式时钟、非线性 safety、多标量
+通信中断和自然超时后继，会实际调用 KeYmaera X。请在项目根目录执行：
 
     python -B demo.py
 
@@ -20,14 +21,17 @@ from textwrap import dedent
 
 from hcsp_typechecker import (
     HCSPInputError,
-    HCSPTypeError,
-    infer_hcsp_type,
-    parse_hcsp_program,
+    HCSPTypeConstructionError,
+    HCSPUntrustedTypeConstructionError,
+    construct_hcsp_type,
 )
 
 
-# 可选值为 "result" 或 "full"；两种模式只改变显示内容，不改变推导结果。
+# 可选值为 "result" 或 "full"；两种模式只改变显示内容，不改变类型构造结果。
 OUTPUT_MODE = "result"
+
+# 第六个示例需要真实 dL 证明；该值只覆盖本次接口调用的证明器超时。
+KEYMAERAX_TIMEOUT_SECONDS = 180.0
 
 
 # 每项依次为：标题、希望展示的功能、完整用户输入。
@@ -82,11 +86,76 @@ EXAMPLES = (
         }
         """,
     ),
+    (
+        "5. 有限 delay 与通信中断",
+        "展示在 1 个时间单位内等待输入的 ODE，以及对应的时限通信类型。",
+        """
+        gamma(x: Int)
+        theta(ch: channel(value: Int))
+        process {{
+            ode(
+                flow(),
+                domain(true),
+                safety(true),
+                delay(1),
+                interrupt(
+                    on ch?(x) {
+                        skip
+                    }
+                )
+            )
+        }}
+        """,
+    ),
+    (
+        "6. 二阶微分方程、多标量中断与自然超时后继",
+        "展示 p'=v、v'=2、隐式 t、非线性 safety、delay(3/2) 和 timed choice。",
+        """
+        gamma(
+            p: Real,
+            v: Real,
+            new_p: Real,
+            new_v: Real,
+            motion: continuous(p, v)
+        )
+        theta(
+            reset: channel(rp: Real, rv: Real)
+                where(rp >= 0 and rv >= 0),
+            report: channel(out_p: Real, out_v: Real)
+                where(out_p >= 0 and out_v >= 0)
+        )
+        process {{
+            p := 0;
+            v := 0;
+            ode(
+                flow(
+                    dot p = v,
+                    dot v = 2
+                ),
+                domain(t < 3 / 2),
+                safety(
+                    p == t ** 2 and
+                    v == 2 * t and
+                    p >= 0 and
+                    v >= 0
+                ),
+                delay(3 / 2),
+                interrupt(
+                    on reset?(new_p, new_v) {
+                        p := new_p;
+                        v := new_v
+                    }
+                )
+            );
+            report!(p, v)
+        }}
+        """,
+    ),
 )
 
 
-def _run_example(index: int, title: str, purpose: str, source: str) -> bool:
-    """运行单个示例；成功返回 ``True``，并让失败信息保持在对应示例内。"""
+def _run_example(index: int, title: str, purpose: str, source: str) -> str:
+    """运行单个示例，返回 ``trusted``、``untrusted`` 或 ``failed``。"""
 
     source = dedent(source).strip()
     separator = "=" * 76
@@ -97,36 +166,28 @@ def _run_example(index: int, title: str, purpose: str, source: str) -> bool:
     print("用户输入：")
     print(source)
 
-    print("\n[第一阶段] 用户输入 -> HCSPProgram")
-    # infer_hcsp_type 的 full 日志已经包含第一阶段的完整模型；此时让解析接口
-    # 静默，避免把同一份原始输入和 Process AST 打印两次。
-    parse_output = "none" if OUTPUT_MODE == "full" else OUTPUT_MODE
+    print("\n[类型构造] 用户输入 -> Type AST")
     try:
-        program = parse_hcsp_program(
+        construct_hcsp_type(
             source,
             source_name=f"demo-example-{index}.hcsp",
-            output=parse_output,
+            output=OUTPUT_MODE,
+            keymaerax_timeout_seconds=KEYMAERAX_TIMEOUT_SECONDS,
         )
-    except HCSPInputError as error:
-        print(error.format_diagnostic())
-        return False
-
-    if OUTPUT_MODE == "full":
-        print("解析成功；完整 HCSPProgram 将显示在下一阶段的日志开头。")
-
-    print("\n[第二阶段] HCSPProgram -> Type AST")
-    try:
-        infer_hcsp_type(program, output=OUTPUT_MODE)
-    except HCSPTypeError as error:
-        # 接口已经按所选模式打印结果；这里只在静默模式下补充异常内容。
-        if OUTPUT_MODE == "none":
-            print(error.format_full())
-        return False
-    return True
+    except HCSPInputError:
+        # result/full 模式已经输出解析诊断；这里只记录该示例失败，避免重复打印。
+        return "failed"
+    except HCSPUntrustedTypeConstructionError:
+        # 类型结构已构造完成，但 result/full 已把候选明确标为未验证、不可信。
+        return "untrusted"
+    except HCSPTypeConstructionError:
+        # 确定失败或无法形成完整类型；接口已经打印原因与实际部分构造过程。
+        return "failed"
+    return "trusted"
 
 
 def main() -> int:
-    """依次运行全部示例，并用退出码表示是否全部转换成功。"""
+    """运行全部示例；只有输入错误或无法构造类型时返回非零退出码。"""
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -135,16 +196,21 @@ def main() -> int:
         print('OUTPUT_MODE 只能设为 "result" 或 "full"。')
         return 2
 
-    print("HCSP 公共接口演示")
-    print(f"输出模式：{OUTPUT_MODE!r}（改为 'full' 可查看完整推导日志）")
+    print("HCSP TypeConstructor 公共接口演示")
+    print(f"输出模式：{OUTPUT_MODE!r}（改为 'full' 可查看完整构造日志）")
 
-    succeeded = 0
+    outcomes = {"trusted": 0, "untrusted": 0, "failed": 0}
     for index, (title, purpose, source) in enumerate(EXAMPLES, start=1):
-        if _run_example(index, title, purpose, source):
-            succeeded += 1
+        outcome = _run_example(index, title, purpose, source)
+        outcomes[outcome] += 1
 
-    print(f"\n演示结束：{succeeded}/{len(EXAMPLES)} 个示例转换成功。")
-    return 0 if succeeded == len(EXAMPLES) else 1
+    print(
+        "\n演示结束："
+        f"可信类型 {outcomes['trusted']} 个，"
+        f"完整但未验证的候选 {outcomes['untrusted']} 个，"
+        f"构造失败 {outcomes['failed']} 个。"
+    )
+    return 0 if outcomes["failed"] == 0 else 1
 
 
 if __name__ == "__main__":

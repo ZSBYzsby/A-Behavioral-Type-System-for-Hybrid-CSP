@@ -1,23 +1,22 @@
 r"""HCSP Section 2.1 抽象语法树逐产生式测试。
 
-本文件只检查语法，不调用类型检查器。
+本文件只检查语法，不调用类型构造器。
 
 测试内容
 --------
 1. 节点种类必须恰好等于论文的 ``E / P / S`` 产生式，其中内部
-   选择使用与论文二元选择+顺序组合等价的三元规范形；
+   选择使用与论文二元选择+顺序组合等价的多元规范形；
 2. 每个节点的子项必须属于正确语法范畴；
 3. E、P、S 的继承关系和跨层拒绝边界；
 4. 便捷类方法只能展开成项目规范节点，不能引入新的 AST 种类；
 5. ODE/Mu 批注作为字段存在，但不改变 Section 2.1 节点库存。
 6. 通道名称必须满足与变量相同的标识符词法规则，非法名称在 AST 边界拒绝。
-7. ``ODE.wait(d)`` 只展开为 ODE/Sequence/Skip，并使用自动局部时钟。
-8. ``HCSP``、``Process`` 和 ``EventReaction`` 抽象范畴不能被直接实例化。
+7. ``HCSP``、``Process`` 和 ``EventReaction`` 抽象范畴不能被直接实例化。
 
 论文对应
 --------
 逐项对应 Section 2.1 的事件反应 ``E``、顺序进程 ``P`` 和系统 ``S`` 文法；
-``InternalChoice(P, P', Q)`` 是 ``(P \sqcup P');Q`` 的唯一规范 AST；
+``InternalChoice(P_1, ..., P_n, continuation=Q)`` 是多元内部选择的唯一规范 AST；
 ``ODEAnnotation`` 与 ``RecursionAnnotation`` 对应 Section 4.2/4.3 的批注扩展。
 """
 
@@ -82,9 +81,10 @@ def assert_event_reaction(test: unittest.TestCase, event: EventReaction) -> None
     if isinstance(event, EmptyEvent):
         return
     test.assertIsInstance(event, EventChoice)
-    test.assertIsInstance(event.communication, (InputChannel, OutputChannel))
-    assert_process(test, event.continuation)
-    assert_event_reaction(test, event.alternative)
+    test.assertTrue(event.branches)
+    for communication, continuation in event.branches:
+        test.assertIsInstance(communication, (InputChannel, OutputChannel))
+        assert_process(test, continuation)
 
 
 def assert_process(test: unittest.TestCase, process: Process) -> None:
@@ -133,8 +133,6 @@ def assert_process(test: unittest.TestCase, process: Process) -> None:
         test.assertIsInstance(process.local_clock, ODELocalClock)
         test.assertEqual(process.local_clock.initial_value, Literal(0))
         test.assertEqual(process.local_clock.derivative, Literal(1))
-        if process.local_clock_deadline is not None:
-            test.assertIsInstance(process.local_clock_deadline, Literal)
         assert_event_reaction(test, process.interrupts)
         return
     if isinstance(process, Sequence):
@@ -142,8 +140,9 @@ def assert_process(test: unittest.TestCase, process: Process) -> None:
         assert_process(test, process.second)
         return
     if isinstance(process, InternalChoice):
-        assert_process(test, process.left)
-        assert_process(test, process.right)
+        test.assertGreaterEqual(len(process.branches), 2)
+        for branch in process.branches:
+            assert_process(test, branch)
         assert_process(test, process.continuation)
         return
     if isinstance(process, Mu):
@@ -236,31 +235,26 @@ class Section21EventGrammarTests(unittest.TestCase):
         """输入与输出事件分支递归链接，并最终以 EmptyEvent 收尾。"""
 
         reaction = EventChoice(
-            InputChannel("sense", "x"),
-            Assign("x", "x + 1"),
-            EventChoice(
-                OutputChannel("ack", 0),
-                Skip(),
-                EmptyEvent(),
-            ),
+            (InputChannel("sense", "x"), Assign("x", "x + 1")),
+            (OutputChannel("ack", 0), Skip()),
         )
         assert_event_reaction(self, reaction)
 
-    # 测试输入：EventChoice.of 的两个输入/输出分支便捷参数。
-    # 预期行为：展开为两层 EventChoice 和一个 EmptyEvent。
-    # 检查内容：核对右递归形状并运行独立 E 语法验证器。
-    # 论文对应：类方法只展开 Section 2.1 的二元 ``\Box`` 文法。
-    def test_event_choice_class_method_builds_only_recursive_e_nodes(self) -> None:
-        """EventChoice.of 只生成 EventChoice/EmptyEvent 递归树。"""
+    # 测试输入：EventChoice.of 的三个输入/输出事件分支。
+    # 预期行为：全部三个分支直接保存在一个 EventChoice 节点内。
+    # 检查内容：核对多元分支表并运行独立 E 语法验证器。
+    # 论文对应：Table 2 的 T-sqcap 直接处理多分支 E。
+    def test_event_choice_class_method_builds_one_nary_event_node(self) -> None:
+        """EventChoice.of 将非空事件表保存在一个多元 EventChoice 中。"""
 
         self.assertIsInstance(EventChoice.of(), EmptyEvent)
         reaction = EventChoice.of(
             (InputChannel("left", "x"), Skip()),
             (OutputChannel("right", 1), Assign("y", 0)),
+            (OutputChannel("audit", 2), Skip()),
         )
         assert_event_reaction(self, reaction)
-        self.assertIsInstance(reaction.alternative, EventChoice)
-        self.assertIsInstance(reaction.alternative.alternative, EmptyEvent)
+        self.assertEqual(len(reaction.branches), 3)
 
     # 测试输入：把赋值 ``x := 1`` 放在事件分支箭头之前。
     # 预期行为：EventChoice 构造器抛出 TypeError。
@@ -270,7 +264,7 @@ class Section21EventGrammarTests(unittest.TestCase):
         """事件分支前缀不能是赋值、断言或其他非通信进程。"""
 
         with self.assertRaises(TypeError):
-            EventChoice(Assign("x", 1), Skip())  # type: ignore[arg-type]
+            EventChoice((Assign("x", 1), Skip()))  # type: ignore[arg-type]
 
     # 测试输入：分别把 EmptyEvent 和 Parallel 放在事件箭头后。
     # 预期行为：两种非 P continuation 都被 TypeError 拒绝。
@@ -280,22 +274,21 @@ class Section21EventGrammarTests(unittest.TestCase):
         """事件箭头后的 continuation 必须属于 P，不能是 E 或 S||S'。"""
 
         with self.assertRaises(TypeError):
-            EventChoice(InputChannel("c", "x"), EmptyEvent())  # type: ignore[arg-type]
+            EventChoice((InputChannel("c", "x"), EmptyEvent()))  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             EventChoice(
-                InputChannel("c", "x"),
-                Parallel(Skip(), Skip()),
+                (InputChannel("c", "x"), Parallel(Skip(), Skip())),
             )  # type: ignore[arg-type]
 
-    # 测试输入：把普通 Skip 作为 EventChoice 的 alternative。
-    # 预期行为：构造器抛出 TypeError，拒绝以 P 替代递归 E。
-    # 检查内容：锁定方框选择右项的事件反应范畴。
-    # 论文对应：``(ch★ -> P) \Box E`` 的右项必须继续属于 E。
-    def test_event_choice_rejects_process_as_alternative(self) -> None:
-        """方框选择右侧必须递归为 E，不能放入普通进程 P。"""
+    # 测试输入：空事件分支表。
+    # 预期行为：多元 EventChoice 拒绝零分支；空 E 只能写 EmptyEvent。
+    # 检查内容：锁定 EmptyEvent 与非空事件表的唯一分工。
+    # 论文对应：空事件反应与至少一个通信分支是不同的规范形。
+    def test_event_choice_rejects_empty_branch_table(self) -> None:
+        """空事件只能由 EmptyEvent 表示，不能构造空 EventChoice。"""
 
-        with self.assertRaises(TypeError):
-            EventChoice(InputChannel("c", "x"), Skip(), Skip())  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            EventChoice()
 
 
 class Section21ProcessGrammarTests(unittest.TestCase):
@@ -494,16 +487,16 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             Sequence(Skip(), EmptyEvent())  # type: ignore[arg-type]
 
-    # 测试输入：显式 ``(Skip \sqcup Assign); Assert``、缺省后继以及
-    #           错误元数及 E/Parallel 混入三个 Process 字段的非法情况。
-    # 预期行为：显式三元节点保存公共后继；二元调用自动补 Skip。
-    # 检查内容：确认三个字段都只能保存 P。
-    # 论文对应：``(P \sqcup P');Q`` 与二元选择+顺序组合等价。
-    def test_internal_choice_is_ternary_p_composition(self) -> None:
-        """InternalChoice 始终保存两个分支和一个公共后继。"""
+    # 测试输入：显式多分支选择、缺省后继以及 E/Parallel 混入的非法情况。
+    # 预期行为：分支以 tuple 保存，公共后继独立字段；省略时自动补 Skip。
+    # 检查内容：确认全部 branches 与 continuation 都只能保存 P。
+    # 论文对应：Table 2 的 T-sqcup 可直接推广到多分支。
+    def test_internal_choice_is_nary_p_composition(self) -> None:
+        """InternalChoice 保存至少两个分支和一个公共后继。"""
 
-        node = InternalChoice(Skip(), Assign("x", 1), Assert(True))
+        node = InternalChoice(Skip(), Assign("x", 1), continuation=Assert(True))
         assert_process(self, node)
+        self.assertEqual(len(node.branches), 2)
         self.assertIsInstance(node.continuation, Assert)
         defaulted = InternalChoice(Skip(), Skip())
         self.assertIsInstance(defaulted.continuation, Skip)
@@ -512,10 +505,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         normalized = Sequence.of(defaulted, Assert(True))
         self.assertIsInstance(normalized, InternalChoice)
         self.assertIsInstance(normalized.continuation, Assert)
-        with self.assertRaises(TypeError):
+        with self.assertRaises(ValueError):
             InternalChoice(Skip())  # type: ignore[call-arg]
-        with self.assertRaises(TypeError):
-            InternalChoice(Skip(), Skip(), Skip(), Skip())  # type: ignore[call-arg]
+        self.assertEqual(len(InternalChoice(Skip(), Skip(), Skip()).branches), 3)
         with self.assertRaises(TypeError):
             InternalChoice(EmptyEvent(), Skip())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
@@ -548,18 +540,19 @@ class Section21ProcessGrammarTests(unittest.TestCase):
             Mu("X", Skip(), annotation=True)  # type: ignore[arg-type]
 
     # 测试输入：Sequence.of 三项和带 continuation 的 InternalChoice.of。
-    # 预期行为：顺序仍右结合；多分支选择的最外层保存公共后继。
-    # 检查内容：检查递归字段以及零项、单项和多项边界。
+    # 预期行为：顺序仍右结合；多分支选择直接保存所有分支和公共后继。
+    # 检查内容：检查多元字段以及零项、单项和多项边界。
     # 论文对应：多分支辅助构造仍只使用同一 InternalChoice 节点类。
     def test_nary_class_methods_expand_to_canonical_process_trees(self) -> None:
-        """多项顺序右结合，多分支选择使用三元规范节点。"""
+        """多项顺序右结合，多分支选择使用多元规范节点。"""
 
         self.assertIsInstance(Sequence.of(), Skip)
         only = Assign("only", 0)
         self.assertIs(Sequence.of(only), only)
-        self.assertIs(InternalChoice.of(only), only)
         with self.assertRaises(ValueError):
             InternalChoice.of()
+        with self.assertRaises(ValueError):
+            InternalChoice.of(only)
         sequential = Sequence.of(Assign("x", 0), Assert(True), Skip())
         choice = InternalChoice.of(
             Assign("x", 0),
@@ -570,49 +563,10 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         self.assertIsInstance(sequential, Sequence)
         self.assertIsInstance(sequential.second, Sequence)
         self.assertIsInstance(choice, InternalChoice)
-        self.assertIsInstance(choice.right, InternalChoice)
+        self.assertEqual(len(choice.branches), 3)
         self.assertIsInstance(choice.continuation, Assert)
         assert_process(self, sequential)
         assert_process(self, choice)
-
-    # 测试输入：``ODE.wait("1 / 2")`` 以及内部聚合、模块级 ODE 类。
-    # 预期行为：得到 ODE; skip 二元树，ODE 自动时钟截止值为精确 Fraction(1,2)。
-    # 检查内容：确认没有 Wait 节点，用户方程为空，隐藏时钟仍固定从 0 以速率 1 演化。
-    # 论文对应：Section 2.1 的 ``wait(d) := <dot(t)=1 & t<d>``，t 为局部时钟。
-    def test_wait_class_method_expands_to_core_ode_sequence(self) -> None:
-        """ODE.wait(d) 应只生成使用自动局部时钟的核心 AST。"""
-
-        self.assertIs(process_ast.ODE, ODE)
-        self.assertIs(internal_api.ODE, ODE)
-        waiting = ODE.wait("1 / 2")
-
-        self.assertIsInstance(waiting, Sequence)
-        self.assertIsInstance(waiting.first, ODE)
-        self.assertIsInstance(waiting.second, Skip)
-        self.assertEqual(waiting.first.eqs, ())
-        self.assertEqual(waiting.first.constraint, Literal(True))
-        self.assertIsInstance(waiting.first.interrupts, EmptyEvent)
-        self.assertEqual(waiting.first.annotation.safety, Literal(True))
-        self.assertEqual(waiting.first.annotation.delay, Literal(Fraction(1, 2)))
-        self.assertEqual(
-            waiting.first.local_clock_deadline,
-            Literal(Fraction(1, 2)),
-        )
-        self.assertEqual(waiting.first.local_clock.initial_value, Literal(0))
-        self.assertEqual(waiting.first.local_clock.derivative, Literal(1))
-        assert_process(self, waiting)
-
-    # 测试输入：负数、符号量、Bool 和正无穷四类非法 wait 时长。
-    # 预期行为：全部在语法糖构造边界抛出 ValueError。
-    # 检查内容：有限合法值复用 ODE delay 规范化；额外拒绝 ODE 可接受的 infinity。
-    # 论文对应：wait(d) 定义要求 d 属于有限的非负实数，本项目再限制为精确有理数。
-    def test_wait_requires_a_finite_non_negative_rational_duration(self) -> None:
-        """ODE.wait(d) 不接受负值、符号时长、Bool 或正无穷。"""
-
-        for duration in (-1, "d", True, math.inf):
-            with self.subTest(duration=duration):
-                with self.assertRaises(ValueError):
-                    ODE.wait(duration)
 
     # 测试输入：在方程右端、演化域和 safety 中直接读取 t，并尝试把 t 写在方程左端。
     # 预期行为：前三处的 t 绑定自动时钟且不进入 get_vars；方程左端 t 被拒绝。

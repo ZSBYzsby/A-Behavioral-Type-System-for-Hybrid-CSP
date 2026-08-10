@@ -28,6 +28,7 @@ T-parallel。若以后修改规则分派或顺序证明流程，本文件应首�
 
 from __future__ import annotations
 
+from math import inf
 import unittest
 from typing import Any, Mapping, Sequence as TypingSequence
 
@@ -48,11 +49,11 @@ from hcsp_typechecker._internal import (
     OutputChannel,
     Sequence,
     Skip,
-    TypeChecker,
-    TypingJudgment,
+    TypeConstructor,
+    TypeConstructionRequest,
     Var,
     Verdict,
-    check_hcsp,
+    construct_type,
 )
 
 
@@ -73,7 +74,7 @@ def _select_boundary_rule(obligation: object) -> Verdict:
     )
 
 
-def _check_one(
+def _construct_one(
     process: object,
     *,
     gamma: Mapping[str, BasicType | ContinuousType] | None = None,
@@ -82,9 +83,9 @@ def _check_one(
     path: object = True,
     dl_checker: object = _approve_dl,
 ):
-    """用单配置 T-sigma 包装一个进程，返回完整且可审计的检查报告。"""
+    """用单配置 T-sigma 包装一个进程，返回完整且可审计的构造报告。"""
 
-    return check_hcsp(
+    return construct_type(
         gamma={} if gamma is None else gamma,
         theta={} if theta is None else theta,
         configurations=[Configuration(state, process)],
@@ -118,7 +119,7 @@ class Table2RuleContractTests(unittest.TestCase):
     def test_t_end_and_t_skip_follow_the_exact_source_shape(self) -> None:
         """终端与中间 skip 必须由两条不同的论文规则处理。"""
 
-        terminal = _check_one(Skip())
+        terminal = _construct_one(Skip())
         self.assertEqual(terminal.verdict, Verdict.TRUE)
         terminal_steps = _step_rules(terminal)
         self.assertIn("T-End", terminal_steps)
@@ -129,7 +130,7 @@ class Table2RuleContractTests(unittest.TestCase):
         )
 
         theta = {"done": ChannelType(BasicType.INT)}
-        intermediate = _check_one(
+        intermediate = _construct_one(
             Sequence.of(Skip(), OutputChannel("done", 0)),
             theta=theta,
         )
@@ -240,7 +241,7 @@ class Table2RuleContractTests(unittest.TestCase):
             expected_step,
         ) in cases:
             with self.subTest(rule=name):
-                report = _check_one(
+                report = _construct_one(
                     process,
                     gamma=gamma,
                     theta=theta,
@@ -251,7 +252,7 @@ class Table2RuleContractTests(unittest.TestCase):
                 self.assertEqual(_obligation_signature(report), expected)
                 self.assertIn(expected_step, _step_rules(report))
 
-        assignment = _check_one(
+        assignment = _construct_one(
             Assign("x", "x + 1"),
             gamma={"x": BasicType.INT},
             state={"x": 0},
@@ -276,9 +277,9 @@ class Table2RuleContractTests(unittest.TestCase):
                 (OutputChannel("left", 0), Skip()),
                 (OutputChannel("right", 1), Skip()),
             ),
-            annotation=ODEAnnotation(safety=True, delay=1),
+            annotation=ODEAnnotation(safety=True, delay=inf),
         )
-        report = _check_one(
+        report = _construct_one(
             process,
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"left": integer_channel, "right": integer_channel},
@@ -320,7 +321,7 @@ class Table2RuleContractTests(unittest.TestCase):
             ),
             Skip(),
         )
-        report = _check_one(
+        report = _construct_one(
             process,
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             state={"x": 0},
@@ -334,14 +335,12 @@ class Table2RuleContractTests(unittest.TestCase):
             (
                 ("T-sigma", "state"),
                 ("T-ODE-safety", "dl"),
-                ("T-ODE-domain", "dl"),
-                ("T-ODE-safety", "dl"),
                 ("T-ODE-boundary", "dl"),
             ),
         )
         self.assertEqual(
             tuple(item.active for item in report.obligations),
-            (True, False, False, True, True),
+            (True, True, True),
         )
         ode_roles = tuple(
             obligation.formula.role
@@ -350,7 +349,7 @@ class Table2RuleContractTests(unittest.TestCase):
         )
         self.assertEqual(
             ode_roles,
-            ("safety", "domain", "safety", "boundary"),
+            ("safety", "boundary"),
         )
         active_ode_roles = tuple(
             obligation.formula.role
@@ -358,7 +357,7 @@ class Table2RuleContractTests(unittest.TestCase):
             if obligation.kind == "dl" and obligation.active
         )
         self.assertEqual(active_ode_roles, ("safety", "boundary"))
-        boundary_source = report.obligations[4].formula.source
+        boundary_source = report.obligations[2].formula.source
         # KeYmaera X 打印器把 ``t < 1`` 规范成等价的 ``1 > t``，而
         # ``t = 1`` 可能打印成 ``1 = t``；两部分必须同时保留。
         self.assertIn("1 >", boundary_source)
@@ -378,7 +377,7 @@ class Table2RuleContractTests(unittest.TestCase):
             "X",
             Sequence.of(InputChannel("tick", "u"), Var("X")),
         )
-        recursion_report = _check_one(
+        recursion_report = _construct_one(
             recursive,
             theta={"tick": ChannelType(BasicType.INT)},
         )
@@ -395,9 +394,9 @@ class Table2RuleContractTests(unittest.TestCase):
         self.assertIn("T-mu", recursion_steps)
         self.assertIn("T-X", recursion_steps)
 
-        checker = TypeChecker(dl_checker=_approve_dl)
-        parallel_report = checker.check(
-            TypingJudgment(
+        constructor = TypeConstructor(dl_checker=_approve_dl)
+        parallel_report = constructor.construct(
+            TypeConstructionRequest(
                 gamma={"left": BasicType.INT, "right": BasicType.INT},
                 theta={},
                 configurations=(

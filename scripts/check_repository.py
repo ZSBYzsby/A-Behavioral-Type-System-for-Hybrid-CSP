@@ -124,7 +124,7 @@ def main() -> int:
                 "-p",
                 "test_*.py",
             ],
-            "Core regression tests",
+            "TypeConstructor regression tests",
         ),
     )
     for command, description in commands:

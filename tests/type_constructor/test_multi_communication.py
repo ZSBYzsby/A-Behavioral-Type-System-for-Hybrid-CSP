@@ -35,7 +35,7 @@ from hcsp_typechecker._internal import (
     ParallelType,
     Sequence,
     Verdict,
-    check_hcsp,
+    construct_type,
     types_equivalent,
 )
 
@@ -54,7 +54,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
             InputChannel("data", ("x", "ready")),
             Assert("x >= 0 and ready"),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={
                 "data": ChannelType(
@@ -67,7 +67,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
 
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(
-            types_equivalent(report.inferred_type, InputType("data", EndType()))
+            types_equivalent(report.constructed_type, InputType("data", EndType()))
         )
         self.assertIn("T-Assert", {item.rule for item in report.obligations})
 
@@ -78,7 +78,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
     def test_multi_output_proves_callable_joint_refinement(self) -> None:
         """多参数 refinement callable 应按槽位顺序接收全部输出项。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={"x": BasicType.INT, "limit": BasicType.INT},
             theta={
                 "pair": ChannelType(
@@ -98,7 +98,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
 
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(
-            types_equivalent(report.inferred_type, OutputType("pair", EndType()))
+            types_equivalent(report.constructed_type, OutputType("pair", EndType()))
         )
         t_out = [item for item in report.obligations if item.rule == "T-Out"]
         self.assertEqual(len(t_out), 1)
@@ -113,12 +113,12 @@ class MultiScalarCommunicationTests(unittest.TestCase):
 
         channel = ChannelType((BasicType.INT, BasicType.BOOL))
         reports = (
-            check_hcsp(
+            construct_type(
                 gamma={},
                 theta={"data": channel},
                 configurations=[Configuration({}, InputChannel("data", "x"))],
             ),
-            check_hcsp(
+            construct_type(
                 gamma={},
                 theta={"data": channel},
                 configurations=[
@@ -131,7 +131,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         for report, fragment in zip(reports, expected_fragments):
             with self.subTest(fragment=fragment):
                 self.assertEqual(report.verdict, Verdict.FALSE)
-                self.assertIsNone(report.inferred_type)
+                self.assertIsNone(report.constructed_type)
                 self.assertTrue(
                     any(fragment in item.message for item in report.diagnostics)
                 )
@@ -143,7 +143,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
     def test_each_output_slot_is_type_checked_independently(self) -> None:
         """交换槽位类型不能被整个参数表的外层形状掩盖。"""
 
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={
                 "mixed": ChannelType((BasicType.INT, BasicType.BOOL))
@@ -154,7 +154,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.inferred_type)
+        self.assertIsNone(report.constructed_type)
         messages = tuple(item.message for item in report.diagnostics)
         self.assertTrue(any("slot 1 expects Int, got Bool" in text for text in messages))
         self.assertTrue(any("slot 2 expects Bool, got Nat" in text for text in messages))
@@ -170,7 +170,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
             InputChannel("pair", ("x", "y")),
             OutputChannel("pair", (1, 2)),
         )
-        report = check_hcsp(
+        report = construct_type(
             gamma={},
             theta={
                 "pair": ChannelType((BasicType.INT, BasicType.INT))
@@ -185,7 +185,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertTrue(types_equivalent(report.inferred_type, expected))
+        self.assertTrue(types_equivalent(report.constructed_type, expected))
 
 
 if __name__ == "__main__":

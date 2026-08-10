@@ -31,21 +31,22 @@ from hcsp_typechecker._internal import (
     AngelicType,
     BehavioralType,
     BottomType,
-    CommunicationTimeoutType,
     ConfigurationType,
+    EmptyType,
     EndType,
     ExternalChoiceType,
+    FiniteDelayType,
+    InfiniteDelayType,
     InputType,
     InternalChoiceType,
     MuType,
+    NoInterruptType,
     OutputType,
     ParallelType,
     ProcessType,
-    PureDelayType,
-    TimedExternalChoiceType,
     TypeVar,
     make_external_choice,
-    make_timed_type,
+    make_delay_type,
     types_equivalent,
 )
 
@@ -83,7 +84,7 @@ class AngelicTypeNormalizationTests(unittest.TestCase):
 
         input_branch = InputType("in", EndType())
         output_branch = OutputType("out", EndType())
-        self.assertIsInstance(make_external_choice(()), EndType)
+        self.assertIsInstance(make_external_choice(()), NoInterruptType)
         self.assertIs(make_external_choice((input_branch,)), input_branch)
         self.assertEqual(
             make_external_choice((input_branch, output_branch)),
@@ -94,7 +95,7 @@ class AngelicTypeNormalizationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ExternalChoiceType((input_branch,))
         with self.assertRaises(TypeError):
-            ExternalChoiceType((input_branch, EndType()))  # type: ignore[arg-type]
+            ExternalChoiceType((input_branch, EmptyType()))  # type: ignore[arg-type]
 
     # 测试输入：合法 ASCII 通道标识符及 Unicode、空白、标点、数字开头名称。
     # 预期行为：InputType/OutputType 接受合法名称并统一拒绝非法名称。
@@ -153,22 +154,14 @@ class TimedTypeNormalizationTests(unittest.TestCase):
     def test_unified_delay_rule_dispatches_to_distinct_nodes(self) -> None:
         """推导结果的语义差异必须直接反映在节点类上。"""
 
-        communication = InputType("ch", EndType())
+        communication = InputType("ch", EmptyType())
         self.assertEqual(
-            make_timed_type(1, EndType(), EndType()),
-            PureDelayType(1, EndType()),
+            make_delay_type(1, NoInterruptType(), EmptyType()),
+            FiniteDelayType(1, NoInterruptType(), EmptyType()),
         )
         self.assertEqual(
-            make_timed_type(1, EndType(), BottomType()),
-            PureDelayType(1, BottomType()),
-        )
-        self.assertEqual(
-            make_timed_type(1, communication, BottomType()),
-            CommunicationTimeoutType(1, communication),
-        )
-        self.assertEqual(
-            make_timed_type(1, communication, EndType()),
-            TimedExternalChoiceType(1, communication, EndType()),
+            make_delay_type(1, communication, EmptyType()),
+            FiniteDelayType(1, communication, EmptyType()),
         )
 
     # 测试输入：infinity 下分别组合 bottom/非 bottom 后继以及空/非空 A。
@@ -179,36 +172,34 @@ class TimedTypeNormalizationTests(unittest.TestCase):
     def test_infinite_delay_discards_timeout_fallback(self) -> None:
         """无限时延应把不可达 fallback 规范为空行为并返回 A。"""
 
-        communication = InputType("ch", EndType())
-        self.assertIs(
-            make_timed_type(inf, communication, BottomType()),
-            communication,
-        )
-        self.assertIs(
-            make_timed_type(inf, communication, EndType()),
-            communication,
+        communication = InputType("ch", EmptyType())
+        self.assertEqual(
+            make_delay_type(inf, communication, BottomType()),
+            InfiniteDelayType(communication),
         )
         self.assertEqual(
-            make_timed_type(inf, EndType(), EndType()),
-            EndType(),
+            make_delay_type(inf, communication, EmptyType()),
+            InfiniteDelayType(communication),
+        )
+        self.assertEqual(
+            make_delay_type(inf, NoInterruptType(), EmptyType()),
+            InfiniteDelayType(NoInterruptType()),
         )
 
-    # 测试输入：把空 A、bottom fallback、infinity 放入不对应的具体 delay 节点。
-    # 预期行为：每种非规范直接构造都抛出 ValueError。
-    # 检查内容：证明三个节点的字段状态空间互斥而不是换名后的通用容器。
-    # 论文对应：delay(d).T、delay(d) \unrhd A 与完整式的适用条件不同。
+    # 测试输入：非法 A、bottom 后继和无穷时延直接传给有限时延节点。
+    # 预期行为：字段类别或有限时延不变量不成立时，构造立即拒绝。
+    # 检查内容：统一节点仍严格区分 A/T，并禁止把 bottom 用作有限正常后继。
+    # 论文对应：有限 delay(d) \unrhd A \triangleright T 中 T 不可为 bottom。
     def test_delay_node_constructors_reject_overlapping_forms(self) -> None:
         """具体 delay 节点不能重新表达另一个节点负责的缩写。"""
 
         communication = OutputType("ch", EndType())
+        with self.assertRaises(TypeError):
+            FiniteDelayType(1, "not-an-interrupt", EmptyType())  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
-            CommunicationTimeoutType(1, EndType())
+            FiniteDelayType(1, NoInterruptType(), BottomType())
         with self.assertRaises(ValueError):
-            TimedExternalChoiceType(1, EndType(), EndType())
-        with self.assertRaises(ValueError):
-            TimedExternalChoiceType(1, communication, BottomType())
-        with self.assertRaises(ValueError):
-            CommunicationTimeoutType(inf, communication)
+            FiniteDelayType(1, communication, BottomType())
 
     # 测试输入：int、float、Decimal 的同值时延，以及负数、Bool、NaN 等非法值。
     # 预期行为：有限合法值成为最简 Fraction，正无穷工厂规范为 A，其余失败。
@@ -217,20 +208,25 @@ class TimedTypeNormalizationTests(unittest.TestCase):
     def test_duration_is_exact_and_checked_at_type_boundary(self) -> None:
         """类型节点独立维护精确非负有限时延不变量。"""
 
-        self.assertEqual(PureDelayType(0.5, EndType()).duration, Fraction(1, 2))
         self.assertEqual(
-            PureDelayType(Decimal("0.125"), EndType()).duration,
+            FiniteDelayType(0.5, NoInterruptType(), EndType()).duration,
+            Fraction(1, 2),
+        )
+        self.assertEqual(
+            FiniteDelayType(
+                Decimal("0.125"), NoInterruptType(), EndType()
+            ).duration,
             Fraction(1, 8),
         )
-        communication = InputType("ch", EndType())
-        self.assertIs(
-            make_timed_type(Decimal("Infinity"), communication, EndType()),
-            communication,
+        communication = InputType("ch", EmptyType())
+        self.assertEqual(
+            make_delay_type(Decimal("Infinity"), communication, EmptyType()),
+            InfiniteDelayType(communication),
         )
         for invalid in (-1, True, nan, -inf, Decimal("NaN")):
             with self.subTest(invalid=invalid):
                 with self.assertRaises((TypeError, ValueError)):
-                    PureDelayType(invalid, EndType())
+                    FiniteDelayType(invalid, NoInterruptType(), EndType())
 
 
 class TypeLayerAndRecursionTests(unittest.TestCase):
@@ -267,11 +263,14 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MuType("t", TypeVar("t"))
         with self.assertRaises(ValueError):
-            MuType("t", PureDelayType(1, TypeVar("t")))
+            MuType(
+                "t",
+                FiniteDelayType(1, NoInterruptType(), TypeVar("t")),
+            )
         guarded = MuType("t", InputType("ch", TypeVar("t")))
         self.assertEqual(guarded.body, InputType("ch", TypeVar("t")))
 
-    # 测试输入：仅绑定变量名不同、且包含 TimedExternalChoiceType 的两个递归类型。
+    # 测试输入：仅绑定变量名不同、且包含 FiniteDelayType 的两个递归类型。
     # 预期行为：types_equivalent 返回 true；改变通信方向后返回 false。
     # 检查内容：新时延节点的 duration、A、fallback 全部进入 alpha 结构键。
     # 论文对应：mu t.T 的受绑定变量改名不改变类型结构。
@@ -280,26 +279,26 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
 
         left = MuType(
             "t",
-            TimedExternalChoiceType(
+            FiniteDelayType(
                 1,
                 InputType("ch", TypeVar("t")),
-                EndType(),
+                OutputType("done", EndType()),
             ),
         )
         right = MuType(
             "u",
-            TimedExternalChoiceType(
+            FiniteDelayType(
                 Fraction(1),
                 InputType("ch", TypeVar("u")),
-                EndType(),
+                OutputType("done", EndType()),
             ),
         )
         changed = MuType(
             "u",
-            TimedExternalChoiceType(
+            FiniteDelayType(
                 1,
                 OutputType("ch", TypeVar("u")),
-                EndType(),
+                OutputType("done", EndType()),
             ),
         )
         self.assertTrue(types_equivalent(left, right))
@@ -352,12 +351,12 @@ class TypeRenderingTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            str(TimedExternalChoiceType(2, choices, fallback)),
+            str(FiniteDelayType(2, choices, fallback)),
             r"delay(2) \unrhd ((reset?.(0)) \sqcap (alarm!.(0))) "
             r"\triangleright ((left!.(0)) \sqcup (right!.(0)))",
         )
         self.assertEqual(
-            str(CommunicationTimeoutType(2, choices)),
+            str(FiniteDelayType(2, choices, EmptyType())),
             r"delay(2) \unrhd ((reset?.(0)) \sqcap (alarm!.(0)))",
         )
 
@@ -377,7 +376,11 @@ class TypeRenderingTests(unittest.TestCase):
                 )
             ),
         )
-        delayed = PureDelayType(1, OutputType("done", EndType()))
+        delayed = FiniteDelayType(
+            1,
+            NoInterruptType(),
+            OutputType("done", EndType()),
+        )
 
         self.assertEqual(
             str(ParallelType((recursive, delayed))),
