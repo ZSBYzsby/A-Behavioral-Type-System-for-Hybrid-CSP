@@ -1,6 +1,6 @@
 """KeYmaera X 命令行后端。
 
-TypeConstructor 只把 :class:`~hcsp_typechecker.typechecking.dl.DLFormula`
+共享规则引擎只把 :class:`~hcsp_typechecker.backend.common.dl.DLFormula`
 交给本模块。后端将
 公式写入临时 ``.kyx`` archive，以独立进程运行官方 ``keymaerax.jar``，再把
 命令行状态映射为项目的三值
@@ -33,7 +33,7 @@ from typing import Literal
 import uuid
 
 from .dl import DLFormula, UntranslatedDLFormula
-from ..data_structures.type_construction.model import (
+from ...data_structures.type_construction.model import (
     DLCheckResult,
     ProofObligation,
     Verdict,

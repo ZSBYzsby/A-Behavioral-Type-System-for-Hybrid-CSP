@@ -1,6 +1,6 @@
-r"""项目自有 HCSP 语言的行为类型构造器（TypeConstructor）。
+r"""TypeConstructor 与 TypeChecker 共用的 Table 2 规则引擎。
 
-核心数据流如下：
+TypeConstructor 使用的核心数据流如下：
 
 ``TypeConstructionRequest -> ConclusionJudgment -> RuleExpansion(premises, conclude)
 -> 按顺序立即判定 FormulaPremise + 递归求解 ChildJudgmentPremise
@@ -15,11 +15,9 @@ r"""项目自有 HCSP 语言的行为类型构造器（TypeConstructor）。
    ``ProofObligation`` 立即追加到审计记录。``false`` 会否证当前规则并终止
    该分支；``unknown`` 只表示证明尚未完成，推导会继续构造候选类型，最终
    报告则保留 ``unknown``，明确说明所得类型尚不可信。
-3. 这种顺序性使 ``ODE; skip`` 能分别试用纯通信规则与自然超时规则。
-   已证明候选优先；若非等价的另一候选仍未决，或者全部候选都未决，选择器
-   会返回一个可审计的暂定类型并报告 ``unknown``。未选候选的公式仍保留但
-   标记为 inactive，不直接污染所选推导的 verdict；候选唯一性问题由专门诊断
-   记录。两条已证明规则若产生非等价类型，仍报告规则歧义而不返回类型。
+3. ODE 根据源码形状确定性地选择规则：没有顺序后继时采用纯通信中断规则，
+   有有限时延后继时采用自然超时规则，无穷时延则没有可达的超时后继。规则
+   产生的 safety、domain 或 boundary 前提仍按源码顺序立即交给证明器。
 
 这不是把 Python 的递归调用直接当作论文推导树。每条 ``rule_t_*`` 规则只分析
 横线下方的结论 judgment，并显式返回横线上方的 premises；统一求解器按顺序
@@ -37,19 +35,19 @@ Table 2 的 T-\sqcup 在项目的规范多元 Process AST 上写成以下带公�
 只会执行被选中的一条分支；这也不需要定义
 通用的类型级 T-Seq。
 
-类型构造器只接受 :mod:`hcsp_typechecker.data_structures.process_ast.ast` 中定义的节点，并使用明确的
+共享规则引擎只接受 :mod:`hcsp_typechecker.data_structures.process_ast.ast` 中定义的节点，并使用明确的
 ``isinstance`` 分派。外部对象不会因拥有同名字段而被隐式解释为 HCSP。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from math import inf
 from typing import Any, Callable, Mapping, Sequence
 
-from ..identifiers import is_hcsp_identifier
-from ..data_structures.process_ast.expressions import Literal, ensure_expr
+from ...identifiers import is_hcsp_identifier
+from ...data_structures.process_ast.expressions import Literal, ensure_expr
 from .dl import (
     DLFormula,
     DLTranslationError,
@@ -58,7 +56,7 @@ from .dl import (
     boundary_formula,
     safety_formula,
 )
-from ..data_structures.process_ast.ast import (
+from ...data_structures.process_ast.ast import (
     Assert,
     Assign,
     Channel,
@@ -91,7 +89,7 @@ from .logic import (
     z3,
 )
 from .keymaerax import KeYmaeraXBackend, KeYmaeraXConfig
-from ..data_structures.type_ast.ast import (
+from ...data_structures.type_ast.ast import (
     AngelicType,
     ConfigurationType,
     EmptyType,
@@ -108,9 +106,13 @@ from ..data_structures.type_ast.ast import (
     TypeVar,
     make_external_choice,
     make_delay_type,
-    types_equivalent,
 )
-from ..data_structures.type_construction.model import (
+from ...data_structures.type_ast.render import (
+    format_angelic_type,
+    format_configuration_type,
+    format_process_type,
+)
+from ...data_structures.type_construction.model import (
     BasicType,
     ChannelType,
     TypeConstructionReport,
@@ -230,13 +232,6 @@ class _ODEPostAssumption(str, Enum):
     DOMAIN_AND_SAFETY = "domain-and-safety"
     SAFETY = "safety"
     NOT_DOMAIN_AND_SAFETY = "not-domain-and-safety"
-
-
-class _ODETypeRule(str, Enum):
-    """``ODE; skip`` 可能适用的两个 Table 2 候选规则。"""
-
-    COMMUNICATION_ONLY = "communication-only"
-    NATURAL_TIMEOUT = "natural-timeout"
 
 
 @dataclass(frozen=True)
@@ -362,24 +357,12 @@ _ProcessConstructionResult = ProcessType | _ConstructionFailure
 _ConfigurationConstructionResult = ConfigurationType | _ConstructionFailure
 
 
-@dataclass(frozen=True)
-class _ODECandidateAttempt:
-    """一次 ODE 候选规则的隔离执行结果。"""
+class Table2RuleEngine:
+    """封装 Constructor 与 Checker 共用的规则展开、符号执行和证明操作。
 
-    mode: _ODETypeRule
-    result: _ProcessConstructionResult
-    verdict: Verdict
-    obligations: tuple[ProofObligation, ...]
-    diagnostics: tuple[Diagnostic, ...]
-    steps: tuple[DerivationStep, ...]
-
-
-class TypeConstructor:
-    """按论文 Table 2 构造并验证 HCSP 行为类型。
-
-    实例可重复调用 ``construct``；每次调用都会清空上次报告。ODE 的 safety/delay
-    直接来自 AST 中唯一的 ``ODEAnnotation``，动态逻辑义务可委托
-    ``dl_checker`` 外部后端。非项目 AST 会产生结构诊断，不参与兼容性推断。
+    TypeConstructor 通过受保护的 ``_construct_type`` 使用构造流程；TypeChecker
+    则只复用环境准备、``rule_t_*`` 展开和证明功能。ODE 的 safety/delay 直接来自
+    AST 中唯一的 ``ODEAnnotation``，动态逻辑义务可委托 ``dl_checker`` 外部后端。
     """
 
     def __init__(
@@ -411,7 +394,7 @@ class TypeConstructor:
         self._fresh_counter = 0
         self._type_var_counter = 0
 
-    def construct(
+    def _construct_type(
         self,
         request: TypeConstructionRequest,
     ) -> TypeConstructionReport:
@@ -423,7 +406,7 @@ class TypeConstructor:
         ``constructed_type`` 和 ``UNKNOWN`` verdict：这表示“推导完成，但至少一条
         必要公式尚未证明”，该类型不能作为可信结论使用。
         """
-        # TypeConstructor 实例可复用，但报告和新鲜名计数必须按构造请求隔离。
+        # 同一规则引擎实例可复用，但报告和新鲜名计数必须按请求隔离。
         self.obligations = []
         self.diagnostics = []
         self.steps = []
@@ -836,7 +819,9 @@ class TypeConstructor:
                 for valid in validity
             ]
             readable_types = ", ".join(
-                "(failed)" if isinstance(item, _ConstructionFailure) else str(item)
+                "(failed)"
+                if isinstance(item, _ConstructionFailure)
+                else format_configuration_type(item)
                 for item in types
             )
             self._finish_step(
@@ -1019,7 +1004,10 @@ class TypeConstructor:
         result_text = (
             "推导失败，未构造正式配置类型"
             if isinstance(result, _ConstructionFailure)
-            else f"状态前提已当场判定；候选类型 = {result}"
+            else (
+                "状态前提已当场判定；候选类型 = "
+                + format_configuration_type(result)
+            )
         )
         self._finish_step(
             step,
@@ -1074,7 +1062,7 @@ class TypeConstructor:
             result = self._solve_rule_expansion(expansion)
             self._finish_step(
                 end_step,
-                f"候选类型 = {result}",
+                "候选类型 = " + format_process_type(result),
                 self._premise_summary(expansion),
             )
             return result
@@ -1136,7 +1124,7 @@ class TypeConstructor:
         if isinstance(result, _ConstructionFailure):
             result_text = "推导失败，未构造正式行为类型"
         else:
-            result_text = f"候选类型 = {result}"
+            result_text = "候选类型 = " + format_process_type(result)
         self._finish_step(
             rule_step,
             result_text,
@@ -1739,9 +1727,9 @@ class TypeConstructor:
         if isinstance(result, _ConstructionFailure):
             result_text = "推导失败，事件反应没有正式 angelic type"
         elif isinstance(node, EmptyEvent):
-            result_text = f"事件选择递归结束 = {result}"
+            result_text = "事件选择递归结束 = " + format_angelic_type(result)
         else:
-            result_text = f"事件选择类型 = {result}"
+            result_text = "事件选择类型 = " + format_angelic_type(result)
         self._finish_step(
             event_step,
             result_text,
@@ -1752,283 +1740,6 @@ class TypeConstructor:
     # ------------------------------------------------------------------
     # ODE rules and externally discharged dL obligations
     # ------------------------------------------------------------------
-    @staticmethod
-    def _needs_ode_skip_rule_selection(
-        judgment: _ProcessJudgment,
-    ) -> bool:
-        """仅识别有限 ODE 后精确只有一个终端 ``skip`` 的重叠形状。"""
-
-        if len(judgment.nodes) != 2 or not isinstance(
-            judgment.nodes[1], Skip
-        ):
-            return False
-        node = judgment.nodes[0]
-        if not isinstance(node, ODE):
-            return False
-        return not (
-            isinstance(node.annotation.delay, float)
-            and node.annotation.delay == inf
-        )
-
-    def _attempt_ode_candidate(
-        self,
-        judgment: _ProcessJudgment,
-        mode: _ODETypeRule,
-    ) -> _ODECandidateAttempt:
-        """隔离执行一个 ODE 候选，返回证据后回滚公开报告列表。"""
-
-        obligation_start = len(self.obligations)
-        diagnostic_start = len(self.diagnostics)
-        step_start = len(self.steps)
-        context = judgment.context
-        candidate_step = self._start_step(
-            "T-ODE",
-            context.location,
-            f"试用 ODE 候选规则 {mode.value}",
-            context=context,
-        )
-        expansion = self.rule_t_ode(judgment, candidate=mode)
-        result = self._solve_rule_expansion(expansion)
-        self._finish_step(
-            candidate_step,
-            (
-                "候选未构造正式类型"
-                if isinstance(result, _ConstructionFailure)
-                else f"候选类型 = {result}"
-            ),
-            self._premise_summary(expansion),
-        )
-
-        obligations = tuple(self.obligations[obligation_start:])
-        diagnostics = tuple(self.diagnostics[diagnostic_start:])
-        steps = tuple(self.steps[step_start:])
-        del self.obligations[obligation_start:]
-        del self.diagnostics[diagnostic_start:]
-        del self.steps[step_start:]
-
-        verdict_inputs = [item.verdict for item in obligations]
-        verdict_inputs.extend(item.verdict for item in diagnostics)
-        if (
-            isinstance(result, _ConstructionFailure)
-            and Verdict.FALSE not in verdict_inputs
-        ):
-            # UNKNOWN 已不再使规则求解停止。因此候选仍返回失败标记时，必然还
-            # 存在一个公式结论之外的结构/静态失败；即使此前也记录了 UNKNOWN，
-            # 该候选仍应按 FALSE 排除，而不能伪装成“只有证明尚未完成”。
-            verdict_inputs.append(Verdict.FALSE)
-        return _ODECandidateAttempt(
-            mode=mode,
-            result=result,
-            verdict=Verdict.combine(verdict_inputs),
-            obligations=obligations,
-            diagnostics=diagnostics,
-            steps=steps,
-        )
-
-    @staticmethod
-    def _ode_attempts_have_equivalent_types(
-        attempts: Sequence[_ODECandidateAttempt],
-    ) -> bool:
-        """判断一组可行候选是否只是同一类型的等价推导。"""
-
-        if not attempts:
-            return False
-        first = attempts[0].result
-        if isinstance(first, _ConstructionFailure):
-            return False
-        return all(
-            not isinstance(attempt.result, _ConstructionFailure)
-            and types_equivalent(first, attempt.result)
-            for attempt in attempts[1:]
-        )
-
-    def _commit_ode_candidate_evidence(
-        self,
-        attempts: Sequence[_ODECandidateAttempt],
-        selected: _ODECandidateAttempt | None,
-    ) -> None:
-        """保留全部候选公式，但只让被选规则参与最终 verdict。"""
-
-        for attempt in attempts:
-            is_selected = attempt is selected
-            self.obligations.extend(
-                replace(
-                    obligation,
-                    active=is_selected,
-                    candidate=attempt.mode.value,
-                )
-                for obligation in attempt.obligations
-            )
-        if selected is not None:
-            self.diagnostics.extend(selected.diagnostics)
-            self.steps.extend(selected.steps)
-
-    @staticmethod
-    def _ode_attempt_summary(attempt: _ODECandidateAttempt) -> str:
-        """生成用于选择步骤的单行候选证据摘要。"""
-
-        proofs = ", ".join(
-            f"{item.rule}={item.verdict.value}"
-            for item in attempt.obligations
-        ) or "no formulas"
-        constructed = (
-            "failure"
-            if isinstance(attempt.result, _ConstructionFailure)
-            else str(attempt.result)
-        )
-        return (
-            f"{attempt.mode.value}: verdict={attempt.verdict.value}, "
-            f"type={constructed}, proofs=[{proofs}]"
-        )
-
-    def _solve_ode_skip_rule_candidates(
-        self,
-        judgment: _ProcessJudgment,
-    ) -> _ProcessConstructionResult:
-        """顺序试用 ``ODE;skip`` 的两条规则并选择可审计的候选类型。
-
-        先在已经证明为 TRUE 的候选中按类型等价类选择。两个已证候选若非等价
-        则属于真实规则歧义，不返回类型。一条候选已证、另一条非等价候选仍为
-        UNKNOWN 时，保留已证候选作为暂定类型，但整体仍为 UNKNOWN，因为规则
-        唯一性尚未建立；若未决候选产生的是等价类型，则不影响已证结论。
-
-        没有已证类型时，只要至少一个 UNKNOWN 候选完成了结构推导，就按
-        ``natural-timeout``、``communication-only`` 的固定顺序选择。前者优先
-        是因为当前 AST 明确含有顺序后继 ``skip``，自然超时规则会保留这个后继；
-        这只是未验证临时候选的确定性优先级，不是新增的 Table 2 规则，UNKNOWN
-        诊断会明确禁止把它当作已证类型。两个候选都被 FALSE 排除时才报告无法
-        推导。
-        """
-
-        context = judgment.context
-        selection_step = self._start_step(
-            "T-ODE-Select",
-            context.location,
-            "ODE 后继为终端 skip：顺序试用两条 Table 2 规则",
-            context=context,
-        )
-        attempts = tuple(
-            self._attempt_ode_candidate(judgment, mode)
-            for mode in (
-                _ODETypeRule.COMMUNICATION_ONLY,
-                _ODETypeRule.NATURAL_TIMEOUT,
-            )
-        )
-
-        proved = tuple(
-            attempt
-            for attempt in attempts
-            if attempt.verdict == Verdict.TRUE
-            and not isinstance(attempt.result, _ConstructionFailure)
-        )
-        unknown = tuple(
-            attempt
-            for attempt in attempts
-            if attempt.verdict == Verdict.UNKNOWN
-            and not isinstance(attempt.result, _ConstructionFailure)
-        )
-
-        selected: _ODECandidateAttempt | None = None
-        selection_is_untrusted = False
-        untrusted_reason = ""
-        proved_are_ambiguous = (
-            len(proved) > 1
-            and not self._ode_attempts_have_equivalent_types(proved)
-        )
-        if proved and not proved_are_ambiguous:
-            selected = proved[0]
-            non_equivalent_unknown = tuple(
-                attempt
-                for attempt in unknown
-                if not types_equivalent(selected.result, attempt.result)
-            )
-            if non_equivalent_unknown:
-                # 已证明候选可以提供有用的暂定类型，但另一条非等价规则尚未被
-                # 排除，因此不能把“存在一棵已证推导”误报成“结论已经唯一”。
-                selection_is_untrusted = True
-                unresolved = ", ".join(
-                    attempt.mode.value for attempt in non_equivalent_unknown
-                )
-                untrusted_reason = (
-                    "The selected ODE rule is proved, but the non-equivalent "
-                    f"candidate(s) {unresolved} remain unknown; rule uniqueness "
-                    "has not been established"
-                )
-        elif not proved and unknown:
-            priority = {
-                _ODETypeRule.NATURAL_TIMEOUT: 0,
-                _ODETypeRule.COMMUNICATION_ONLY: 1,
-            }
-            selected = min(unknown, key=lambda attempt: priority[attempt.mode])
-            selection_is_untrusted = True
-            untrusted_reason = (
-                "No ODE rule candidate has been proved; the deterministic "
-                f"temporary candidate {selected.mode.value} was retained"
-            )
-
-        self._commit_ode_candidate_evidence(attempts, selected)
-        summaries = "; ".join(
-            self._ode_attempt_summary(attempt) for attempt in attempts
-        )
-
-        # 候选隔离执行时会暂存结构诊断。选中某一候选时只提交该候选的诊断；
-        # 若没有候选可选，则仍须把真正导致失败的结构原因带回公开报告，否则用户
-        # 只能看到笼统的“两个规则都不可用”，无法定位未声明变量等源程序错误。
-        if selected is None:
-            seen_diagnostics: set[tuple[Verdict, str, str, str]] = set()
-            for attempt in attempts:
-                for diagnostic in attempt.diagnostics:
-                    key = (
-                        diagnostic.verdict,
-                        diagnostic.message,
-                        diagnostic.rule,
-                        diagnostic.location,
-                    )
-                    if key not in seen_diagnostics:
-                        self.diagnostics.append(diagnostic)
-                        seen_diagnostics.add(key)
-
-        if selected is not None:
-            if selection_is_untrusted:
-                self._diagnose(
-                    Verdict.UNKNOWN,
-                    untrusted_reason
-                    + "; type construction can complete, but the retained type is "
-                    "untrusted until all competing proof obligations are resolved",
-                    "T-ODE-Select",
-                    context.location,
-                )
-            self._finish_step(
-                selection_step,
-                (
-                    f"保留未证候选 {selected.mode.value}: {selected.result}"
-                    if selection_is_untrusted
-                    else f"选中已证候选 {selected.mode.value}: {selected.result}"
-                ),
-                summaries,
-            )
-            return selected.result
-
-        if proved_are_ambiguous:
-            self._diagnose(
-                Verdict.UNKNOWN,
-                "Both ODE rules were proved but generated non-equivalent types; "
-                "the Table 2 derivation is ambiguous",
-                "T-ODE-Select",
-                context.location,
-            )
-            result_text = "两个已证候选类型不等价，无法唯一选择"
-        else:
-            self._diagnose(
-                Verdict.FALSE,
-                "Neither ODE rule satisfies all of its Table 2 premises",
-                "T-ODE-Select",
-                context.location,
-            )
-            result_text = "两条 ODE 候选规则均不可用"
-        self._finish_step(selection_step, result_text, summaries)
-        return _CONSTRUCTION_FAILURE
-
     @staticmethod
     def _validate_continuous_vectors(gamma: Mapping[str, GammaType]) -> None:
         """验证每个独立 ODE 向量声明的成员都是已声明 Real 标量。
@@ -2113,9 +1824,9 @@ class TypeConstructor:
         左侧必须与其中一个集合精确相等，但方程书写顺序不影响匹配。隐式局部
         时钟不参与向量比较。
 
-        没有后继时使用纯通信中断规则；有非终端后继时使用带 fallback
-        规则。唯一重叠形状 ``ODE; skip`` 由外层顺序选择器两条规则都试用，
-        本方法的 ``candidate`` 参数只在该隔离尝试中指定当前规则。
+        没有后继时使用纯通信中断规则；有限时延且存在顺序后继时使用带
+        fallback 的自然超时规则；无穷时延没有可达的超时后继。每个源码形状
+        只进入一条确定的 ODE 规则，不再进行候选规则试用或选择。
 
         ``node.local_clock`` 由 ODE 构造器自动建立，不要求用户放入 Gamma 或
         初始状态。ODE 方程右端、演化域和节点 safety 中的 ``t`` 在局部作用域
@@ -3116,7 +2827,7 @@ class TypeConstructor:
         result_text = (
             "推导失败，至少一个并行系统分支没有正式配置类型"
             if isinstance(result, _ConstructionFailure)
-            else f"并行配置类型 = {result}"
+            else "并行配置类型 = " + format_configuration_type(result)
         )
         self._finish_step(
             parallel_step,
@@ -3453,7 +3164,7 @@ class TypeConstructor:
                 subject = (
                     "T-End"
                     if not child.nodes
-                    else TypeConstructor._describe_process_node(child.nodes[0])
+                    else Table2RuleEngine._describe_process_node(child.nodes[0])
                 )
                 descriptions.append(f"process[{subject}]@{child.context.location}")
             elif isinstance(child, _EventJudgment):
@@ -3470,10 +3181,10 @@ class TypeConstructor:
         return (
             summary
             + " 惰性最强后置状态: "
-            + f"赋值前 {target}={TypeConstructor._display_term(post_state.previous_term)}; "
-            + f"右值={TypeConstructor._display_term(post_state.assigned_term)}; "
+            + f"赋值前 {target}={Table2RuleEngine._display_term(post_state.previous_term)}; "
+            + f"右值={Table2RuleEngine._display_term(post_state.assigned_term)}; "
             + f"赋值后 symbols[{target}]="
-            + f"{TypeConstructor._display_term(post_state.post_context.symbols[target])}; "
+            + f"{Table2RuleEngine._display_term(post_state.post_context.symbols[target])}; "
             + "phi' 已由该符号映射确定，不需要谓词综合。"
         )
 
@@ -3561,7 +3272,7 @@ class TypeConstructor:
     ) -> TypeConstructionReport:
         """合并义务与诊断的三值结果，构造不可变最终报告。"""
         verdict = Verdict.combine(
-            [item.verdict for item in self.obligations if item.active]
+            [item.verdict for item in self.obligations]
             + [item.verdict for item in self.diagnostics]
         )
         return TypeConstructionReport(
@@ -3784,38 +3495,3 @@ class TypeConstructor:
         if not isinstance(process, HCSP):
             return set()
         return process.get_input_bound_vars()
-
-
-def construct_type(
-    *,
-    gamma: Mapping[str, GammaType] | None,
-    theta: Mapping[str, ChannelType | Any] | None,
-    configurations: Sequence[Configuration | tuple[Mapping[str, Any], Any] | Any],
-    path_condition: Any = True,
-    parameters: ParameterEnvironment | Mapping[str, Any] | None = None,
-    dl_checker: DLChecker | None = None,
-    keymaerax_config: KeYmaeraXConfig | None = None,
-    z3_timeout_ms: int = 5_000,
-) -> TypeConstructionReport:
-    """按设计 PPT 的输入形式提供无状态便捷 API。
-
-    该函数负责构造 :class:`TypeConstructionRequest` 和一次性
-    :class:`TypeConstructor`。需要重用 ODE 配置或自定义构造流程时，可直接
-    实例化 ``TypeConstructor``。
-    ``parameters`` 可传入 :class:`ParameterEnvironment`；只传声明映射时
-    约束默认为 ``True``。
-    """
-
-    request = TypeConstructionRequest(
-        gamma=gamma,
-        theta=theta,
-        configurations=configurations,
-        path_condition=path_condition,
-        parameters=parameters,
-    )
-    return TypeConstructor(
-        dl_checker=dl_checker,
-        keymaerax_config=keymaerax_config,
-        z3_timeout_ms=z3_timeout_ms,
-    ).construct(request)
-    NoInterruptType,

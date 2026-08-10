@@ -31,7 +31,7 @@ from hcsp_typechecker._internal import (
     Verdict,
     construct_type,
 )
-from hcsp_typechecker.typechecking.logic import Z3ProofEngine, z3
+from hcsp_typechecker.backend.common.logic import Z3ProofEngine, z3
 
 
 @unittest.skipIf(z3 is None, "z3-solver is required")

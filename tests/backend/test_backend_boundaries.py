@@ -1,0 +1,90 @@
+"""锁定 TypeConstructor、TypeChecker 与共享后端的目录边界。
+
+测试内容：
+
+* 两个业务后端是否分别位于 ``backend/type_constructor`` 和
+  ``backend/type_checker``；
+* 二者是否只共同继承 ``Table2RuleEngine``，而不互相继承；
+* ``backend/common`` 是否保持对两个业务包的零依赖；
+* 已废弃的 ``typechecking`` 混合目录是否完全移除。
+
+预期行为：共享规则和证明工具只能位于 common；Constructor 与 Checker 可以
+依赖 common，但两个业务包不能互相导入。
+
+论文对应：两个业务功能使用同一套项目 Table 2 规则；目录分层只隔离算法职责，
+不复制或改变规则的数学含义。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+import unittest
+
+import hcsp_typechecker
+from hcsp_typechecker.backend.common.rule_engine import Table2RuleEngine
+from hcsp_typechecker.backend.type_checker import TypeChecker
+from hcsp_typechecker.backend.type_constructor import TypeConstructor
+
+
+class BackendBoundaryTests(unittest.TestCase):
+    """验证后端物理布局和单向依赖。"""
+
+    # 测试输入：两个业务类和共享规则引擎的 Python 继承关系。
+    # 预期行为：两个业务类均继承共享引擎，但彼此不存在继承关系。
+    # 检查内容：issubclass 关系和 TypeChecker/TypeConstructor 的职责独立性。
+    # 论文对应：两项功能复用同一套 Table 2 规则，但递归目标不同。
+    def test_business_backends_share_engine_without_inheriting_each_other(self) -> None:
+        """Constructor 与 Checker 应是共享引擎的两个并列业务后端。"""
+
+        self.assertTrue(issubclass(TypeConstructor, Table2RuleEngine))
+        self.assertTrue(issubclass(TypeChecker, Table2RuleEngine))
+        self.assertFalse(issubclass(TypeChecker, TypeConstructor))
+        self.assertFalse(issubclass(TypeConstructor, TypeChecker))
+
+    # 测试输入：backend/common 下所有 Python 源文件的导入文本。
+    # 预期行为：common 不得反向导入 type_constructor 或 type_checker。
+    # 检查内容：共享层源码不存在两个业务包的模块路径。
+    # 论文对应：共享规则层不预先选择“构造”或“检查”这一业务方向。
+    def test_common_backend_does_not_import_business_backends(self) -> None:
+        """共享后端必须位于依赖图底部。"""
+
+        common = Path(hcsp_typechecker.__file__).parent / "backend" / "common"
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(common.glob("*.py"))
+        )
+        self.assertNotIn("backend.type_constructor", source)
+        self.assertNotIn("backend.type_checker", source)
+        self.assertNotIn("..type_constructor", source)
+        self.assertNotIn("..type_checker", source)
+
+    # 测试输入：两个业务实现文件的导入文本。
+    # 预期行为：Constructor 不导入 Checker，Checker 也不导入 Constructor。
+    # 检查内容：两个模块只通过 backend/common 共享规则与证明工具。
+    # 论文对应：构造类型和验证给定类型是使用同一规则的两个独立算法。
+    def test_business_backends_do_not_import_each_other(self) -> None:
+        """两个业务后端之间不得形成直接依赖。"""
+
+        backend = Path(hcsp_typechecker.__file__).parent / "backend"
+        constructor_source = (
+            backend / "type_constructor" / "constructor.py"
+        ).read_text(encoding="utf-8")
+        checker_source = (
+            backend / "type_checker" / "checker.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("type_checker", constructor_source)
+        self.assertNotIn("type_constructor", checker_source)
+
+    # 测试输入：安装包根目录中的旧 typechecking 路径。
+    # 预期行为：旧混合目录不存在，内部调用全部使用 backend 新层次。
+    # 检查内容：文件系统中不存在 hcsp_typechecker/typechecking。
+    # 论文对应：该检查只锁定实现架构，不改变任何推导规则。
+    def test_legacy_mixed_backend_directory_is_removed(self) -> None:
+        """旧的混合后端目录不能作为隐式兼容入口残留。"""
+
+        package = Path(hcsp_typechecker.__file__).parent
+        self.assertFalse((package / "typechecking").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

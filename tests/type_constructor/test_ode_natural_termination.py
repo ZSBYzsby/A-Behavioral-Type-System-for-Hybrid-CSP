@@ -61,7 +61,7 @@ class FiniteODETerminationTests(unittest.TestCase):
 
     # 测试输入：带显式时钟演化域的有限空 flow ODE，自然结束边界可证。
     # 预期行为：构造 delay(1).0，且只生成自然结束所需的 boundary 义务。
-    # 检查内容：不产生 T-ODE-Select 或 communication-only 候选证据。
+    # 检查内容：只调用一次 boundary 后端，不产生额外规则分支。
     # 论文对应：有限 ODE 到 d 后进入正常终止后继。
     def test_terminal_ode_constructs_normal_delay_when_boundary_is_proved(self) -> None:
         """可证边界的末尾 ODE 必须得到可信的纯时延正常终止类型。"""
@@ -83,7 +83,6 @@ class FiniteODETerminationTests(unittest.TestCase):
             FiniteDelayType(1, NoInterruptType(), EndType()),
         )
         self.assertEqual(calls, ["boundary"])
-        self.assertFalse(any(item.rule == "T-ODE-Select" for item in report.steps))
 
     # 测试输入：有限空 flow ODE，但自然结束边界被后端否证。
     # 预期行为：类型构造失败，不以 delay(1).bottom 伪造结果。
@@ -109,7 +108,7 @@ class FiniteODETerminationTests(unittest.TestCase):
 
     # 测试输入：有限空 flow ODE，自然结束边界暂时未知。
     # 预期行为：继续形成 delay(1).0，但将整体结论标为 unknown。
-    # 检查内容：候选中不含 BottomType，也不再存在候选规则选择诊断。
+    # 检查内容：结果中不含 BottomType，UNKNOWN 只降低证明可信性。
     # 论文对应：UNKNOWN 仅降低证明可信性，不改变已确定的过程结构。
     def test_unknown_boundary_keeps_an_untrusted_normal_delay(self) -> None:
         """未决边界应保留正常终止候选，而不是切换到底行为。"""
@@ -131,7 +130,6 @@ class FiniteODETerminationTests(unittest.TestCase):
             FiniteDelayType(1, NoInterruptType(), EndType()),
         )
         self.assertEqual(calls, ["boundary"])
-        self.assertFalse(any(item.rule == "T-ODE-Select" for item in report.steps))
 
     # 测试输入：直接位于过程末尾的有限 ODE，没有显式 ``; skip``。
     # 预期行为：末尾自动补正常 Skip，得到正常终止形状。

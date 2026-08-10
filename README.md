@@ -1,8 +1,9 @@
-# HCSP Behavioral Type Constructor
+# HCSP Behavioral Type Constructor and Checker
 
 本项目把一份带 Parameters、Gamma、Theta 与批注 HCSP Process 的用户文本直接
-转换为正式 Type AST，并证明构造过程中产生的必要公式。普通用户只需要包根的
-单一接口 `construct_hcsp_type(...)`；解析时
+转换为正式 Type AST，并证明构造过程中产生的必要公式；也可以由用户给出 Type，
+再按同一套项目规则检查它是否成立。普通用户只需要包根的两个业务接口
+`construct_hcsp_type(...)` 与 `check_hcsp_type(...)`；解析时
 生成的 Process AST、具体 Type AST 构造器、判断对象、证明义务和证明器适配器均
 属于内部实现，不构成稳定调用协议。
 
@@ -24,11 +25,11 @@ python -m hcsp_typechecker
 Type AST，但该候选会被明确标为未验证、不可信。使用
 `python -m hcsp_typechecker --require-keymaerax` 可把证明器缺失视为环境错误。
 
-## 唯一稳定用户接口
+## 稳定用户接口
 
 包根稳定白名单只有 `HCSPInputError`、`HCSPTypeConstructionError`、
-`HCSPUntrustedTypeConstructionError`、`OutputMode`、`TypeAST` 和
-`construct_hcsp_type` 这六个名称。
+`HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`、`OutputMode`、
+`TypeAST`、`construct_hcsp_type` 和 `check_hcsp_type`。
 
 ```python
 from hcsp_typechecker import (
@@ -49,17 +50,17 @@ try:
     type_ast = construct_hcsp_type(
         source,
         source_name="example.hcsp",
-        output="none",  # 捕获后自行显示；也可改为 "result" 或 "full"
+        output="result",  # 打印可复制、可再次作为输入的规范 Type 源码
     )
-    print(type_ast)
 except HCSPInputError as error:
     print(error.format_diagnostic())
 except HCSPUntrustedTypeConstructionError as error:
     # 类型结构已经构造完成，但至少一条必要公式仍未证明。
-    print("完整但不可信的候选类型：", error.untrusted_type)
-    print(error.format_full())
+    # result 已按规范 Type 源码打印候选；对象仍在 error.untrusted_type 中。
+    pass
 except HCSPTypeConstructionError as error:
-    print(error.format_full())
+    # result 已打印失败原因和部分推导。
+    pass
 ```
 
 `construct_hcsp_type(...)` 在内部依次解析完整 source、建立 Process AST 和构造配置，
@@ -74,11 +75,41 @@ except HCSPTypeConstructionError as error:
   属性可供审计或外部补证，但它没有通过证明验证，不能当作可信返回值。若因其他
   原因仍未形成完整类型，则抛出普通 `HCSPTypeConstructionError`。
 
-只有构造完整且全部有效义务均为 `true` 时，接口才正常返回可信 `TypeAST`。
+只有构造完整且全部证明义务均为 `true` 时，接口才正常返回可信 `TypeAST`。
 `HCSPUntrustedTypeConstructionError` 是 `HCSPTypeConstructionError` 的子类；
 需要读取 `untrusted_type` 时应像
 示例一样先捕获它。`BottomType` 保留在 Type AST 中供将来用户给定类型的检查功能使用，
 当前 TypeConstructor 不会把它作为已构造 HCSP 行为的结果。
+
+### 检查用户给定的 Type
+
+在同一份输入末尾增加规范 `type` 段，然后调用 TypeChecker 入口：
+
+```python
+from hcsp_typechecker import HCSPTypeCheckingError, check_hcsp_type
+
+typed_source = """
+gamma(x: Int)
+theta(ch: channel(value: Int))
+process {{ch?(x); ch!(x)}}
+type forever interrupt angelic {
+    ch? -> forever interrupt angelic {ch! -> empty}
+}
+"""
+
+try:
+    checked_type = check_hcsp_type(typed_source, output="result")
+except HCSPTypeCheckingError as error:
+    print(error.format_full())
+```
+
+TypeChecker 不会先运行 TypeConstructor 再比较两棵完整 Type AST。它以用户 Type
+作为每个 Table 2 judgment 的给定结论，递归拆解 Process 与 Type：静默语句检查
+同一个后继类型；通信、delay、递归和并行检查对应的 Type 子树；多元内部选择与
+外部中断按分支数和书写顺序逐项检查。每条规则产生的 FOL/dL premise 仍使用与
+TypeConstructor 相同的可信证明机制。Type 结构不匹配、静态规则失败或必要公式
+为 `false/unknown` 时抛出 `HCSPTypeCheckingError`；只有全部规则和证明均为
+`true` 时返回用户给定的正式 `TypeAST`。
 
 常用可选参数：
 
@@ -93,7 +124,7 @@ except HCSPTypeConstructionError as error:
 
 ### 输出模式
 
-唯一接口支持：
+两个业务接口都支持：
 
 - `output="none"`：默认，不打印；
 - `output="result"`：打印最终结论；成功时显示可信类型，`unknown` 且构造完整时
@@ -101,6 +132,12 @@ except HCSPTypeConstructionError as error:
 - `output="full"`：打印原始输入、环境摘要、内部构造完成说明、规则轨迹、FOL/dL
   公式、每条证明器结论、未决义务和最终可信性；不会打印或返回 Process AST
   对象/repr。
+
+凡日志中实际展示 Type 的位置，都统一使用
+[用户 Type 输入语法](document/TYPE_INPUT_SYNTAX.md) 的规范文本，例如
+`type delay(1) then empty`。不再同时打印旧数学简写或 Python AST `repr`；因此
+`Type 源码 :` 后面的内容可以直接复制到完整输入的 `type` 分节中。简单类型保持
+单行；并行、内部选择和 Angelic 分支块会自动换行，并统一使用四个空格缩进。
 
 也可以使用 `OutputMode.NONE/RESULT/FULL`。`stream=` 可把文本写入文件或
 `io.StringIO`；输出模式只改变展示，不改变解析、推导、证明或异常语义。发生
@@ -193,20 +230,23 @@ process {{data!(x, v)}}
 - Python callable、原始 Z3 项和自定义 dL 回调只属于内部开发接口，不能写入
   用户 source。
 
-## TypeConstructor 与未来 TypeChecker
+## TypeConstructor 与 TypeChecker
 
-当前项目实现的是 **TypeConstructor**：用户给出带批注的 HCSP、Gamma、Theta 和
-参数环境，程序自行构造 Type AST，并证明这一构造所需的公式。尚未实现的
-**TypeChecker** 将接收用户另外给出的 Type，并检查该 Type 是否适用于 HCSP；这是
-不同的入口与工作流，当前公共 API 不接受用户提供的 Type。
+**TypeConstructor** 接收带批注 HCSP、Gamma、Theta 和参数环境，自行构造
+Type AST；**TypeChecker** 在这些输入后再接收一个用户 Type，以该 Type 为规则
+结论递归检查。两者共享表达式语义、符号上下文、证明义务和证明后端，但不会互相
+冒充：Checker 不借用 Constructor 的完整构造结果完成检查。
 
 顶层 Python 包名 ``hcsp_typechecker`` 作为整个行为类型项目的总命名空间保留，
-以便未来同时容纳 TypeConstructor 与 TypeChecker；当前包根只导出上面列出的
-TypeConstructor 接口，不存在名为 ``TypeChecker`` 的实现或兼容别名。
+同时容纳 TypeConstructor 与 TypeChecker；具体实现类仍是内部接口，包根只导出
+上述两个面向用户的函数和公共结果/异常类型。
 
 ## 示例、测试与更多文档
 
 - `python demo.py`：运行若干简短示例和一个复杂 ODE/delay 示例，展示完整的单接口流程；
+- `python type_demo.py`：把 `demo.py` 第六个复杂 ODE 先交给 TypeConstructor，
+  再把生成的缩进 Type 源码交回 TypeChecker，验证完整往返；
+- `python new_demo.py`：分别演示 TypeChecker 接受正确 Type 和拒绝错误 Type；
 - `python -m unittest discover -s tests -p "test_*.py"`：运行全部自动化测试；
 - `python scripts/check_repository.py`：运行隐私扫描、环境检查和全部测试。
 

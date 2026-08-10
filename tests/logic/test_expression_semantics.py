@@ -28,7 +28,7 @@ from hcsp_typechecker._internal import (
     Verdict,
     construct_type,
 )
-from hcsp_typechecker.typechecking.logic import (
+from hcsp_typechecker.backend.common.logic import (
     ExpressionTranslator,
     Z3ProofEngine,
     z3,

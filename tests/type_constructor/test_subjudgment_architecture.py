@@ -23,7 +23,7 @@ import inspect
 import unittest
 from typing import Any, get_type_hints
 
-import hcsp_typechecker.typechecking.constructor as constructor_module
+import hcsp_typechecker.backend.common.rule_engine as constructor_module
 from hcsp_typechecker._internal import (
     Configuration,
     ODE,
@@ -39,7 +39,7 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
 
     # 测试输入：TypeConstructor 的公开实例方法集合。
     # 预期行为：正式入口命名为 construct；旧 check 名称完全不存在。
-    # 检查内容：同时防止兼容别名悄悄恢复，给未来 TypeChecker 留出独立语义。
+    # 检查内容：同时防止兼容别名悄悄恢复，并与已实现 TypeChecker 保持独立语义。
     # 论文对应：当前对象负责从推导请求构造类型，而不是检查用户给定的类型。
     def test_constructor_uses_construct_entrypoint_without_check_alias(self) -> None:
         """TypeConstructor 的动词应准确表达“构造类型”职责。"""
@@ -47,7 +47,7 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
         self.assertTrue(callable(getattr(TypeConstructor, "construct", None)))
         self.assertFalse(hasattr(TypeConstructor, "check"))
 
-    # 测试输入：constructor.py 中当前全部 rule_t_* 方法的 Python AST 和类型标注。
+    # 测试输入：共享 rule_engine.py 中全部 rule_t_* 方法的 Python AST 和类型标注。
     # 预期行为：所有规则返回 _RuleExpansion，且规则体不调用任何 _solve_*/_infer_*
     #           入口、不直接调用 _decide_proof，也不递归调用其他 rule_t_* 方法。
     # 检查内容：返回类型以及规则函数调用图中的禁止边。
@@ -55,7 +55,7 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
     def test_rules_only_expand_conclusions_into_premises(self) -> None:
         """规则函数必须保持为纯粹的一层推导展开入口。"""
 
-        source = inspect.getsource(constructor_module.TypeConstructor)
+        source = inspect.getsource(constructor_module.Table2RuleEngine)
         tree = ast.parse(source)
         class_node = tree.body[0]
         self.assertIsInstance(class_node, ast.ClassDef)
@@ -156,7 +156,6 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
         self.assertIn("event[E]", ode_step.detail)
         self.assertIn("process[T-End]", ode_step.detail)
         step_rules = tuple(step.rule for step in report.steps)
-        self.assertNotIn("T-ODE-Select", step_rules)
         self.assertIn("Proof", step_rules)
         self.assertEqual(
             tuple(item[0] for item in proof_observations),

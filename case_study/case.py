@@ -298,7 +298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "已复现预期结果：unknown 义务没有中断类型构造；"
             "接口形成了完整但尚未验证的候选 Type AST。"
         )
-        print(f"不可信候选 Type AST：{error.untrusted_type!r}")
+        print("不可信候选 Type 已按上方的规范 Type 源码显示。")
         print("具体 dL 公式、未决原因和后续推导轨迹见上方完整日志。")
         return 0
     except HCSPTypeConstructionError as error:

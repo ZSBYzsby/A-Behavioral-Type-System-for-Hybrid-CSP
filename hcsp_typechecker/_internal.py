@@ -5,7 +5,7 @@ Process/Expr/Type AST 构造器、Table 2 TypeConstructor 和证明后端，是�
 逐节点测试仍能简洁地构造精确内部状态。该符号集合可以随实现重构而变化。
 """
 
-from .typechecking.constructor import TypeConstructor, construct_type
+from .backend.type_constructor import TypeConstructor, construct_type
 from .frontend.type_constructor_frontend import (
     HCSPInputError,
     ParsedHCSPSource,
@@ -13,7 +13,7 @@ from .frontend.type_constructor_frontend import (
     parse_hcsp,
     parse_hcsp_source,
 )
-from .typechecking.dl import (
+from .backend.common.dl import (
     DLFormula,
     DLTranslationError,
     UntranslatedDLFormula,
@@ -53,7 +53,7 @@ from .data_structures.process_ast.ast import (
     Skip,
     Var,
 )
-from .typechecking.keymaerax import KeYmaeraXBackend, KeYmaeraXConfig
+from .backend.common.keymaerax import KeYmaeraXBackend, KeYmaeraXConfig
 from .data_structures.type_ast.ast import (
     AngelicType,
     BehavioralType,

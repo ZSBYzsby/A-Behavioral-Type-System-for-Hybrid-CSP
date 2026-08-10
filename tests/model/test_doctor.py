@@ -17,7 +17,7 @@ import unittest
 from unittest.mock import patch
 
 from hcsp_typechecker.tooling.doctor import collect_environment, format_environment
-from hcsp_typechecker.typechecking.keymaerax import KeYmaeraXConfig
+from hcsp_typechecker.backend.common.keymaerax import KeYmaeraXConfig
 
 
 class EnvironmentDoctorTests(unittest.TestCase):
@@ -66,8 +66,8 @@ class EnvironmentDoctorTests(unittest.TestCase):
 
         self.assertTrue(all(check.available for check in checks))
         rendered = format_environment(checks)
-        self.assertIn("HCSP TypeConstructor environment", rendered)
-        self.assertIn("Core constructor ready : yes", rendered)
+        self.assertIn("HCSP behavioral type environment", rendered)
+        self.assertIn("Core type engine ready : yes", rendered)
         self.assertIn("KeYmaera X ready   : yes", rendered)
 
 

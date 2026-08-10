@@ -95,10 +95,19 @@ class DetailedReportTests(unittest.TestCase):
             any(name == "x" and "__input" in term for name, term in output_step.symbolic_state)
         )
         self.assertIn(
-            r"delay(infinity) \unrhd (ch?.(delay(infinity) \unrhd (ch!.(0))))",
+            "forever interrupt angelic {\n"
+            "    ch? -> forever interrupt angelic {\n"
+            "        ch! -> empty\n"
+            "    }\n"
+            "}",
             input_step.result,
         )
-        self.assertIn("ch!.(0)", output_step.result)
+        self.assertIn(
+            "forever interrupt angelic {\n"
+            "    ch! -> empty\n"
+            "}",
+            output_step.result,
+        )
         proof_steps = tuple(step for step in report.steps if step.rule == "Proof")
         self.assertEqual(len(proof_steps), 2)
         self.assertTrue(all("= true" in step.result for step in proof_steps))
@@ -124,20 +133,24 @@ class DetailedReportTests(unittest.TestCase):
             "规则推导 : 已完成",
             "类型构造 : 成功",
             "类型可信性 : 可信（全部义务已验证）",
-            r"构造类型 : delay(infinity) \unrhd (ch?.(delay(infinity) \unrhd (ch!.(0))))",
+            "构造 Type 源码 : type forever interrupt angelic {\n"
+            "    ch? -> forever interrupt angelic {\n"
+            "        ch! -> empty\n"
+            "    }\n"
+            "}",
             "=== 规则执行过程 ===",
             "T-In @ K1",
             "T-Out @ K1",
             "Gamma    : x:Int",
             "Theta    : ch:{eta:Int | true}",
             "=== 本次类型构造的一阶逻辑（FOL）证明公式 ===",
-            "[FOL01] 对应 O01 | 有效 | 已证明 | T-sigma | STATE",
-            "[FOL02] 对应 O02 | 有效 | 已证明 | T-Out | FOL",
+            "[FOL01] 对应 O01 | 已证明 | T-sigma | STATE",
+            "[FOL02] 对应 O02 | 已证明 | T-Out | FOL",
             "实际检查公式:",
             "=== 本次类型构造的微分动态逻辑（dL）证明公式 ===",
             "(无 dL 公式)",
             "=== 顺序公式判定记录 ===",
-            "[O02] 有效 | 已证明 | T-Out | FOL",
+            "[O02] 已证明 | T-Out | FOL",
             "论文前提 : [T-Out]  phi => refinement{e/eta}",
             "规则生成公式（原始）:",
             "证明器实际输入 : 见 [FOL02]",
@@ -150,7 +163,7 @@ class DetailedReportTests(unittest.TestCase):
             "=== 汇总 ===",
             "规则步骤 : 8",
             "证明记录 : 2",
-            "有效义务 : 2 (true=2, false=0, unknown=0)",
+            "证明义务 : 2 (true=2, false=0, unknown=0)",
             "遗留义务 : 0 (未通过=0, 待证明=0)",
         )
         for fragment in expected_fragments:
@@ -159,11 +172,10 @@ class DetailedReportTests(unittest.TestCase):
         self.assertNotIn("简洁类型 :", rendered)
 
     # 测试输入：具有非平凡 safety 和有限自然后继的 ODE，dL 后端固定返回 unknown。
-    # 预期行为：两个 ODE 候选遇到 unknown 仍继续展开全部 premise；选择器
-    #           保留 natural-timeout 的完整 delay(1).end 候选，但明确标成不可信。
-    # 检查内容：完整候选类型、四条 dL 公式、active/未选候选标记、选择诊断
-    #           和两条有效未决义务的统计。
-    # 论文对应：Table 2 两条带 fallback ODE premise 必须保留，不能因后端缺失而隐藏。
+    # 预期行为：确定性的自然超时规则遇到 unknown 后仍继续形成完整
+    #           delay(1).end 类型，但把该类型明确标成不可信。
+    # 检查内容：safety/boundary 两条 dL 公式只展开一次，并统计两条未决义务。
+    # 论文对应：Table 2 带 fallback 的 ODE 规则必须保留全部必要 premise。
     def test_unknown_dl_formulas_are_indexed_without_duplicate_bodies(self) -> None:
         """报告应集中列出未决 dL 公式，并引用而不重复相同公式正文。"""
 
@@ -193,37 +205,17 @@ class DetailedReportTests(unittest.TestCase):
             "规则推导 : 已完成",
             "类型构造 : 成功",
             "类型可信性 : 不可信（存在未验证义务）",
-            "构造类型 : delay(1).(0)  [完整候选，未验证]",
-            "未选候选 : 2",
-            "candidate=communication-only",
-            "candidate=natural-timeout",
-            "[O02] 未选候选 | 待证明 | T-ODE-safety | DL",
-            "[O03] 未选候选 | 待证明 | T-ODE-domain | DL",
-            "[O04] 有效 | 待证明 | T-ODE-safety | DL",
-            "[O05] 有效 | 待证明 | T-ODE-boundary | DL",
-            "=== 本次类型构造的微分动态逻辑（dL）证明公式 ===",
-            "[DL01] 对应 O02 | 未选候选 | 待证明 | T-ODE-safety | DL",
-            "[DL02] 对应 O03 | 未选候选 | 待证明 | T-ODE-domain | DL",
-            "[DL03] 对应 O04 | 有效 | 待证明 | T-ODE-safety | DL",
-            "[DL04] 对应 O05 | 有效 | 待证明 | T-ODE-boundary | DL",
-            "实际检查公式:",
-            "实际检查公式 : 与 [DL01] 相同，不重复展开",
-            "[T-unrhd/T-unrhd-prime]",
-            "配置的 dL 后端（通常为 KeYmaera X）",
-            "=== 未选 ODE 候选的未决证据 ===",
-            "temporary candidate natural-timeout",
-            "遗留义务 : 2 (未通过=0, 待证明=2)",
-        )
-        # 有限末尾 ODE 现在只有自然结束规则，不再生成已废弃的通信候选记录。
-        expected_fragments = (
+            "构造 Type 源码 : type delay(1) then empty",
             "T-ODE-safety",
             "T-ODE-boundary",
             "[T-unrhd-prime]",
+            "证明义务 : 3",
             "遗留义务 : 2",
         )
         for fragment in expected_fragments:
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, rendered)
+        self.assertNotIn("FiniteDelayType(", rendered)
         shared_formula = str(report.obligations[1].proof_formula)
         self.assertEqual(
             rendered.splitlines().count(f"       {shared_formula}"),

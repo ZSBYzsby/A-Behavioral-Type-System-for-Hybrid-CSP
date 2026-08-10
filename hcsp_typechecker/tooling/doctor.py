@@ -1,6 +1,6 @@
 """HCSP 源码项目的跨平台运行环境诊断。
 
-核心 TypeConstructor 只需要 Python 和 ``z3-solver``；只有证明生成的 dL 义务时才需要
+核心 TypeConstructor/TypeChecker 只需要 Python 和 ``z3-solver``；只有证明生成的 dL 义务时才需要
 Java 和 KeYmaera X。本模块分别报告这两层能力，避免把可选证明器缺失误认为
 Python 项目本身无法运行。
 
@@ -21,7 +21,7 @@ import subprocess
 import sys
 from typing import Sequence
 
-from ..typechecking.keymaerax import KeYmaeraXConfig, resolve_java_executable
+from ..backend.common.keymaerax import KeYmaeraXConfig, resolve_java_executable
 
 
 @dataclass(frozen=True)
@@ -115,7 +115,7 @@ def collect_environment(
 def format_environment(checks: Sequence[EnvironmentCheck]) -> str:
     """格式化诊断条目，并说明核心类型构造与完整 dL 证明能力的边界。"""
 
-    lines = ["HCSP TypeConstructor environment"]
+    lines = ["HCSP behavioral type environment"]
     for check in checks:
         status = "OK" if check.available else ("ERROR" if check.required else "OPTIONAL")
         lines.append(f"[{status:8}] {check.name}: {check.detail}")
@@ -126,7 +126,7 @@ def format_environment(checks: Sequence[EnvironmentCheck]) -> str:
     )
     full_ready = all(check.available for check in checks)
     lines.append("")
-    lines.append(f"Core constructor ready : {'yes' if core_ready else 'no'}")
+    lines.append(f"Core type engine ready : {'yes' if core_ready else 'no'}")
     lines.append(f"KeYmaera X ready   : {'yes' if full_ready else 'no'}")
     if core_ready and not full_ready:
         lines.append(
@@ -139,7 +139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """运行诊断；仅在必需能力缺失时返回非零退出码。"""
 
     parser = argparse.ArgumentParser(
-        description="Inspect HCSP TypeConstructor and optional KeYmaera X setup.",
+        description="Inspect HCSP type engines and optional KeYmaera X setup.",
     )
     parser.add_argument(
         "--require-keymaerax",

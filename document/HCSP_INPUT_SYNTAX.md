@@ -636,7 +636,8 @@ Theta 和 Process AST，随后进行类型构造与公式证明。中间 Process
 `HCSPUntrustedTypeConstructionError`，候选可从
 异常的 `untrusted_type` 属性读取，但必须视为未验证、不可信。只有构造完整且全部
 义务为 `true` 时才正常返回 `TypeAST`。这是由 HCSP 主动构造类型的
-TypeConstructor；未来接收用户给定 Type 的 TypeChecker 尚未实现。
+TypeConstructor。若在完整输入后追加本文所链接的 `type` 段，则由已经实现的
+TypeChecker 递归检查用户 Type；详见 [TYPE_CHECKER.md](TYPE_CHECKER.md)。
 
 `output` 只控制显示，不改变上述推导、证明和异常语义。`result` 显示可信结果，
 或显示不可信候选/失败摘要；`full` 还显示全部实际规则轨迹、FOL/dL 公式及未决

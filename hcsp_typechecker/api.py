@@ -1,9 +1,11 @@
-"""面向普通使用者的单入口 HCSP TypeConstructor 门面。
+"""面向普通使用者的 HCSP TypeConstructor 与 TypeChecker 门面。
 
 普通调用者只需把一份完整用户 source 交给 :func:`construct_hcsp_type`。接口会在
 内部依次完成“源码解析 -> Process AST/环境构造 -> Table 2 类型构造与前提证明”，
 成功时直接返回正式 Type AST。中间 Process AST、Gamma、Theta、参数环境和低层
 构造请求不会作为公共返回值暴露，因而调用者也无法把不同 source 的内部对象误配。
+若 source 末尾还包含用户 ``type`` 分节，则 :func:`check_hcsp_type` 以该 Type
+为规则结论逐层检查；它不先构造另一个完整类型。
 
 源码或路径条件无法解析时，接口立即抛出 :class:`HCSPInputError`，不会启动类型
 构造。结构/静态类型错误使构造器无法形成完整类型，或必要证明义务被判定为
@@ -30,11 +32,15 @@ from .frontend.type_constructor_frontend.parser import (
     parse_expression,
     parse_hcsp_source,
 )
+from .frontend.type_checker_frontend import parse_typechecking_source
 from .frontend.type_constructor_frontend.source import ParsedHCSPSource
 from .data_structures.process_ast.ast import HCSP, Process
 from .data_structures.type_ast.ast import ConfigurationType
-from .typechecking.constructor import construct_type
-from .typechecking.keymaerax import KeYmaeraXConfig
+from .data_structures.type_ast.render import format_type_source
+from .backend.type_constructor import construct_type
+from .backend.type_checker import TypeChecker
+from .data_structures.type_checking import TypeCheckingRequest
+from .backend.common.keymaerax import KeYmaeraXConfig
 from .data_structures.type_construction.model import (
     ChannelType,
     TypeConstructionReport,
@@ -186,15 +192,14 @@ def _first_report_reason(report: TypeConstructionReport) -> str:
             return diagnostic.message
     for obligation in report.obligations:
         if (
-            obligation.active
-            and obligation.verdict is report.verdict
+            obligation.verdict is report.verdict
             and obligation.verdict is not Verdict.TRUE
         ):
             return obligation.detail or obligation.description
     if report.diagnostics:
         return report.diagnostics[0].message
     for obligation in report.obligations:
-        if obligation.active and obligation.verdict is not Verdict.TRUE:
+        if obligation.verdict is not Verdict.TRUE:
             return obligation.detail or obligation.description
     if report.verdict is Verdict.UNKNOWN:
         return "存在尚未证明的前提"
@@ -207,7 +212,12 @@ def _format_partial_types(report: TypeConstructionReport) -> str:
     if not report.constructed_component_types:
         return "(none)"
     return ", ".join(
-        f"K{index}={component_type if component_type is not None else '(none)'}"
+        f"K{index}="
+        + (
+            format_type_source(component_type)
+            if component_type is not None
+            else "(none)"
+        )
         for index, component_type in enumerate(
             report.constructed_component_types,
             start=1,
@@ -220,10 +230,15 @@ def _format_partial_progress(
 ) -> tuple[str, ...]:
     """生成失败摘要中的部分推导进度和停止位置。"""
 
-    active = tuple(item for item in report.obligations if item.active)
-    proved = sum(item.verdict is Verdict.TRUE for item in active)
-    failed = sum(item.verdict is Verdict.FALSE for item in active)
-    unknown = sum(item.verdict is Verdict.UNKNOWN for item in active)
+    proved = sum(
+        item.verdict is Verdict.TRUE for item in report.obligations
+    )
+    failed = sum(
+        item.verdict is Verdict.FALSE for item in report.obligations
+    )
+    unknown = sum(
+        item.verdict is Verdict.UNKNOWN for item in report.obligations
+    )
     lines = [
         f"部分类型 : {_format_partial_types(report)}",
         f"推导步骤 : 已执行 {len(report.steps)} 步",
@@ -243,13 +258,10 @@ def _format_type_result(report: TypeConstructionReport) -> str:
     """把内部类型构造报告渲染成稳定的单入口结果摘要。"""
 
     constructed_type = report.constructed_type
-    active_obligations = tuple(
-        obligation for obligation in report.obligations if obligation.active
-    )
     proof_counts = {
         verdict: sum(
             obligation.verdict is verdict
-            for obligation in active_obligations
+            for obligation in report.obligations
         )
         for verdict in Verdict
     }
@@ -292,8 +304,8 @@ def _format_type_result(report: TypeConstructionReport) -> str:
     if is_untrusted:
         lines.extend(
             (
-                f"完整候选 Type     : {constructed_type}",
-                f"完整候选 Type AST : {constructed_type!r}",
+                "完整候选 Type 源码 : "
+                + format_type_source(constructed_type),
                 "处理结果 : 候选类型仅通过异常的 untrusted_type 属性提供，"
                 "未作为可信 Type AST 返回",
                 f"证明义务 : {proof_summary}",
@@ -301,23 +313,18 @@ def _format_type_result(report: TypeConstructionReport) -> str:
             )
         )
     elif constructed_type is not None and report.verdict is Verdict.TRUE:
-        lines.extend(
-            (
-                f"Type     : {constructed_type}",
-                f"Type AST : {constructed_type!r}",
-            )
-        )
+        lines.append("Type 源码 : " + format_type_source(constructed_type))
     elif constructed_type is not None:
         lines.extend(
             (
-                f"完整候选 Type     : {constructed_type}",
-                f"完整候选 Type AST : {constructed_type!r}",
+                "完整候选 Type 源码 : "
+                + format_type_source(constructed_type),
                 "处理结果 : 候选类型没有作为可信 Type AST 返回",
                 f"原因     : {_first_report_reason(report)}",
             )
         )
     else:
-        lines.extend(("Type     : (none)", "Type AST : None"))
+        lines.append("Type 源码 : (none)")
         lines.append(f"原因     : {_first_report_reason(report)}")
         lines.extend(_format_partial_progress(report))
     return "\n".join(lines)
@@ -331,8 +338,7 @@ def _format_input_error_result(error: HCSPInputError) -> str:
             "=== HCSP 类型构造结果 ===",
             "Verdict : input-error",
             "Type AST 生成 : 失败",
-            "Type     : (none)",
-            "Type AST : None",
+            "Type 源码 : (none)",
             f"原因     : {error.message}",
             f"位置     : {error.source_name}:{error.line}:{error.column}",
             "构造进度 : 未启动（输入解析阶段已终止）",
@@ -428,6 +434,58 @@ class HCSPUntrustedTypeConstructionError(HCSPTypeConstructionError):
             )
         self.untrusted_type: TypeAST = report.constructed_type
         super().__init__(context, report)
+
+
+class HCSPTypeCheckingError(RuntimeError):
+    """用户给定 Type 未能被 HCSP 的 Table 2 规则验证时抛出的公共异常。"""
+
+    def __init__(
+        self,
+        source_name: str,
+        report: object,
+        source_text: str = "",
+    ) -> None:
+        """保存最小的机器可读检查结论与内部审计报告。"""
+
+        self.source_name = source_name
+        self._source_text = source_text
+        self._report = report
+        self.verdict = report.verdict.value
+        self.expected_type = report.expected_type
+        self.reason = report.mismatch or _first_report_reason(
+            report.evidence
+        )
+        super().__init__(self.format_result())
+
+    def format_result(self) -> str:
+        """渲染给定 Type、检查结论及其首要失败原因。"""
+
+        return "\n".join(
+            (
+                "=== HCSP 类型检查结果 ===",
+                f"Verdict : {self.verdict}",
+                "给定 Type 源码 : "
+                + format_type_source(self.expected_type),
+                f"原因     : {self.reason}",
+            )
+        )
+
+    def format_full(self) -> str:
+        """渲染用户 Type 与 Table 2 规则、证明义务的完整审计记录。"""
+
+        sections = [
+            "=== HCSP 类型检查完整日志 ===\n"
+            f"来源 : {self.source_name}",
+        ]
+        if self._source_text:
+            sections.append("--- 原始用户输入 ---\n" + self._source_text)
+        sections.extend(
+            (
+                self._report.format_detailed(),
+                "=== Type 匹配结论 ===\n" + self.reason,
+            )
+        )
+        return "\n\n".join(sections)
 
 
 def _normalize_initial_states(
@@ -621,11 +679,118 @@ def construct_hcsp_type(
     return report.constructed_type
 
 
+def check_hcsp_type(
+    source: str,
+    *,
+    source_name: str = "<input>",
+    initial_states: Mapping[str, Any]
+    | Sequence[Mapping[str, Any]]
+    | None = None,
+    path_condition: str | bool = True,
+    output: OutputMode | str = OutputMode.NONE,
+    stream: TextIO | None = None,
+    z3_timeout_ms: int = 5_000,
+    keymaerax_timeout_seconds: float | None = None,
+) -> TypeAST:
+    """检查完整 ``gamma [parameters] theta process type`` 输入中的给定 Type。
+
+    输入 Type 必须使用 ``frontend.type_syntax`` 的规范语法；初态与路径条件的
+    约束和 TypeConstructor 入口一致。检查器按源码顺序
+    展开 Process 的 Table 2 规则、生成同样的 FOL/dL 前提，并将每个规则结论与
+    用户给定 Type AST 比对；内部选择按用户圆括号保留的当前层分块逐项检查，
+    外部中断按 AST 分支顺序逐项检查。所有前提证明为真时返回原用户 Type AST，否则抛出
+    :class:`HCSPTypeCheckingError`。
+    """
+
+    mode = _normalize_output_mode(output)
+    try:
+        parsed = parse_typechecking_source(source, source_name=source_name)
+    except HCSPInputError as error:
+        if mode is not OutputMode.NONE:
+            _write_output(
+                _format_input_error_result(error),
+                stream,
+            )
+        raise
+    components = parsed.program.process_components
+    try:
+        normalized_path = _normalize_path_condition(path_condition, source_name)
+    except HCSPInputError as error:
+        if mode is not OutputMode.NONE:
+            _write_output(
+                _format_input_error_result(error),
+                stream,
+            )
+        raise
+    states = _normalize_initial_states(initial_states, len(components))
+    configurations = tuple(
+        Configuration(state, component, name=f"K{index}")
+        for index, (state, component) in enumerate(zip(states, components), 1)
+    )
+    keymaerax_config = None
+    if keymaerax_timeout_seconds is not None:
+        keymaerax_config = replace(
+            KeYmaeraXConfig.from_environment(),
+            timeout_seconds=keymaerax_timeout_seconds,
+        )
+    report = TypeChecker(
+        keymaerax_config=keymaerax_config,
+        z3_timeout_ms=z3_timeout_ms,
+    ).check(
+        TypeCheckingRequest(
+            parsed.program.gamma,
+            parsed.program.theta,
+            configurations,
+            parsed.expected_type,
+            path_condition=normalized_path,
+            parameters=parsed.program.parameters,
+        )
+    )
+    if report.verdict is Verdict.TRUE:
+        if mode is not OutputMode.NONE:
+            result_text = "\n".join(
+                (
+                    "=== HCSP 类型检查结果 ===",
+                    "Verdict : true",
+                    "Type 结构 : 与全部规则结论匹配",
+                    "证明状态 : 全部前提已验证",
+                    "Type 源码 : "
+                    + format_type_source(parsed.expected_type),
+                )
+            )
+            _write_output(
+                (
+                    "\n\n".join(
+                        (
+                            "=== HCSP 类型检查完整日志 ===\n"
+                            f"来源 : {source_name}\n\n"
+                            "--- 原始用户输入 ---\n"
+                            f"{source}",
+                            report.format_detailed(),
+                        )
+                    )
+                    if mode is OutputMode.FULL
+                    else result_text
+                ),
+                stream,
+            )
+        return parsed.expected_type
+    error = HCSPTypeCheckingError(source_name, report, source)
+    if mode is not OutputMode.NONE:
+        _write_output(
+            error.format_full() if mode is OutputMode.FULL else error.format_result(),
+            stream,
+        )
+    raise error
+
+
 __all__ = [
     "HCSPInputError",
     "HCSPTypeConstructionError",
+    "HCSPTypeCheckingError",
     "HCSPUntrustedTypeConstructionError",
     "OutputMode",
     "TypeAST",
     "construct_hcsp_type",
+    "check_hcsp_type",
 ]

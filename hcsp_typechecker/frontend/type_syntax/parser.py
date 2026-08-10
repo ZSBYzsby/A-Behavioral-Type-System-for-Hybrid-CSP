@@ -1,7 +1,7 @@
 """把 ``type`` 用户语法降低为既有的行为 Type AST。
 
-语法刻意使用命名结构而非运算符优先级。``angelic { ... }`` 保留当前
-AST 对 Angelic Type 的规范化：零、一、多个通信分支分别成为
+语法使用命名结构，并用圆括号明确内部选择的每个 Type 块。``angelic { ... }``
+保留当前 AST 对 Angelic Type 的规范化：零、一、多个通信分支分别成为
 ``NoInterruptType``、单个输入/输出节点、``ExternalChoiceType``。
 """
 
@@ -82,6 +82,8 @@ class TypeParser:
             return EmptyType()
         if self._match("bottom") is not None:
             return BottomType()
+        if self.current.kind == "(":
+            return self._parse_parenthesized_process_type()
         if self.current.kind == "internal":
             return self._parse_internal_choice()
         if self.current.kind == "delay":
@@ -98,6 +100,7 @@ class TypeParser:
             expected=(
                 "empty",
                 "bottom",
+                "(",
                 "internal",
                 "delay",
                 "forever",
@@ -107,17 +110,35 @@ class TypeParser:
         )
 
     def _parse_internal_choice(self) -> ProcessType:
-        """解析至少两个过程分支组成的多元内部选择。"""
+        """解析至少两个带圆括号分块的多元内部选择。"""
 
         start = self._expect("internal")
         self._expect("{")
-        branches = [self._parse_process_type()]
+        branches = [self._parse_required_choice_branch()]
         self._expect(",")
-        branches.append(self._parse_process_type())
+        branches.append(self._parse_required_choice_branch())
         while self._match(",") is not None:
-            branches.append(self._parse_process_type())
+            branches.append(self._parse_required_choice_branch())
         self._expect("}")
         return self._construct(start, lambda: InternalChoiceType(branches))
+
+    def _parse_parenthesized_process_type(self) -> ProcessType:
+        """解析一般圆括号分组；括号本身不产生额外 Type AST 节点。"""
+
+        self._expect("(")
+        value = self._parse_process_type()
+        self._expect(")")
+        return value
+
+    def _parse_required_choice_branch(self) -> ProcessType:
+        """解析内部选择中必须显式写出的一个 ``(T)`` 分支块。"""
+
+        if self.current.kind != "(":
+            raise self._syntax_error(
+                "each internal-choice branch must be parenthesized",
+                expected=("(",),
+            )
+        return self._parse_parenthesized_process_type()
 
     def _parse_finite_delay(self) -> ProcessType:
         """解析有限 delay；缺省 interrupt 规范为 ``NoInterruptType``。"""

@@ -5,16 +5,18 @@
 比较。
 
 本文描述的功能称为 **TypeConstructor**：输入是带批注的 HCSP、Gamma、Theta、
-参数以及可选初态/路径条件，Type AST 由程序自行构造。未来接收“用户给定 Type”
-并检查该 Type 的 **TypeChecker** 尚未实现；本文不描述那项未来功能。
+参数以及可选初态/路径条件，Type AST 由程序自行构造。用户给定 Type 的
+**TypeChecker** 已作为独立功能实现，详见 [TYPE_CHECKER.md](TYPE_CHECKER.md)；
+本文仍只描述 Constructor。
 
 相关实现主要位于：
 
-- `hcsp_typechecker/process/ast.py`：Process、Event、System AST；
-- `hcsp_typechecker/typechecking/constructor.py`：judgment、premise、规则分派和构造算法；
-- `hcsp_typechecker/typechecking/logic.py`：表达式到 Z3 项的翻译及 FOL/state 判定；
-- `hcsp_typechecker/typechecking/dl.py`：ODE 证明义务到 dL 公式的翻译；
-- `hcsp_typechecker/type_system/ast.py`：最终 Type AST 及规范化构造；
+- `hcsp_typechecker/data_structures/process_ast/ast.py`：Process、Event、System AST；
+- `hcsp_typechecker/backend/type_constructor/constructor.py`：TypeConstructor 业务入口；
+- `hcsp_typechecker/backend/common/rule_engine.py`：judgment、premise 与 Table 2 规则展开；
+- `hcsp_typechecker/backend/common/logic.py`：表达式到 Z3 项的翻译及 FOL/state 判定；
+- `hcsp_typechecker/backend/common/dl.py`：ODE 证明义务到 dL 公式的翻译；
+- `hcsp_typechecker/data_structures/type_ast/ast.py`：最终 Type AST 及规范化构造；
 - `hcsp_typechecker/data_structures/runtime_context/`：Gamma、Theta 与全局参数；
 - `hcsp_typechecker/data_structures/type_construction/model.py`：Configuration、构造请求和审计报告。
 
@@ -58,7 +60,7 @@
 ## 2. Process AST 构造阶段已经做掉的工作
 
 TypeConstructor 接收的不是任意 Python 对象，而是已经构造好的项目 Process AST。
-进入 `typechecking/constructor.py` 之前，`data_structures/process_ast/ast.py` 已经执行以下操作：
+进入 `backend/type_constructor/constructor.py` 之前，`data_structures/process_ast/ast.py` 已经执行以下操作：
 
 1. 字符串表达式被解析成项目自己的 `Expr` 节点；
 2. 赋值左端、输入目标和通道名称被检查为合法标识符；
@@ -563,9 +565,10 @@ T_2=type(P_2;Q,C_{else}).
 InternalChoiceType((T1, T2))
 ```
 
-内部选择构造器会压平嵌套 `InternalChoiceType`，但保留分支顺序。由于求解器
-严格顺序执行，then 分支因 `false` 或结构/静态错误而无法形成类型时，else 分支
-不会继续检查；then 分支只有未决公式时仍会形成候选子类型，else 分支会继续推导。
+内部选择构造器保留嵌套 `InternalChoiceType`，使规范 Type 文本能够用每个分支的
+圆括号直接表达本层 T-If 的两个子 judgment。由于求解器严格顺序执行，then 分支
+因 `false` 或结构/静态错误而无法形成类型时，else 分支不会继续检查；then 分支
+只有未决公式时仍会形成候选子类型，else 分支会继续推导。
 
 ### 7.8 多元 `InternalChoice(P1,...,Pn, continuation=Q)`
 
@@ -917,7 +920,7 @@ Delay、内部选择和并行本身不算通信守卫；只有输入/输出类�
 2. `BottomType()` 仅保留为 Type AST 的论文节点，当前 TypeConstructor 不生成它；
 3. 外部选择：零分支为 `NoInterruptType`，单分支直接使用通信类型，多分支才使用
    `ExternalChoiceType`；
-4. 嵌套 `InternalChoiceType` 按结合结构压平，但不排序；
+4. 嵌套 `InternalChoiceType` 保留分块和顺序，不压平、不排序；
 5. 所有有限 delay 均使用 `FiniteDelayType(d,A,T)`；三种论文缩写只影响显示；
 6. 正无穷 delay 由 `InfiniteDelayType(A)` 显式保存，普通后继固定为不可达 bottom；
 7. `ParallelType` 压平嵌套并行，但不排序；
@@ -972,7 +975,7 @@ safety/domain 可以本地直接判 true。后端缺失、翻译不支持、超�
 
 最终 verdict 合并：
 
-1. 所有 `active=True` 的证明义务；
+1. 所有按当前确定性规则生成的证明义务；
 2. 所有 diagnostics。
 
 优先级为：
@@ -987,8 +990,6 @@ false > unknown > true.
 - 某个公式 premise 为 `unknown` 时继续推导；若所有结构步骤仍可完成，最终同时
   得到 `verdict=unknown` 与非空 `constructed_type`，后者是完整但不可信的候选；
 - 结构规则本身无法展开时也可能得到 `unknown` 且 `constructed_type=None`；
-- ODE 未选候选的 obligation 即使 false/unknown，也因 `active=False` 不影响最终
-  verdict；
 - 当前 TypeConstructor 的合法结果不包含 `BottomType`；
 
 公共单入口不会把 `verdict=unknown` 的候选伪装成正常返回值。推导完整时它抛出

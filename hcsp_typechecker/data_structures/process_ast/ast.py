@@ -13,7 +13,7 @@ r"""HCSP process AST、构造期良构检查及 Section 4.2/4.3 批注。
 
 文件正文依次定义离散进程与事件节点、ODE 批注和隐藏时钟、递归及
 Assumption 2.2、并行系统及 Assumption 2.1。类型构造不在本文件执行，而在
-``typechecking/constructor.py`` 中按 Table 2 完成。
+``backend/type_constructor/constructor.py`` 中按 Table 2 完成。
 
 ────────────────── 基础语法与多标量通信扩展 ────────────────────────────────
 

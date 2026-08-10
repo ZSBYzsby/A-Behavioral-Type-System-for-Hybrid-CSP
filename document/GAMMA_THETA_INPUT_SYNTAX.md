@@ -446,14 +446,16 @@ type_ast = construct_hcsp_type(
 返回可信 `TypeAST`。调用者不需要、也不能通过包根构造内部判断、
 `TypeConstructionRequest` 或内部解析记录。
 
-这里的职责是从 HCSP 主动构造类型，因此称为 TypeConstructor。未来接收用户给定
-Type 并检查它是否适用的 TypeChecker 尚未实现，也不属于当前 source 语法。
+不含 `type` 段时由 TypeConstructor 主动构造类型；在同一 source 后追加
+`type configuration_type` 时，由 TypeChecker 检查给定 Type。Type 段语法见
+[TYPE_INPUT_SYNTAX.md](TYPE_INPUT_SYNTAX.md)，检查算法见
+[TYPE_CHECKER.md](TYPE_CHECKER.md)。
 
 `output` 接受三种模式：
 
 - `"none"`：不打印，默认模式；
-- `"result"`：打印最终结论；成功时显示可信 Type AST，构造完整但证明未决时
-  显示带“不可信”标记的完整候选类型，其他失败显示原因和部分进度；
+- `"result"`：打印最终结论；成功时按规范用户 Type 语法显示可信类型，构造
+  完整但证明未决时用同一语法显示不可信候选，其他失败显示原因和部分进度；
 - `"full"`：打印原始 source、环境摘要、内部构造完成说明、规则步骤、FOL/dL
   公式、证明器说明、未决义务和最终可信性；不会打印或返回 Process AST 对象/repr。
 
@@ -462,6 +464,9 @@ Type 并检查它是否适用的 TypeChecker 尚未实现，也不属于当前 s
 其他文本输出流。`false` 导致构造立即停止时，`full` 会打印停止位置以前的完整
 证据；`unknown` 不会让公式 premise 短路，`full` 会继续展示后续规则轨迹、完整
 候选类型（如能形成）和全部待证明义务。`none` 不打印，但异常仍保留对应格式化文本。
+
+日志中的 `Type 源码 : type ...` 使用 [TYPE_INPUT_SYNTAX.md](TYPE_INPUT_SYNTAX.md)
+定义的可逆语法；标签后的完整文本可以直接复制为 TypeChecker 的 `type` 分节。
 
 完整 source 的词法、语法或结构错误会立即终止并抛出公共 `HCSPInputError`，同时
 保留源文件名、行、列和源码指示符；此时不会进入类型构造。结构/静态前提失败或
@@ -480,7 +485,7 @@ Type 并检查它是否适用的 TypeChecker 尚未实现，也不属于当前 s
 from hcsp_typechecker.frontend.annotated_hcsp_syntax import parse_annotated_hcsp
 from hcsp_typechecker.frontend.type_constructor_frontend import parse_hcsp_source
 from hcsp_typechecker.frontend.typing_context_syntax import parse_typing_context
-from hcsp_typechecker.typechecking import construct_type
+from hcsp_typechecker.backend.type_constructor import construct_type
 ```
 
 `parse_hcsp_source(...)` 返回内部 `ParsedHCSPSource`，

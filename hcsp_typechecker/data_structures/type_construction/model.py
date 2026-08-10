@@ -12,7 +12,7 @@
 
 本模块中的 ``ProofObligation`` 只保存已经完整生成的 state、FOL 或 dL 公式。
 它不保存待求解的谓词变量，也不表示需要从多条约束中综合 T-Assign 的未知
-``phi'``。赋值后状态由 ``constructor.py`` 在规则展开时通过惰性最强后置状态确定；
+``phi'``。赋值后状态由 ``backend/common/rule_engine.py`` 在规则展开时通过惰性最强后置状态确定；
 这里的数据对象只负责记录后续需要证明的具体目标和证明器返回的三值结果。
 
 HCSP 进程语法由 ``data_structures/process_ast/ast.py`` 独立定义，行为类型语法由
@@ -66,6 +66,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from ...identifiers import is_hcsp_identifier
 from ..process_ast.expressions import Expr, ExprLike, Literal, ensure_expr
 from ..type_ast.ast import ConfigurationType as _ConfigurationType
+from ..type_ast.render import format_type_source
 
 
 # --------------------------------------------------------------------------
@@ -582,9 +583,9 @@ class TypeConstructionRequest:
 # 结果对应：某条 Table 2 规则产生的一条独立 FOL、dL 或初态证明义务。
 # 构造方式：ProofObligation(rule, description, formula, kind="fol",
 #                            verdict=UNKNOWN, detail="", proof_formula=None)。
-# 构造检查：本类只冻结公式和元数据，不调用 Z3/KeYmaera X；constructor.py 的
+# 构造检查：本类只冻结公式和元数据，不调用 Z3/KeYmaera X；共享规则引擎的
 #           顺序 premise 求解器在规则当前位置立即化简、判定并写回不可变
-#           副本。ODE 候选规则中未被选中的义务会标记 active=False。
+#           副本。当前规则确定性地产生义务，不保存已经废弃的 ODE 候选状态。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ProofObligation:
@@ -602,8 +603,6 @@ class ProofObligation:
     verdict: Verdict = Verdict.UNKNOWN
     detail: str = ""
     proof_formula: Any | None = None
-    active: bool = True
-    candidate: str = ""
 
     # 功能：保留规则原始公式和来源信息，写入证明器实际输入、结论及说明。
     # 构造/模型关系：formula 始终对应规则生成的 premise；proof_formula 对应
@@ -750,18 +749,30 @@ class TypeConstructionReport:
     # 构造/模型关系：这是展示函数，不重新合并 verdict 或隐藏失败证据。
     def summary(self) -> str:
         """生成紧凑的单行统计，适合测试失败信息和命令行输出。"""
-        active = tuple(item for item in self.obligations if item.active)
-        proved = sum(item.verdict == Verdict.TRUE for item in active)
-        disproved = sum(item.verdict == Verdict.FALSE for item in active)
-        unknown = sum(item.verdict == Verdict.UNKNOWN for item in active)
+        proved = sum(
+            item.verdict == Verdict.TRUE for item in self.obligations
+        )
+        disproved = sum(
+            item.verdict == Verdict.FALSE for item in self.obligations
+        )
+        unknown = sum(
+            item.verdict == Verdict.UNKNOWN for item in self.obligations
+        )
         if self.constructed_type is None:
             type_summary = "(none)"
         elif self.verdict is Verdict.TRUE:
-            type_summary = str(self.constructed_type)
+            type_summary = format_type_source(self.constructed_type)
         else:
-            type_summary = f"{self.constructed_type} [untrusted]"
+            type_summary = format_type_source(self.constructed_type)
+        trust_summary = (
+            "trusted"
+            if self.verdict is Verdict.TRUE
+            else "untrusted"
+            if self.constructed_type is not None
+            else "unavailable"
+        )
         return (
-            f"{self.verdict.value}: type={type_summary}; "
+            f"{self.verdict.value}: type={type_summary}; trust={trust_summary}; "
             f"obligations(proved={proved}, false={disproved}, unknown={unknown}); "
             f"diagnostics={len(self.diagnostics)}; steps={len(self.steps)}"
         )
@@ -872,19 +883,12 @@ class TypeConstructionReport:
         ):
             formula_reference = f"{label}{formula_index:02d}"
             references[source_index] = formula_reference
-            activity = "有效" if obligation.active else "未选候选"
-            candidate = (
-                f" | candidate={obligation.candidate}"
-                if obligation.candidate
-                else ""
-            )
             lines.extend(
                 (
                     "",
                     f"[{formula_reference}] 对应 O{source_index:02d} | "
-                    f"{activity} | {status_labels[obligation.verdict]} | "
-                    f"{obligation.rule} | {obligation.kind.upper()}"
-                    f"{candidate}",
+                    f"{status_labels[obligation.verdict]} | "
+                    f"{obligation.rule} | {obligation.kind.upper()}",
                     f"     公式用途 : {obligation.description}",
                     f"     判定后端 : {self._proof_backend(obligation.kind)}",
                 )
@@ -927,12 +931,6 @@ class TypeConstructionReport:
             trust_status = "不可信（存在未验证义务）"
         else:
             trust_status = "不可信（存在未通过义务）"
-        if self.verdict is Verdict.UNKNOWN:
-            candidate_annotation = "完整候选，未验证"
-            ast_annotation = "UNTRUSTED"
-        else:
-            candidate_annotation = "完整候选，存在未通过义务"
-            ast_annotation = "UNTRUSTED/FAILED-OBLIGATION"
         verdict_explanations = {
             Verdict.TRUE: "全部结构检查、静态类型前提和证明义务均已通过",
             Verdict.FALSE: "至少发现结构/静态类型错误或未满足的证明义务",
@@ -950,21 +948,11 @@ class TypeConstructionReport:
             "规则推导 : " + ("已完成" if derivation_complete else "未完成"),
             "类型构造 : " + ("成功" if derivation_complete else "失败"),
             f"类型可信性 : {trust_status}",
-            "构造类型 : "
+            "构造 Type 源码 : "
             + (
-                str(self.constructed_type)
-                if type_trusted
-                else f"{self.constructed_type}  [{candidate_annotation}]"
+                format_type_source(self.constructed_type)
                 if derivation_complete
                 else "(none)"
-            ),
-            "Type AST : "
-            + (
-                repr(self.constructed_type)
-                if type_trusted
-                else f"{self.constructed_type!r}  [{ast_annotation}]"
-                if derivation_complete
-                else "None"
             ),
         ]
 
@@ -981,26 +969,20 @@ class TypeConstructionReport:
                 start=1,
             ):
                 rendered_component = (
-                    str(component_type)
+                    format_type_source(component_type)
                     if component_type is not None
                     else "(failed)"
                 )
                 lines.append(f"K{index}: {rendered_component}")
 
-        active_obligations = tuple(
-            item for item in self.obligations if item.active
-        )
-        inactive_obligations = tuple(
-            item for item in self.obligations if not item.active
-        )
         proved = sum(
-            item.verdict == Verdict.TRUE for item in active_obligations
+            item.verdict == Verdict.TRUE for item in self.obligations
         )
         disproved = sum(
-            item.verdict == Verdict.FALSE for item in active_obligations
+            item.verdict == Verdict.FALSE for item in self.obligations
         )
         unknown = sum(
-            item.verdict == Verdict.UNKNOWN for item in active_obligations
+            item.verdict == Verdict.UNKNOWN for item in self.obligations
         )
 
         # 先按逻辑类别给出完整公式清单，使用户无需在混合的顺序证据中逐条
@@ -1025,8 +1007,7 @@ class TypeConstructionReport:
             (
                 "",
                 "=== 顺序公式判定记录 ===",
-                f"有效义务 : {len(active_obligations)}",
-                f"未选候选 : {len(inactive_obligations)}",
+                f"证明义务 : {len(self.obligations)}",
                 f"已证明   : {proved}",
                 f"未通过   : {disproved}",
                 f"待证明   : {unknown}",
@@ -1045,19 +1026,11 @@ class TypeConstructionReport:
             Verdict.UNKNOWN: "未解决；仍需可信证明后端或人工证明",
         }
         for index, obligation in enumerate(self.obligations, start=1):
-            activity = "有效" if obligation.active else "未选候选"
-            candidate = (
-                f" | candidate={obligation.candidate}"
-                if obligation.candidate
-                else ""
-            )
             lines.extend(
                 (
                     "",
-                    f"[O{index:02d}] {activity} | "
-                    f"{status_labels[obligation.verdict]} | "
-                    f"{obligation.rule} | {obligation.kind.upper()}"
-                    f"{candidate}",
+                    f"[O{index:02d}] {status_labels[obligation.verdict]} | "
+                    f"{obligation.rule} | {obligation.kind.upper()}",
                     f"     论文前提 : {self._paper_premise(obligation)}",
                     f"     证明目标 : {obligation.description}",
                     f"     判定后端 : {self._proof_backend(obligation.kind)}",
@@ -1102,17 +1075,13 @@ class TypeConstructionReport:
                 lines.append(f"     证明器说明: {obligation.detail}")
             lines.append(
                 "     处理状态 : "
-                + (
-                    retention_labels[obligation.verdict]
-                    if obligation.active
-                    else "所属 ODE 候选规则未被选中；仅保留供审计"
-                )
+                + retention_labels[obligation.verdict]
             )
 
         unresolved = tuple(
             (index, obligation)
             for index, obligation in enumerate(self.obligations, start=1)
-            if obligation.active and obligation.verdict != Verdict.TRUE
+            if obligation.verdict != Verdict.TRUE
         )
         lines.extend(("", "=== 未解决或未通过的证明义务 ==="))
         if not unresolved:
@@ -1126,20 +1095,6 @@ class TypeConstructionReport:
             lines.append(
                 f"[O{index:02d}] {status_labels[obligation.verdict]} | "
                 f"{obligation.rule} | 后续操作：{next_action}"
-            )
-
-        inactive_unresolved = tuple(
-            (index, obligation)
-            for index, obligation in enumerate(self.obligations, start=1)
-            if not obligation.active and obligation.verdict != Verdict.TRUE
-        )
-        lines.extend(("", "=== 未选 ODE 候选的未决证据 ==="))
-        if not inactive_unresolved:
-            lines.append("(无)")
-        for index, obligation in inactive_unresolved:
-            lines.append(
-                f"[O{index:02d}] {obligation.candidate or '-'} | "
-                f"{status_labels[obligation.verdict]} | {obligation.rule}"
             )
 
         lines.extend(("", "=== 规则执行过程 ==="))
@@ -1181,7 +1136,12 @@ class TypeConstructionReport:
                     + ", ".join(f"{name}={term}" for name, term in step.symbolic_state)
                 )
             if step.result:
-                lines.append(f"     规则结果 : {step.result}")
+                result_lines = step.result.splitlines()
+                lines.append(f"     规则结果 : {result_lines[0]}")
+                lines.extend(
+                    f"                  {line}"
+                    for line in result_lines[1:]
+                )
             if step.detail:
                 lines.append(f"     说明     : {step.detail}")
 
@@ -1201,9 +1161,8 @@ class TypeConstructionReport:
                 "=== 汇总 ===",
                 f"规则步骤 : {len(self.steps)}",
                 f"证明记录 : {len(self.obligations)}",
-                f"有效义务 : {len(active_obligations)} "
+                f"证明义务 : {len(self.obligations)} "
                 f"(true={proved}, false={disproved}, unknown={unknown})",
-                f"未选候选 : {len(inactive_obligations)}",
                 f"遗留义务 : {len(unresolved)} "
                 f"(未通过={disproved}, 待证明={unknown})",
                 f"诊断数量 : {len(self.diagnostics)}",

@@ -34,6 +34,49 @@ OUTPUT_MODE = "result"
 KEYMAERAX_TIMEOUT_SECONDS = 180.0
 
 
+# 第六个示例的完整输入同时供 type_demo.py 做 Constructor -> Checker 往返演示。
+COMPLEX_ODE_SOURCE = r"""
+gamma(
+    p: Real,
+    v: Real,
+    new_p: Real,
+    new_v: Real,
+    motion: continuous(p, v)
+)
+theta(
+    reset: channel(rp: Real, rv: Real)
+        where(rp >= 0 and rv >= 0),
+    report: channel(out_p: Real, out_v: Real)
+        where(out_p >= 0 and out_v >= 0)
+)
+process {{
+    p := 0;
+    v := 0;
+    ode(
+        flow(
+            dot p = v,
+            dot v = 2
+        ),
+        domain(t < 3 / 2),
+        safety(
+            p == t ** 2 and
+            v == 2 * t and
+            p >= 0 and
+            v >= 0
+        ),
+        delay(3 / 2),
+        interrupt(
+            on reset?(new_p, new_v) {
+                p := new_p;
+                v := new_v
+            }
+        )
+    );
+    report!(p, v)
+}}
+"""
+
+
 # 每项依次为：标题、希望展示的功能、完整用户输入。
 EXAMPLES = (
     (
@@ -110,46 +153,7 @@ EXAMPLES = (
     (
         "6. 二阶微分方程、多标量中断与自然超时后继",
         "展示 p'=v、v'=2、隐式 t、非线性 safety、delay(3/2) 和 timed choice。",
-        """
-        gamma(
-            p: Real,
-            v: Real,
-            new_p: Real,
-            new_v: Real,
-            motion: continuous(p, v)
-        )
-        theta(
-            reset: channel(rp: Real, rv: Real)
-                where(rp >= 0 and rv >= 0),
-            report: channel(out_p: Real, out_v: Real)
-                where(out_p >= 0 and out_v >= 0)
-        )
-        process {{
-            p := 0;
-            v := 0;
-            ode(
-                flow(
-                    dot p = v,
-                    dot v = 2
-                ),
-                domain(t < 3 / 2),
-                safety(
-                    p == t ** 2 and
-                    v == 2 * t and
-                    p >= 0 and
-                    v >= 0
-                ),
-                delay(3 / 2),
-                interrupt(
-                    on reset?(new_p, new_v) {
-                        p := new_p;
-                        v := new_v
-                    }
-                )
-            );
-            report!(p, v)
-        }}
-        """,
+        COMPLEX_ODE_SOURCE,
     ),
 )
 

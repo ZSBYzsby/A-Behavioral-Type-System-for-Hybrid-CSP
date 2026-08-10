@@ -9,13 +9,14 @@
 --------
 Section 4.1 的过程类型 ``T``、Angelic Type ``A`` 与 Section 4.2 的
 configuration type ``mathcal T``。本测试只验证用户 Type 前端，不执行
-未来 TypeChecker 的 Table 2 正确性判断。
+TypeChecker 的 Table 2 正确性判断。
 """
 
 from __future__ import annotations
 
 import unittest
 from fractions import Fraction
+from textwrap import dedent
 
 from hcsp_typechecker.frontend.type_constructor_frontend.errors import (
     HCSPInputError,
@@ -78,9 +79,25 @@ class TypeSourceRoundTripTests(unittest.TestCase):
         self.assertEqual(parse_type_source(source), value)
         self.assertEqual(
             source,
-            "type parallel {delay(3/2) interrupt angelic {reset? -> empty, "
-            "alarm! -> bottom} then internal {empty, forever interrupt angelic "
-            "{done! -> empty}}, mu X. forever interrupt angelic {tick? -> X}}",
+            dedent(
+                """\
+                type parallel {
+                    delay(3/2) interrupt angelic {
+                        reset? -> empty,
+                        alarm! -> bottom
+                    } then internal {
+                        (empty),
+                        (
+                            forever interrupt angelic {
+                                done! -> empty
+                            }
+                        )
+                    },
+                    mu X. forever interrupt angelic {
+                        tick? -> X
+                    }
+                }"""
+            ),
         )
 
     # 测试输入：有限/无穷 delay 中显式 angelic {} 与完全省略 interrupt 的两种写法。
@@ -112,7 +129,7 @@ class TypeSourceRoundTripTests(unittest.TestCase):
 
         value = parse_type_source(
             "type delay(0) interrupt angelic {a? -> empty, b! -> empty} "
-            "then internal {empty, forever}"
+            "then internal {(empty), (forever)}"
         )
 
         self.assertEqual(
@@ -125,6 +142,43 @@ class TypeSourceRoundTripTests(unittest.TestCase):
                 InternalChoiceType(
                     (EmptyType(), InfiniteDelayType(NoInterruptType()))
                 ),
+            ),
+        )
+
+    # 测试输入：外层二元内部选择的左分支仍是二元内部选择，括号显式保留分块。
+    # 预期行为：解析后得到嵌套 InternalChoiceType；序列化后分块完全不变。
+    # 检查内容：不再按结合律把三片类型压成同一个三元节点。
+    # 论文对应：每一层 T-If/T-sqcup 的子 judgment 与当前层括号分支逐项对应。
+    def test_parentheses_preserve_nested_internal_choice_blocks(self) -> None:
+        """内部选择的圆括号必须成为可逆的规则分块边界。"""
+
+        source = "type internal {(internal {(empty), (forever)}), (bottom)}"
+        value = parse_type_source(source)
+
+        self.assertEqual(
+            value,
+            InternalChoiceType(
+                (
+                    InternalChoiceType(
+                        (EmptyType(), InfiniteDelayType(NoInterruptType()))
+                    ),
+                    BottomType(),
+                )
+            ),
+        )
+        self.assertEqual(
+            format_type_source(value),
+            dedent(
+                """\
+                type internal {
+                    (
+                        internal {
+                            (empty),
+                            (forever)
+                        }
+                    ),
+                    (bottom)
+                }"""
             ),
         )
 
@@ -141,6 +195,17 @@ class TypeSourceDiagnosticsTests(unittest.TestCase):
 
         with self.assertRaises(HCSPInputError) as caught:
             parse_type_source("type angelic {ch? -> empty}")
+
+    # 测试输入：旧版未给 internal 的两个分支加圆括号。
+    # 预期行为：在第一个分支位置立即给出要求 ``(`` 的语法错误。
+    # 检查内容：用户必须明确标注每一层选择规则的 Type 分块。
+    # 论文对应：T-If/T-sqcup 的每个 premise 只消费当前括号内的对应 Type。
+    def test_internal_choice_requires_parenthesized_branches(self) -> None:
+        """旧版无括号内部选择语法必须被拒绝。"""
+
+        with self.assertRaises(HCSPInputError) as caught:
+            parse_type_source("type internal {empty, forever}")
+        self.assertIn("must be parenthesized", str(caught.exception))
         self.assertEqual(caught.exception.phase, "syntax")
 
     # 测试输入：有限 delay 使用 bottom 作为自然到时后继。

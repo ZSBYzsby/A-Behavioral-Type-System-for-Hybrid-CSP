@@ -16,8 +16,8 @@ r"""Section 4.1/4.2 行为类型 AST 的规范化与构造边界测试。
 论文对应
 --------
 对应 Section 4.1 的 ``T/A`` 产生式、三个时延定义式缩写、递归类型良构要求，
-以及 Section 4.2 的组合配置类型 ``mathcal T``。这些测试确保内部扁平化不会
-产生论文没有定义的空选择、单分支内部选择或跨语法层嵌套。
+以及 Section 4.2 的组合配置类型 ``mathcal T``。这些测试确保内部选择保留规则
+分块，同时不会产生论文没有定义的空选择、单分支内部选择或跨语法层嵌套。
 """
 
 from __future__ import annotations
@@ -252,6 +252,22 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
             ParallelType((EndType(),))
         with self.assertRaises(TypeError):
             ProcessType()
+
+    # 测试输入：分别构造 ``(A sqcup B) sqcup C`` 与 ``A sqcup (B sqcup C)``。
+    # 预期行为：两棵 AST 保留不同嵌套结构，类型等价比较也区分它们。
+    # 检查内容：InternalChoiceType 构造器不再自动按结合律压平。
+    # 论文对应：用户括号确定每层 T-If/T-sqcup 的对应 Type 子判断。
+    def test_internal_choice_preserves_parenthesized_grouping(self) -> None:
+        """内部选择的左右嵌套分块必须保持为不同 Type AST。"""
+
+        a = InfiniteDelayType(OutputType("a", EndType()))
+        b = InfiniteDelayType(OutputType("b", EndType()))
+        c = InfiniteDelayType(OutputType("c", EndType()))
+        left_grouped = InternalChoiceType((InternalChoiceType((a, b)), c))
+        right_grouped = InternalChoiceType((a, InternalChoiceType((b, c))))
+
+        self.assertNotEqual(left_grouped, right_grouped)
+        self.assertFalse(types_equivalent(left_grouped, right_grouped))
 
     # 测试输入：直接回边、纯等待后回边和输入通信后回边三种 mu 类型体。
     # 预期行为：前两种构造失败；经过 ch? 前缀的递归成功。

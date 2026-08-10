@@ -27,6 +27,12 @@ from .ast import (
     make_delay_type,
     types_equivalent,
 )
+from .render import (
+    format_angelic_type,
+    format_configuration_type,
+    format_process_type,
+    format_type_source,
+)
 
 __all__ = [
     "AngelicType",
@@ -49,4 +55,8 @@ __all__ = [
     "make_external_choice",
     "make_delay_type",
     "types_equivalent",
+    "format_angelic_type",
+    "format_configuration_type",
+    "format_process_type",
+    "format_type_source",
 ]

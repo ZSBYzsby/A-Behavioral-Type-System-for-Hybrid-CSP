@@ -100,7 +100,7 @@ Python 继承层次把论文 ``mathcal T``、``T``、``A`` 分为三个独立语
 ``NoInterruptType``。过程终止/无通信行为由独立的 ``EmptyType`` 表示。
 
 本文件只定义不可变类型 AST、规范化工厂与 alpha 等价比较，不执行 Table 2
-类型构造。Gamma、Theta、路径条件和证明义务由 ``constructor.py``、``logic.py``
+类型构造。Gamma、Theta、路径条件和证明义务由后端 ``rule_engine.py``、``logic.py``
 与 dL 后端检查。每个具体节点只检查不依赖推导上下文即可判断的语法类别、
 分支数、有限时延和递归通信守卫条件。
 
@@ -335,8 +335,8 @@ def make_external_choice(branches: Iterable[CommunicationType]) -> AngelicType:
 
 # --------------------------------------------------------------------------
 # 论文对应：过程类型 T \sqcup T'；Table 2 [T-If]/[T-\sqcup] 产生它。
-# 构造方式：InternalChoiceType((left, right, ...))；二元嵌套会被结合律压平。
-# 构造检查：压平后至少两个分支，每个分支必须是 ProcessType，不能放入 ParallelType。
+# 构造方式：InternalChoiceType((left, right, ...))；嵌套节点保留用户括号确定的分块。
+# 构造检查：当前节点至少两个分支，每个分支必须是 ProcessType，不能放入 ParallelType。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class InternalChoiceType(ProcessType):
@@ -345,18 +345,13 @@ class InternalChoiceType(ProcessType):
     branches: tuple[ProcessType, ...]
 
     def __init__(self, branches: Iterable[ProcessType]):
-        """压平嵌套内部选择，并验证分支数量与 T 语法类别。"""
-        flat: list[ProcessType] = []
-        for branch in branches:
-            if isinstance(branch, InternalChoiceType):
-                flat.extend(branch.branches)
-            elif isinstance(branch, ProcessType):
-                flat.append(branch)
-            else:
-                raise TypeError("Internal choice branches must be process types T")
-        if len(flat) < 2:
+        """保留内部选择分块，并验证分支数量与 T 语法类别。"""
+        items = tuple(branches)
+        if not all(isinstance(branch, ProcessType) for branch in items):
+            raise TypeError("Internal choice branches must be process types T")
+        if len(items) < 2:
             raise ValueError("InternalChoiceType requires at least two branches")
-        object.__setattr__(self, "branches", tuple(flat))
+        object.__setattr__(self, "branches", items)
 
     def __str__(self) -> str:
         r"""使用论文 ``\sqcup`` 记号连接并括住每个内部选择分支。"""

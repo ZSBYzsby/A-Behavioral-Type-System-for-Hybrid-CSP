@@ -308,7 +308,7 @@ class Table2RuleContractTests(unittest.TestCase):
     # 测试输入：有限 delay=1、演化域 x<1 且显式后接 skip 的 ODE。
     # 预期行为：存在自然后继，因此不生成 domain-invariant premise；改为生成
     #           safety 与精确边界 ``(t<d -> B) and (t=d -> not B)`` 两条义务。
-    # 检查内容：两条候选的完整顺序证明记录，以及最终有效义务仅含 boundary。
+    # 检查内容：确定性规则的顺序证明记录只包含 safety 与 boundary。
     # 论文对应：Table 2 带 fallback 的第二条定时 ODE 规则。
     def test_finite_ode_with_fallback_has_exact_boundary_formula_set(self) -> None:
         """有限自然终止 ODE 必须选择 boundary，而不能沿用 domain premise。"""
@@ -338,10 +338,6 @@ class Table2RuleContractTests(unittest.TestCase):
                 ("T-ODE-boundary", "dl"),
             ),
         )
-        self.assertEqual(
-            tuple(item.active for item in report.obligations),
-            (True, True, True),
-        )
         ode_roles = tuple(
             obligation.formula.role
             for obligation in report.obligations
@@ -351,12 +347,6 @@ class Table2RuleContractTests(unittest.TestCase):
             ode_roles,
             ("safety", "boundary"),
         )
-        active_ode_roles = tuple(
-            obligation.formula.role
-            for obligation in report.obligations
-            if obligation.kind == "dl" and obligation.active
-        )
-        self.assertEqual(active_ode_roles, ("safety", "boundary"))
         boundary_source = report.obligations[2].formula.source
         # KeYmaera X 打印器把 ``t < 1`` 规范成等价的 ``1 > t``，而
         # ``t = 1`` 可能打印成 ``1 = t``；两部分必须同时保留。

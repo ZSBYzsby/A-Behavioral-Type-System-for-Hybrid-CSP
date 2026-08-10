@@ -148,8 +148,8 @@ type_ast = construct_hcsp_type(
 接口支持以下 `output` 模式：
 
 - `"none"`：默认值，不打印；
-- `"result"`：显示最终结论；成功时打印可信 Type AST，证明未决时打印完整候选
-  Type AST 及“不可信”标记，其他失败打印原因和部分进度；
+- `"result"`：显示最终结论；成功时按规范用户 Type 语法打印可信类型，证明未决
+  时按同一语法打印完整候选及“不可信”标记，其他失败打印原因和部分进度；
 - `"full"`：打印原始输入、环境摘要、内部构造完成说明、规则步骤、FOL/dL 公式、
   证明器结论、未决义务和最终可信性，但不打印 Process AST 对象/repr。
 
@@ -348,20 +348,24 @@ python -m unittest discover -s tests -p "test_*.py" -v
 python scripts/check_repository.py
 ```
 
-`tests/` 当前共有 351 个自动化测试，并按职责放在十一个子目录中：
+`tests/` 当前共有 379 个自动化测试，并按职责分层组织：
 
 ```text
 tests/
+├── backend/        4 个后端目录边界、共享引擎和单向依赖测试
 ├── expressions/    24 个表达式 AST、输入边界和精确解析测试
-├── hcsp_syntax/    59 个 Section 2.1 AST 与 Assumption 2.1/2.2 测试
+├── frontend/       4 个前端目录边界测试
+├── hcsp_syntax/    57 个 Section 2.1 AST 与 Assumption 2.1/2.2 测试
 ├── input_frontend/ 66 个完整 source、参数环境、Process 与表达式输入测试
 ├── annotations/    18 个 Section 4.2/4.3 批注与自动局部时钟测试
-├── type_ast/       14 个行为类型 AST 规范化测试
-├── type_constructor/ 111 个构造、Table 2 契约、参数背景、ODE 选规和通信测试
+├── type_ast/       15 个行为类型 AST 规范化测试
+├── type_constructor/ 108 个构造、Table 2 契约、参数背景、ODE 选规和通信测试
+├── type_checker/   12 个给定 Type 递归检查、选择分组、日志与 Constructor 往返测试
+├── type_syntax/    8 个 Type 文本与 Type AST 可逆转换测试
 ├── model/          14 个值类型、连续类型、通道边界、环境自检和详细报告测试
 ├── logic/          6 个表达式语义、偏函数有定义性和状态值测试
 ├── dl/             26 个 dL 公式、KeYmaera X 后端和公开 API 集成测试
-├── public_api/     12 个稳定门面、案例脚本、日志模式、成功返回和失败异常测试
+├── public_api/     16 个稳定门面、案例脚本、日志模式、往返演示和失败异常测试
 └── quality/        1 个全项目文档及测试审计注释完整性检查
 ```
 
@@ -393,21 +397,22 @@ process {{
 """
 
 type_ast = construct_hcsp_type(source, output="full")
-print(type_ast)  # mu t1.(ch?.(dh!.(t1)))
+# 日志按用户 Type 语法显示：type mu t1. forever interrupt angelic {...}
 ```
 
 ## 公共接口的输入和输出
 
 包根 `hcsp_typechecker` 只公开以下稳定白名单：
 
-- 唯一操作：`construct_hcsp_type`；
+- 两个操作：`construct_hcsp_type` 与 `check_hcsp_type`；
 - 正式结果抽象基类：`TypeAST`；
 - 打印模式枚举：`OutputMode`；
-- 三个公共异常：`HCSPInputError`、`HCSPTypeConstructionError`、
-  `HCSPUntrustedTypeConstructionError`。最后一个是
+- 四个公共异常：`HCSPInputError`、`HCSPTypeConstructionError`、
+  `HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`。其中
+  `HCSPUntrustedTypeConstructionError` 是
   `HCSPTypeConstructionError` 的子类。
 
-唯一接口的签名为：
+Constructor 接口的签名为：
 
 ```python
 construct_hcsp_type(
@@ -422,6 +427,25 @@ construct_hcsp_type(
     keymaerax_timeout_seconds=None,
 ) -> TypeAST
 ```
+
+Checker 的稳定入口为：
+
+```python
+check_hcsp_type(
+    source,
+    *,
+    source_name="<input>",
+    initial_states=None,
+    path_condition=True,
+    output=OutputMode.NONE,
+    stream=None,
+    z3_timeout_ms=5000,
+    keymaerax_timeout_seconds=None,
+) -> TypeAST
+```
+
+它要求 source 在相同四类输入后追加 `type configuration_type`，以给定 Type
+为每个规则 judgment 的结论递归检查；失败抛出 `HCSPTypeCheckingError`。
 
 - `source` 必须包含 Gamma、可选 Parameters、Theta 和 Process；解析得到的环境和
   Process AST 只在本次调用内部存在，不作为公共结果返回；
@@ -454,14 +478,18 @@ from hcsp_typechecker import (
 )
 
 try:
-    type_ast = construct_hcsp_type(source, source_name="example.hcsp")
+    type_ast = construct_hcsp_type(
+        source,
+        source_name="example.hcsp",
+        output="result",
+    )
 except HCSPInputError as error:
     print(error.format_diagnostic())
 except HCSPUntrustedTypeConstructionError as error:
-    print("完整但不可信的候选：", error.untrusted_type)
-    print(error.format_full())
+    # result 已用规范 Type 源码打印候选；对象仍在 error.untrusted_type 中。
+    pass
 except HCSPTypeConstructionError as error:
-    print(error.format_full())
+    pass
 ```
 
 `output="none"`、`"result"`、`"full"` 也可分别写成
@@ -471,6 +499,10 @@ except HCSPTypeConstructionError as error:
 环境摘要、实际推导轨迹、FOL/dL 公式、证明结论、待证明义务和类型可信性，但不
 暴露内部 Process AST 对象/repr。打印目标默认是标准输出，`stream=` 仅用于定向
 到其他文本流。
+
+所有日志中的 Type 都使用 [TYPE_INPUT_SYNTAX.md](TYPE_INPUT_SYNTAX.md) 的规范
+用户语法，并带完整 `type` 前缀；不会再并列打印 Python Type AST `repr`。因此
+`Type 源码 :` 后的文本可以直接复制回用户输入，并由 TypeChecker 再次读取。
 
 共享参数在 HCSP 执行前由用户选定，所有合法选择必须满足 source 中同一个
 `where` 约束。它们不属于任一分量的状态 Gamma，可以被所有并行 Process、通道
@@ -517,8 +549,9 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
 
 实现按数据流划分为一个稳定门面、三个输入结构层和两个核心职责层：
 
-- `hcsp_typechecker.api`：面向普通用户的单一门面层，在一次调用中编排“完整
-  source → 内部 Process AST → `TypeAST`”，并统一打印和异常语义；中间 AST
+- `hcsp_typechecker.api`：面向普通用户的门面层，分别编排 Constructor 的“完整
+  source → 内部 Process AST → `TypeAST`”与 Checker 的“完整 typed source →
+  逐规则验证给定 Type”，并统一打印和异常语义；中间 AST
   不作为公共结果暴露；
 
 - `hcsp_typechecker.frontend.annotated_hcsp_syntax`：带批注 HCSP 与 Expr 的输入结构及其到
@@ -529,6 +562,8 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
   解析与规范化输出；
 - `hcsp_typechecker.frontend.type_constructor_frontend`：完整 source 的组合前端，负责共享词法、源码位置诊断，
   并将参数环境、Gamma、Theta 和 Process 绑定为一次 TypeConstructor 调用的内部输入；
+- `hcsp_typechecker.frontend.type_checker_frontend`：在同一完整输入后继续解析必填
+  `type` 分节，并把程序解析记录与用户 Type AST 绑定为一次 TypeChecker 输入；
 - `hcsp_typechecker.data_structures.process_ast`：源语言层，`expressions.py` 定义表达式 ``e/B``，
   `ast.py` 定义 Section 2.1 的 ``E/P/S`` process AST，以及附着在 ODE/Mu 上的
   Section 4.2/4.3 批注；
@@ -539,12 +574,14 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
   基础类型、连续向量和通道 refinement 的运行上下文定义；
 - `hcsp_typechecker.data_structures.type_construction`：Configuration、类型构造请求、
   证明义务、推导步骤、诊断和构造报告；
-- `hcsp_typechecker.typechecking`：类型相关功能的共享内部层。当前实现放在
-  `constructor.py`：`TypeConstructor` 保存四类 conclusion judgment、两类 premise、
-  `RuleExpansion` 和统一递归构造器，`model.py` 保存 Gamma/Theta、
-  `TypeConstructionRequest`、proof obligation、diagnostic 和
-  `TypeConstructionReport`，`logic.py`、`dl.py` 与 `keymaerax.py` 负责逻辑公式及
-  证明后端；未来接收用户给定 Type 的 TypeChecker 也可复用这一层，但尚未实现；
+- `hcsp_typechecker.backend.common`：Constructor 与 Checker 共享的内部基础层；
+  `rule_engine.py` 保存四类 conclusion judgment、两类 premise 和 Table 2 规则展开，
+  `logic.py`、`dl.py` 与 `keymaerax.py` 负责逻辑公式和证明后端；
+- `hcsp_typechecker.backend.type_constructor`：TypeConstructor 的独立业务后端，
+  从规则子结论组合出 Type AST，并形成 `TypeConstructionReport`；
+- `hcsp_typechecker.backend.type_checker`：TypeChecker 的独立业务后端，消费用户
+  Type AST 的对应子树并检查每个规则结论；它与 Constructor 均依赖 common，
+  两个业务后端彼此不依赖；
 - `hcsp_typechecker.tooling`：项目工具层，目前提供跨平台环境诊断程序。
 
 依赖方向保持单向：输入层构造 `process` 节点，TypeConstructor 读取 `process` 并
@@ -554,12 +591,12 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
 包根 `hcsp_typechecker` 的 `__all__` 是明确的公开白名单：
 
 ```text
-HCSPInputError, HCSPTypeConstructionError,
+HCSPInputError, HCSPTypeConstructionError, HCSPTypeCheckingError,
 HCSPUntrustedTypeConstructionError, OutputMode, TypeAST,
-construct_hcsp_type
+construct_hcsp_type, check_hcsp_type
 ```
 
-普通调用方只依赖这六个名称。`parse_hcsp_source`、`parse_hcsp`、
+普通调用方只依赖这八个名称。`parse_hcsp_source`、`parse_hcsp`、
 `parse_expression`、`construct_type`、具体 AST 节点、判断、证明义务和后端配置只能
 从相应子包取得，它们是内部实现与开发审计接口，不承诺兼容性，也不会重新从
 包根导出。以后新增 Type AST 分析功能时，也应先通过门面定义清楚稳定协议，

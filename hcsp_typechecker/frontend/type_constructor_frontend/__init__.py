@@ -6,7 +6,11 @@ TypeConstructor 调用使用的内部 ``ParsedHCSPSource``。它不属于包根�
 
 from .errors import HCSPInputError, SourcePosition
 from .lexer import Token, tokenize
-from .parser import parse_expression, parse_hcsp, parse_hcsp_source
+from .parser import (
+    parse_expression,
+    parse_hcsp,
+    parse_hcsp_source,
+)
 from .source import ParsedHCSPSource
 
 __all__ = [

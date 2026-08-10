@@ -2,7 +2,7 @@ r"""验证项目根包公开的单入口 HCSP 类型构造接口。
 
 测试内容
 --------
-1. 根包只暴露 ``construct_hcsp_type``、正式 Type AST 抽象、输出模式和公共异常；
+1. 根包暴露 TypeConstructor 与 TypeChecker 的两个正式业务入口、Type AST 抽象、输出模式和公共异常；
 2. 单进程与并行 source 都能由一次调用直接转换为正式 Type AST；
 3. ``none``、``result``、``full`` 只改变打印详细程度，不改变推导结果；
 4. concrete syntax 解析失败时立即抛 ``HCSPInputError``，类型构造器不会启动；
@@ -30,10 +30,16 @@ import hcsp_typechecker
 from hcsp_typechecker import (
     HCSPInputError,
     HCSPTypeConstructionError,
+    HCSPTypeCheckingError,
     HCSPUntrustedTypeConstructionError,
     OutputMode,
     TypeAST,
     construct_hcsp_type,
+    check_hcsp_type,
+)
+from hcsp_typechecker.frontend.type_syntax import (
+    format_type_source,
+    parse_type_source,
 )
 
 
@@ -55,19 +61,21 @@ class PublicFacadeTests(unittest.TestCase):
     """锁定普通调用者可见的名称、返回值、输出和失败协议。"""
 
     # 测试输入：直接查看根包导出白名单以及旧两阶段接口和内部实现名称。
-    # 预期行为：根包只导出一个业务函数；不存在可公开取得 Process AST 的程序容器。
+    # 预期行为：根包只导出构造与检查两个业务函数；不存在可公开取得 Process AST 的程序容器。
     # 检查内容：精确比较 __all__，并确认两阶段函数、HCSPProgram 和 AST 构造器均隐藏。
     # 论文对应：Process AST 只是应用规则所需的内部中间表示，不是类型判断的最终结果。
-    def test_root_package_exports_only_one_business_entrypoint(self) -> None:
-        """普通调用者应只看到 source 到 Type AST 的单一业务入口。"""
+    def test_root_package_exports_only_constructor_and_checker(self) -> None:
+        """普通调用者应只看到构造与检查两个正式业务入口。"""
 
         expected = {
             "HCSPInputError",
             "HCSPTypeConstructionError",
+            "HCSPTypeCheckingError",
             "HCSPUntrustedTypeConstructionError",
             "OutputMode",
             "TypeAST",
             "construct_hcsp_type",
+            "check_hcsp_type",
         }
 
         self.assertEqual(set(hcsp_typechecker.__all__), expected)
@@ -92,6 +100,56 @@ class PublicFacadeTests(unittest.TestCase):
         ):
             with self.subTest(hidden_name=hidden_name):
                 self.assertFalse(hasattr(hcsp_typechecker, hidden_name))
+
+    # 测试输入：skip 的完整 source 与等价的用户 Type 段 empty。
+    # 预期行为：TypeChecker 返回用户给定的正式 Type AST。
+    # 检查内容：验证完整输入的 type 段解析、Table 2 检查入口和成功返回协议。
+    # 论文对应：T-End 的结论为过程空通信行为 0。
+    def test_type_checker_accepts_matching_user_type(self) -> None:
+        """用户写出的正确 Type 应被 TypeChecker 验证。"""
+
+        output = StringIO()
+        checked = check_hcsp_type(
+            _SKIP_SOURCE + "\ntype empty",
+            output="result",
+            stream=output,
+        )
+        self.assertEqual(str(checked), "0")
+        self.assertIn("Type 源码 : type empty", output.getvalue())
+        self.assertNotIn("EndType()", output.getvalue())
+
+    # 测试输入：skip 的完整 source 与不匹配的用户 Type bottom。
+    # 预期行为：TypeChecker 报告 false，而不是将 bottom 当错误占位符接受。
+    # 检查内容：验证用户 Type 与规则结论的结构比对。
+    # 论文对应：T-End 只允许 0，不允许 \bot。
+    def test_type_checker_rejects_non_matching_user_type(self) -> None:
+        """不匹配的用户 Type 必须被拒绝。"""
+
+        with self.assertRaises(HCSPTypeCheckingError) as caught:
+            check_hcsp_type(_SKIP_SOURCE + "\ntype bottom")
+        self.assertEqual(caught.exception.verdict, "false")
+        self.assertIn(
+            "给定 Type 源码 : type bottom",
+            caught.exception.format_result(),
+        )
+        self.assertIn(
+            "给定 Type 源码 : type bottom",
+            caught.exception.format_full(),
+        )
+        self.assertNotIn("BottomType()", caught.exception.format_full())
+
+    # 测试输入：TypeConstructor 可成功构造的通信 source；随后将其 Type AST 写回用户 Type 语法。
+    # 预期行为：把该 type 段附回原输入后，TypeChecker 可再次验证成功。
+    # 检查内容：锁定 Process/环境 -> Type AST -> Type 语法 -> TypeChecker 的端到端往返。
+    # 论文对应：同一棵 T-sigma、T-In、T-Out、T-End 推导树既可构造也可检查。
+    def test_constructed_type_serialization_is_accepted_by_type_checker(self) -> None:
+        """构造出的可信 Type 写回用户语法后必须可被检查器验证。"""
+
+        constructed = construct_hcsp_type(_COMMUNICATION_SOURCE)
+        checked = check_hcsp_type(
+            _COMMUNICATION_SOURCE + "\n" + format_type_source(constructed)
+        )
+        self.assertEqual(checked, constructed)
 
     # 测试输入：含参数、Gamma、Theta 和 ch?(x); ch!(x) 的完整单进程 source。
     # 预期行为：一次调用直接返回 ch?.(ch!.(0))，调用者不处理任何中间程序对象。
@@ -158,7 +216,14 @@ class PublicFacadeTests(unittest.TestCase):
         result_text = result_stream.getvalue()
         full_text = full_stream.getvalue()
         self.assertEqual(silent.getvalue(), "")
-        self.assertIn("Type AST", result_text)
+        self.assertIn("Type 源码 : type empty", result_text)
+        self.assertNotIn("EndType()", result_text)
+        emitted_source = next(
+            line.partition(":")[2].strip()
+            for line in result_text.splitlines()
+            if line.startswith("Type 源码 :")
+        )
+        self.assertEqual(parse_type_source(emitted_source), result_type)
         self.assertIn("Verdict : true", result_text)
         self.assertNotIn("规则执行过程", result_text)
         self.assertNotIn("原始用户输入", result_text)
@@ -237,7 +302,7 @@ class PublicFacadeTests(unittest.TestCase):
         self.assertFalse(hasattr(error, "program"))
         self.assertFalse(hasattr(error, "process_ast"))
         self.assertIn("Verdict : false", error.format_result())
-        self.assertIn("Type AST : None", error.format_result())
+        self.assertIn("Type 源码 : (none)", error.format_result())
         self.assertIn("部分类型 : K1=(none)", error.format_result())
         self.assertIn("推导步骤 : 已执行", error.format_result())
         self.assertIn("停止位置 :", error.format_result())
@@ -255,7 +320,7 @@ class PublicFacadeTests(unittest.TestCase):
 
         output = StringIO()
         with patch(
-            "hcsp_typechecker.typechecking.constructor."
+            "hcsp_typechecker.backend.common.keymaerax."
             "KeYmaeraXBackend.__call__",
             return_value=None,
         ):
@@ -276,11 +341,18 @@ class PublicFacadeTests(unittest.TestCase):
         self.assertFalse(hasattr(error, "program"))
         self.assertIn("Verdict : unknown", str(error))
         self.assertIn("完整候选 Type", error.format_result())
+        self.assertIn(
+            "完整候选 Type 源码 : type delay(1) then empty",
+            error.format_result(),
+        )
         self.assertIn("不可信（未验证）", error.format_result())
         self.assertIn("类型构造与证明详细报告", error.format_full())
         self.assertIn("dL", error.format_full())
         self.assertIn("规则推导 : 已完成", error.format_full())
-        self.assertIn("完整候选，未验证", error.format_full())
+        self.assertIn(
+            "构造 Type 源码 : type delay(1) then empty",
+            error.format_full(),
+        )
         self.assertIn(
             "Process AST : 已在内部构造，不作为公共对象暴露",
             error.format_full(),

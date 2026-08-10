@@ -2,7 +2,7 @@
 
 本包只处理 ``type ...`` 段：:func:`parse_type_source` 把规范文本变成
 既有 Type AST，:func:`format_type_source` 则把 Type AST 写回可再次解析的
-规范文本。它不执行未来 TypeChecker 的规则推导或正确性证明。
+规范文本。它只负责 Type AST 往返；规则推导与正确性证明由 TypeChecker 执行。
 """
 
 from .parser import parse_type_source

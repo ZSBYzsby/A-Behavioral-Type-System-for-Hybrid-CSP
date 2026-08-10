@@ -105,6 +105,27 @@ class Parser:
             parameters=parameters,
         )
 
+    def parse_complete_source_without_eof(self) -> ParsedHCSPSource:
+        """解析完整构造器输入，但把 EOF 留给可选的 ``type`` 分节。"""
+
+        gamma = self._parse_gamma_section()
+        parameters = (
+            self._parse_parameter_section(forbidden_names=frozenset(gamma))
+            if self.current.kind == "parameters"
+            else ParameterEnvironment()
+        )
+        theta = self._parse_theta_section()
+        self._expect("process")
+        process = self._parse_process_system(
+            shared_parameters=frozenset(parameters.declarations),
+        )
+        return ParsedHCSPSource(
+            gamma=gamma,
+            theta=theta,
+            process=process,
+            parameters=parameters,
+        )
+
     def _parse_process_system(
         self,
         *,
