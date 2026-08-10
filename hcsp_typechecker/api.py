@@ -37,17 +37,15 @@ from .frontend.type_constructor_frontend.source import ParsedHCSPSource
 from .data_structures.process_ast.ast import HCSP, Process
 from .data_structures.type_ast.ast import ConfigurationType
 from .data_structures.type_ast.render import format_type_source
-from .backend.type_constructor import construct_type
-from .backend.type_checker import TypeChecker
-from .data_structures.type_checking import TypeCheckingRequest
+from .backend.type_constructor import TypeConstructionReport, construct_type
+from .backend.type_checker import TypeChecker, TypeCheckingRequest
 from .backend.common.keymaerax import KeYmaeraXConfig
-from .data_structures.type_construction.model import (
+from .backend.common.model import Verdict
+from .data_structures.runtime_context import (
     ChannelType,
-    TypeConstructionReport,
     Configuration,
     GammaType,
     ParameterEnvironment,
-    Verdict,
 )
 
 

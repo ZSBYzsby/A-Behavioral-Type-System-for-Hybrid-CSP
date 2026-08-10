@@ -1,8 +1,8 @@
 """用户给定 Type 的检查请求与不可变审计结果。
 
-TypeCheckingReport 中的 ``evidence`` 复用 TypeConstructor 已有的通用规则轨迹、
-证明义务和诊断容器，但其中的 ``constructed_type`` 只在本次给定 Type 已被全部
-结构规则消费时保存该给定 Type；TypeChecker 不从 Process 重新构造另一棵类型。
+TypeCheckingReport 中的 ``evidence`` 使用两个后端共享的规则轨迹、证明义务和
+诊断容器。共享证据中的 ``constructed_type`` 字段在 Checker 语境下是“已经被
+全部规则消费的结论 Type”：它保存用户给定 Type，而不是重新构造的另一棵类型。
 """
 
 from __future__ import annotations
@@ -10,10 +10,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
-from ..runtime_context import ChannelType, GammaType, ParameterEnvironment
-from ..type_ast.ast import ConfigurationType
-from ..type_ast.render import format_type_source
-from ..type_construction import Configuration, TypeConstructionReport, Verdict
+from ...data_structures.runtime_context import (
+    ChannelType,
+    Configuration,
+    GammaType,
+    ParameterEnvironment,
+)
+from ...data_structures.type_ast.ast import ConfigurationType
+from ...data_structures.type_ast.render import format_type_source
+from ..common.model import RuleDerivationReport, Verdict
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +39,7 @@ class TypeCheckingReport:
 
     verdict: Verdict
     expected_type: ConfigurationType
-    evidence: TypeConstructionReport
+    evidence: RuleDerivationReport
     mismatch: str = ""
 
     @property
@@ -52,7 +57,7 @@ class TypeCheckingReport:
     def format_detailed(self) -> str:
         """显示给定 Type 的规则匹配、公式义务和证明结果。
 
-        证明证据的底层布局与 TypeConstructor 共用，以确保 FOL/dL 公式不会在
+        证明证据的底层布局由 common 层提供，以确保 FOL/dL 公式不会在
         两套功能间出现不同的编号或遗漏；这里只把展示术语改为“检查给定 Type”。
         """
 

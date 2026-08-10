@@ -28,8 +28,9 @@ from hcsp_typechecker import (
     check_hcsp_type,
     construct_hcsp_type,
 )
-from hcsp_typechecker.data_structures.type_checking import TypeCheckingRequest
-from hcsp_typechecker.data_structures.type_construction import Configuration, Verdict
+from hcsp_typechecker.backend.common import Verdict
+from hcsp_typechecker.backend.type_checker import TypeCheckingRequest
+from hcsp_typechecker.data_structures.runtime_context import Configuration
 from hcsp_typechecker.data_structures.type_ast import InternalChoiceType
 from hcsp_typechecker.frontend.type_checker_frontend import (
     parse_typechecking_source,

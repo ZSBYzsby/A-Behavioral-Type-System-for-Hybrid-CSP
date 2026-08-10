@@ -570,23 +570,23 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
 - `hcsp_typechecker.data_structures.type_ast`：行为类型层，定义 Section 4.1 的行为类型
   ``T/A``、Section 4.2 的组合类型 ``mathcal T`` 和 alpha 等价比较；后续所有
   直接分析或变换 Type AST 的功能也放在这一层；
-- `hcsp_typechecker.data_structures.runtime_context`：Gamma、Theta、共享参数以及
-  基础类型、连续向量和通道 refinement 的运行上下文定义；
-- `hcsp_typechecker.data_structures.type_construction`：Configuration、类型构造请求、
-  证明义务、推导步骤、诊断和构造报告；
+- `hcsp_typechecker.data_structures.runtime_context`：Gamma、Theta、共享参数、
+  Configuration，以及基础类型、连续向量和通道 refinement 的运行上下文定义；
 - `hcsp_typechecker.backend.common`：Constructor 与 Checker 共享的内部基础层；
   `rule_engine.py` 保存四类 conclusion judgment、两类 premise 和 Table 2 规则展开，
-  `logic.py`、`dl.py` 与 `keymaerax.py` 负责逻辑公式和证明后端；
+  `model.py` 保存证明义务、诊断、推导步骤与共享规则证据，`logic.py`、`dl.py`
+  与 `keymaerax.py` 负责逻辑公式和证明后端；
 - `hcsp_typechecker.backend.type_constructor`：TypeConstructor 的独立业务后端，
-  从规则子结论组合出 Type AST，并形成 `TypeConstructionReport`；
+  其 `model.py` 定义构造请求和报告名称，`constructor.py` 从规则子结论组合出
+  Type AST；
 - `hcsp_typechecker.backend.type_checker`：TypeChecker 的独立业务后端，消费用户
-  Type AST 的对应子树并检查每个规则结论；它与 Constructor 均依赖 common，
-  两个业务后端彼此不依赖；
+  Type AST 的对应子树并检查每个规则结论；其请求和报告也由本目录的
+  `model.py` 定义。它与 Constructor 均依赖 common，两个业务后端彼此不依赖；
 - `hcsp_typechecker.tooling`：项目工具层，目前提供跨平台环境诊断程序。
 
-依赖方向保持单向：输入层构造 `process` 节点，TypeConstructor 读取 `process` 并
-生成 `type_system` 节点，而 `type_system` 不反向依赖解析器或构造器。门面层只在
-最外侧编排这些内部层。
+依赖方向保持单向：`frontend` 只把文本转换为 `data_structures` 中的领域对象；
+`backend.common` 只依赖领域对象并提供规则/证明基础设施；两个业务后端分别依赖
+`common + data_structures`，彼此不导入；`api.py` 只在最外侧组合前端与后端。
 
 包根 `hcsp_typechecker` 的 `__all__` 是明确的公开白名单：
 

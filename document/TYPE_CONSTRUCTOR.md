@@ -17,8 +17,9 @@
 - `hcsp_typechecker/backend/common/logic.py`：表达式到 Z3 项的翻译及 FOL/state 判定；
 - `hcsp_typechecker/backend/common/dl.py`：ODE 证明义务到 dL 公式的翻译；
 - `hcsp_typechecker/data_structures/type_ast/ast.py`：最终 Type AST 及规范化构造；
-- `hcsp_typechecker/data_structures/runtime_context/`：Gamma、Theta 与全局参数；
-- `hcsp_typechecker/data_structures/type_construction/model.py`：Configuration、构造请求和审计报告。
+- `hcsp_typechecker/data_structures/runtime_context/model.py`：Gamma、Theta、全局参数与 Configuration；
+- `hcsp_typechecker/backend/type_constructor/model.py`：TypeConstructor 的构造请求和报告名称；
+- `hcsp_typechecker/backend/common/model.py`：Constructor/Checker 共用的证明义务、诊断与规则证据。
 
 ---
 

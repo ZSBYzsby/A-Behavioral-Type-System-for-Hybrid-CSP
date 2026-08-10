@@ -4,7 +4,7 @@
 交给本模块。后端将
 公式写入临时 ``.kyx`` archive，以独立进程运行官方 ``keymaerax.jar``，再把
 命令行状态映射为项目的三值
-:class:`~hcsp_typechecker.data_structures.type_construction.model.Verdict`：
+:class:`~hcsp_typechecker.backend.common.model.Verdict`：
 
 * ``PROVED`` -> ``TRUE``；
 * ``DISPROVED`` 或带可信反例的 ``UNFINISHED (CEX)`` -> ``FALSE``；
@@ -33,7 +33,7 @@ from typing import Literal
 import uuid
 
 from .dl import DLFormula, UntranslatedDLFormula
-from ...data_structures.type_construction.model import (
+from .model import (
     DLCheckResult,
     ProofObligation,
     Verdict,
@@ -42,7 +42,7 @@ from ...data_structures.type_construction.model import (
 
 # 功能：解析命令行工具常见的环境变量布尔写法。
 # 配置关系：非法或缺失文本采用调用方给出的默认值，避免可选的证明后端
-#           因一项展示/产物设置阻止核心 TypeConstructor 启动。
+#           因一项展示/产物设置阻止核心类型业务启动。
 def _environment_flag(name: str, *, default: bool = False) -> bool:
     """读取一个环境变量布尔值，并对未知文本采用保守默认值。"""
 
@@ -80,7 +80,7 @@ def resolve_java_executable(config: "KeYmaeraXConfig") -> str | None:
     return shutil.which("java")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class KeYmaeraXConfig:
     """KeYmaera X 本地进程的可复现配置。
 
@@ -181,7 +181,7 @@ class KeYmaeraXConfig:
 class KeYmaeraXBackend:
     """把一条 dL 证明义务交给独立 KeYmaera X 进程。"""
 
-    def __init__(self, config: KeYmaeraXConfig | None = None):
+    def __init__(self, config: KeYmaeraXConfig | None = None) -> None:
         """保存显式配置，或从当前环境建立延迟检查的默认配置。"""
 
         self.config = (

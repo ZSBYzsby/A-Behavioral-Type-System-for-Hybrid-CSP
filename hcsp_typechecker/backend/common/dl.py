@@ -3,9 +3,9 @@
 本模块刻意不定义新的 HCSP 语法，也不修改
 :mod:`hcsp_typechecker.data_structures.process_ast.ast` 或
 :mod:`hcsp_typechecker.data_structures.type_ast.ast`。
-它处于 TypeConstructor 和外部证明器之间，只负责两件事：
+它处于共享规则引擎和外部证明器之间，只负责两件事：
 
-* 把类型构造器已经建立的 Z3 符号状态翻译成 differential dynamic logic (dL)；
+* 把规则引擎已经建立的 Z3 符号状态翻译成 differential dynamic logic (dL)；
 * 把一条 dL 公式包装成 KeYmaera X 接受的 ``.kyx`` archive。
 
 传入本模块的入口路径、ODE 方程、演化域、安全性质和时延都已经由类型规则
@@ -47,7 +47,7 @@ class DLTranslationError(ValueError):
     """
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DLFormula:
     """一条已经完成变量重命名、可交给 KeYmaera X 的 dL 公式。
 
@@ -112,12 +112,12 @@ class DLFormula:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UntranslatedDLFormula:
     """保留无法可靠翻译的 dL 目标及其原因。
 
     这种对象仍会进入
-    :class:`~hcsp_typechecker.data_structures.type_construction.model.ProofObligation`，使审计者
+    :class:`~hcsp_typechecker.backend.common.model.ProofObligation`，使审计者
     能看到失败发生在哪一类公式；KeYmaera X 后端会保守返回 ``UNKNOWN``。
     """
 

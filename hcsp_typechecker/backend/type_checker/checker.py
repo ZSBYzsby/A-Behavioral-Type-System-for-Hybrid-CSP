@@ -56,9 +56,7 @@ from ...data_structures.type_ast.render import (
     format_configuration_type,
     format_process_type,
 )
-from ...data_structures.type_checking import TypeCheckingReport, TypeCheckingRequest
-from ...data_structures.type_construction import Verdict
-from ...data_structures.type_construction.model import (
+from ...data_structures.runtime_context import (
     BasicType,
     Configuration,
     GammaType,
@@ -66,6 +64,7 @@ from ...data_structures.type_construction.model import (
     normalize_gamma_type,
     normalize_type,
 )
+from ..common.model import Verdict
 from ..common.rule_engine import (
     Table2RuleEngine,
     _ChildJudgmentPremise,
@@ -77,9 +76,10 @@ from ..common.rule_engine import (
     _SystemJudgment,
 )
 from ..common.logic import ExpressionError, ExpressionTranslator, conjunction
+from .model import TypeCheckingReport, TypeCheckingRequest
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ExpectedChild:
     """一个子 judgment 及其必须匹配的用户 Type 和递归 alpha 环境。"""
 

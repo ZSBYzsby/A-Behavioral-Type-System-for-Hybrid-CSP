@@ -36,16 +36,16 @@ from ...data_structures.process_ast.expressions import (
     ensure_expr,
     ensure_variable,
 )
-from ...data_structures.type_construction.model import (
+from ...data_structures.runtime_context import (
     BasicType,
     ChannelType,
     GammaType,
-    Verdict,
     gamma_value_type,
     is_subtype,
     normalize_gamma_type,
     normalize_type,
 )
+from .model import Verdict
 
 try:
     import z3  # type: ignore
@@ -54,7 +54,7 @@ except ImportError:  # pragma: no cover - exercised when dependency is absent
     z3 = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ExprResult:
     """表达式翻译结果：Z3 项、静态类型及求值有定义所需的条件。
 
@@ -105,7 +105,7 @@ class ExpressionTranslator:
         symbols: MutableMapping[str, Any] | None = None,
         *,
         name_prefix: str = "",
-    ):
+    ) -> None:
         """建立标量值环境，并忽略不具有表达式值的 ODE 向量声明。"""
         invalid_names = {
             repr(name) for name in gamma if not is_hcsp_identifier(name)
@@ -593,7 +593,7 @@ class ExpressionTranslator:
 
     @staticmethod
     def _type_of_z3(value: Any) -> BasicType:
-        """从 Z3 sort 反向恢复 TypeConstructor 使用的值类型。"""
+        """从 Z3 sort 反向恢复两个业务后端共用的值类型。"""
         if z3.is_bool(value):
             return BasicType.BOOL
         if z3.is_int(value):
@@ -606,7 +606,7 @@ class ExpressionTranslator:
 class Z3ProofEngine:
     """用“否定式不可满足”判定一阶逻辑公式是否有效。"""
 
-    def __init__(self, timeout_ms: int = 5_000):
+    def __init__(self, timeout_ms: int = 5_000) -> None:
         """设置每个证明义务独立使用的求解超时。"""
         self.timeout_ms = int(timeout_ms)
 

@@ -10,7 +10,7 @@ TypeChecker 接收一份依次包含 Gamma、可选 Parameters、Theta、批注 
   规则展开、符号状态和证明调度；
 - `hcsp_typechecker/backend/common/logic.py`、`dl.py`、`keymaerax.py`：FOL/dL
   公式与证明后端；
-- `hcsp_typechecker/data_structures/type_checking/`：检查请求和检查报告。
+- `hcsp_typechecker/backend/type_checker/model.py`：检查请求和检查报告；
 
 TypeChecker 不导入 `backend/type_constructor`；两个业务后端只在 common 层汇合。
 

@@ -76,19 +76,23 @@ from .data_structures.type_ast.ast import (
     make_delay_type,
     types_equivalent,
 )
-from .data_structures.type_construction.model import (
+from .data_structures.runtime_context import (
     BasicType,
     ChannelType,
-    TypeConstructionReport,
     Configuration,
     ContinuousType,
-    DLCheckResult,
-    Diagnostic,
-    DerivationStep,
     ParameterEnvironment,
+)
+from .backend.common.model import (
+    DLCheckResult,
+    DerivationStep,
+    Diagnostic,
     ProofObligation,
-    TypeConstructionRequest,
     Verdict,
+)
+from .backend.type_constructor.model import (
+    TypeConstructionReport,
+    TypeConstructionRequest,
 )
 
 

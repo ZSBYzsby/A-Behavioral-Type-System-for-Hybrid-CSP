@@ -1,3 +1,21 @@
-"""TypeConstructor 与 TypeChecker 共用的 Table 2 规则和证明基础设施。"""
+"""TypeConstructor 与 TypeChecker 共用的规则、证明和执行证据。"""
 
-__all__: list[str] = []
+from .model import (
+    DLCheckResult,
+    DLChecker,
+    DerivationStep,
+    Diagnostic,
+    ProofObligation,
+    RuleDerivationReport,
+    Verdict,
+)
+
+__all__ = [
+    "DLCheckResult",
+    "DLChecker",
+    "DerivationStep",
+    "Diagnostic",
+    "ProofObligation",
+    "RuleDerivationReport",
+    "Verdict",
+]

@@ -2,9 +2,9 @@ r"""TypeConstructor 与 TypeChecker 共用的 Table 2 规则引擎。
 
 TypeConstructor 使用的核心数据流如下：
 
-``TypeConstructionRequest -> ConclusionJudgment -> RuleExpansion(premises, conclude)
+``业务请求 -> ConclusionJudgment -> RuleExpansion(premises, conclude)
 -> 按顺序立即判定 FormulaPremise + 递归求解 ChildJudgmentPremise
--> 由 conclude 组合候选类型 -> 汇总三值 TypeConstructionReport``。
+-> 由业务后端消费 premise 与 conclude -> 汇总共享规则证据``。
 
 推导与证明现在是完全顺序的：
 
@@ -112,30 +112,28 @@ from ...data_structures.type_ast.render import (
     format_configuration_type,
     format_process_type,
 )
-from ...data_structures.type_construction.model import (
+from ...data_structures.runtime_context import (
     BasicType,
     ChannelType,
-    TypeConstructionReport,
     Configuration,
     ContinuousType,
+    GammaType,
+    gamma_value_type,
+    is_subtype,
+    normalize_gamma_type,
+)
+from .model import (
     DLChecker,
     DLCheckResult,
     Diagnostic,
     DerivationStep,
-    ParameterEnvironment,
     ProofObligation,
-    TypeConstructionRequest,
+    RuleDerivationReport,
     Verdict,
-    GammaType,
-    gamma_value_type,
-    is_subtype,
-    normalize_channel_type,
-    normalize_gamma_type,
-    normalize_type,
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class _RecBinding:
     """源过程变量与新鲜行为类型变量之间的递归绑定。"""
 
@@ -144,7 +142,7 @@ class _RecBinding:
     invariant: Any
 
 
-@dataclass
+@dataclass(slots=True)
 class _Context:
     """一次控制流分支上的可变推导上下文。
 
@@ -181,7 +179,7 @@ class _Context:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _LazyAssignmentPostState:
     """T-Assign 为后继 judgment 确定性构造的惰性最强后置状态。
 
@@ -201,7 +199,7 @@ class _LazyAssignmentPostState:
     post_context: _Context
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ODEDLTerms:
     """一条 ODE 在入口符号快照下生成 dL 公式所需的 Z3 中间项。
 
@@ -234,7 +232,7 @@ class _ODEPostAssumption(str, Enum):
     NOT_DOMAIN_AND_SAFETY = "not-domain-and-safety"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ProofRequest:
     """一条将在当前推导位置立即判定的 Table 2 公式前提。
 
@@ -254,7 +252,7 @@ class _ProofRequest:
 # 显式推导树中“横线下方”的四类结论 judgment。它们只保存应用规则所需的
 # 输入，不执行任何推导；相应 ``rule_t_*`` 方法负责把它们展开成 premises。
 # --------------------------------------------------------------------------
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ConfigurationJudgment:
     """判断一个部分状态与系统组成的配置 ``<sigma, S>`` 的类型。"""
 
@@ -263,7 +261,7 @@ class _ConfigurationJudgment:
     context: _Context
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _SystemJudgment:
     """判断系统层 ``S ::= P | S || S'`` 的配置类型。"""
 
@@ -271,7 +269,7 @@ class _SystemJudgment:
     context: _Context
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ProcessJudgment:
     r"""判断规范化顺序节点列表及 terminal continuation 的过程类型。
 
@@ -285,7 +283,7 @@ class _ProcessJudgment:
     terminal: ProcessType
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _EventJudgment:
     """判断 ODE 通信中断反应 ``E`` 所产生的 angelic type。"""
 
@@ -308,14 +306,14 @@ _ChildJudgment = (
 # FormulaPremise 由统一求解器当场判定；ChildJudgmentPremise 由同一求解器递归
 # 展开。``conclude`` 只接收子 judgment 的结果，公式 premise 没有类型结果。
 # --------------------------------------------------------------------------
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _FormulaPremise:
     """一条按推导顺序立即判定的 state、FOL 或 dL 逻辑前提。"""
 
     request: _ProofRequest
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ChildJudgmentPremise:
     """一条必须递归构造候选类型的子 judgment 前提。"""
 
@@ -325,7 +323,7 @@ class _ChildJudgmentPremise:
 _Premise = _FormulaPremise | _ChildJudgmentPremise
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _RuleExpansion:
     """某条 Table 2 规则的 premises 与由子结论组合父结论的方法。
 
@@ -340,7 +338,7 @@ class _RuleExpansion:
     assignment_post_state: _LazyAssignmentPostState | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _ConstructionFailure:
     r"""表示某个进程片段无法按 Table 2 构造行为类型。
 
@@ -360,9 +358,10 @@ _ConfigurationConstructionResult = ConfigurationType | _ConstructionFailure
 class Table2RuleEngine:
     """封装 Constructor 与 Checker 共用的规则展开、符号执行和证明操作。
 
-    TypeConstructor 通过受保护的 ``_construct_type`` 使用构造流程；TypeChecker
-    则只复用环境准备、``rule_t_*`` 展开和证明功能。ODE 的 safety/delay 直接来自
-    AST 中唯一的 ``ODEAnnotation``，动态逻辑义务可委托 ``dl_checker`` 外部后端。
+    本类只提供 ``rule_t_*`` 展开、符号状态和证明工具，不实现某个业务入口。
+    TypeConstructor 组合规则子结论，TypeChecker 消费用户给定 Type 子树。ODE 的
+    safety/delay 直接来自 AST 中唯一的 ``ODEAnnotation``，动态逻辑义务可委托
+    ``dl_checker`` 外部后端。
     """
 
     def __init__(
@@ -371,7 +370,7 @@ class Table2RuleEngine:
         dl_checker: DLChecker | None = None,
         keymaerax_config: KeYmaeraXConfig | None = None,
         z3_timeout_ms: int = 5_000,
-    ):
+    ) -> None:
         """配置 KeYmaera X/自定义 dL 后端和每个 Z3 义务的超时。
 
         ``dl_checker`` 是测试或特殊部署使用的注入点；未提供时自动建立
@@ -393,198 +392,6 @@ class Table2RuleEngine:
         self.steps: list[DerivationStep] = []
         self._fresh_counter = 0
         self._type_var_counter = 0
-
-    def _construct_type(
-        self,
-        request: TypeConstructionRequest,
-    ) -> TypeConstructionReport:
-        """执行一次完整类型构造并返回含全部证据的三值报告。
-
-        普通建模/类型错误会转换为 ``Diagnostic(FALSE)``。``FALSE`` 前提会
-        否证当前规则并停止相应推导分支；``UNKNOWN`` 证明结果会被完整记录，
-        但不会阻止后续规则继续构造类型。因而报告可能同时包含非空
-        ``constructed_type`` 和 ``UNKNOWN`` verdict：这表示“推导完成，但至少一条
-        必要公式尚未证明”，该类型不能作为可信结论使用。
-        """
-        # 同一规则引擎实例可复用，但报告和新鲜名计数必须按请求隔离。
-        self.obligations = []
-        self.diagnostics = []
-        self.steps = []
-        self._fresh_counter = 0
-        self._type_var_counter = 0
-
-        # 在进入规则前集中规范化 Gamma/Theta，避免每条规则接受不同输入别名。
-        try:
-            invalid_gamma_names = {
-                repr(name)
-                for name in request.gamma
-                if not is_hcsp_identifier(name)
-            }
-            if invalid_gamma_names:
-                raise ValueError(
-                    "Invalid Gamma names: "
-                    + ", ".join(sorted(invalid_gamma_names))
-                )
-            gamma = {
-                name: normalize_gamma_type(value, subject="Gamma entry")
-                for name, value in request.gamma.items()
-            }
-            self._validate_continuous_vectors(gamma)
-            invalid_parameter_names = {
-                repr(name)
-                for name in request.parameters.declarations
-                if not is_hcsp_identifier(name)
-            }
-            if invalid_parameter_names:
-                raise ValueError(
-                    "Invalid parameter names: "
-                    + ", ".join(sorted(invalid_parameter_names))
-                )
-            parameters = {
-                name: normalize_type(
-                    value,
-                    subject="Parameter declaration",
-                )
-                for name, value in request.parameters.declarations.items()
-            }
-            shared_names = set(gamma) & set(parameters)
-            if shared_names:
-                raise ValueError(
-                    "Gamma and the shared parameter environment overlap: "
-                    + ", ".join(sorted(shared_names))
-                )
-            theta = {
-                self._channel_name(name): normalize_channel_type(value)
-                for name, value in request.theta.items()
-            }
-        except (TypeError, ValueError) as exc:
-            self._diagnose(Verdict.FALSE, f"Invalid typing environment: {exc}", "environment")
-            return self._report(None, ())
-
-        parameter_symbols: dict[str, Any] = {}
-        parameter_translator = ExpressionTranslator(
-            parameters,
-            parameter_symbols,
-            name_prefix="parameter__",
-        )
-        try:
-            for name, value_type in parameters.items():
-                parameter_translator.symbol(name, value_type)
-            parameter_constraint_result = parameter_translator.boolean_result(
-                request.parameters.constraint
-            )
-            parameter_condition = conjunction(
-                self._defined_term(parameter_constraint_result),
-                *(
-                    constraint
-                    for name, value_type in parameters.items()
-                    for constraint in self._type_domain_constraints(
-                        value_type,
-                        parameter_symbols[name],
-                    )
-                ),
-            )
-        except ExpressionError as exc:
-            self._diagnose(
-                Verdict.FALSE,
-                f"Invalid shared parameter constraint: {exc}",
-                "parameters",
-            )
-            return self._report(None, ())
-
-        parameter_verdict, parameter_detail = self.proof_engine.satisfiable(
-            parameter_condition
-        )
-        if parameter_verdict is Verdict.FALSE:
-            self._diagnose(
-                parameter_verdict,
-                "Shared parameter constraint must be satisfiable: "
-                + parameter_detail,
-                "parameters",
-            )
-            return self._report(None, ())
-        if parameter_verdict is Verdict.UNKNOWN:
-            # 不可满足会让所有后续蕴含式真空成立，必须立即拒绝；求解器未能决定
-            # 可满足性却不等于已经发现矛盾。保留符号约束继续推导，并让最终
-            # UNKNOWN 诊断明确降低候选类型的可信度。
-            self._diagnose(
-                Verdict.UNKNOWN,
-                "Shared parameter constraint satisfiability is unknown; "
-                "type construction continues, but the constructed type is untrusted: "
-                + parameter_detail,
-                "parameters",
-            )
-
-        environment_step = self._start_step(
-            "environment",
-            "judgment",
-            "规范化类型环境 Gamma 与 Theta",
-            gamma=gamma,
-            parameters=parameters,
-            parameter_constraint=request.parameters.constraint,
-            theta=theta,
-            path=request.path_condition,
-        )
-        self._finish_step(
-            environment_step,
-            (
-                "环境规范化完成；参数约束可满足性未决"
-                if parameter_verdict is Verdict.UNKNOWN
-                else "环境规范化成功"
-            ),
-            (
-                "后续规则统一使用这里展示的基础类型和通道 refinement type。"
-                + (
-                    " 参数约束未被判定为不可满足，因此继续符号推导；"
-                    "最终类型保持 UNKNOWN、不可信。"
-                    if parameter_verdict is Verdict.UNKNOWN
-                    else ""
-                )
-            ),
-        )
-
-        if not request.configurations:
-            self._diagnose(
-                Verdict.FALSE,
-                "A construction request needs at least one configuration",
-                "T-||",
-            )
-            return self._report(None, ())
-
-        # 即使只有一个配置也经 T-|| 入口处理，以保持 Gamma 分区和 T-sigma 一致。
-        parallel_expansion = self.rule_t_parallel(
-            request.configurations,
-            gamma,
-            theta,
-            request.path_condition,
-            parameters,
-            parameter_symbols,
-            parameter_condition,
-            request.parameters.constraint,
-        )
-        raw_constructed_component_types = self._solve_rule_expansion(
-            parallel_expansion
-        )
-        # 内部失败状态绝不暴露为行为类型；公开报告用 None 保留失败分量的位置。
-        constructed_component_types: tuple[ConfigurationType | None, ...] = tuple(
-            None if isinstance(item, _ConstructionFailure) else item
-            for item in raw_constructed_component_types
-        )
-        successful_components = tuple(
-            item for item in constructed_component_types if item is not None
-        )
-        constructed: ConfigurationType | None
-        if (
-            not constructed_component_types
-            or len(successful_components) != len(constructed_component_types)
-        ):
-            constructed = None
-        elif len(successful_components) == 1:
-            constructed = successful_components[0]
-        else:
-            constructed = ParallelType(successful_components)
-
-        return self._report(constructed, constructed_component_types)
 
     # ------------------------------------------------------------------
     # Configuration and parallel rules
@@ -753,7 +560,7 @@ class Table2RuleEngine:
 
         # ``path_condition`` 是默认路径，不是第二套可与局部路径并存的结论。
         # 全部局部路径存在时，外层 true 表示“由局部合取生成”；部分覆盖或同时
-        # 给出非平凡全局路径都会使同一个 TypeConstructionRequest 含义不唯一。
+        # 给出非平凡全局路径都会使同一份完整业务请求的含义不唯一。
         local_path_flags = tuple(
             configuration.path_condition is not None
             for configuration in configurations
@@ -3269,13 +3076,13 @@ class Table2RuleEngine:
         self,
         constructed: ConfigurationType | None,
         constructed_component_types: tuple[ConfigurationType | None, ...],
-    ) -> TypeConstructionReport:
+    ) -> RuleDerivationReport:
         """合并义务与诊断的三值结果，构造不可变最终报告。"""
         verdict = Verdict.combine(
             [item.verdict for item in self.obligations]
             + [item.verdict for item in self.diagnostics]
         )
-        return TypeConstructionReport(
+        return RuleDerivationReport(
             verdict=verdict,
             constructed_type=constructed,
             constructed_component_types=constructed_component_types,

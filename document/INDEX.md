@@ -14,6 +14,7 @@
 - [TypeConstructor：Process AST 到 Type AST 的真实构造过程](TYPE_CONSTRUCTOR.md)
 - [TypeChecker：检查用户给定 Type 的规则递归过程](TYPE_CHECKER.md)
 - [完整项目功能参考](PROJECT_FUNCTION_REFERENCE.md)
+- [后端代码风格约定](BACKEND_CODE_STYLE.md)
 
 ## 文档边界
 
