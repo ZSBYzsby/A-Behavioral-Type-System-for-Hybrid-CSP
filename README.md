@@ -29,8 +29,9 @@ Type AST，但该候选会被明确标为未验证、不可信。使用
 ## 稳定用户接口
 
 包根稳定白名单只有 `HCSPInputError`、`HCSPTypeConstructionError`、
-`HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`、`OutputMode`、
-`TypeConstructionErrorKind`、`TypeCheckingErrorKind`、`HCSPErrorDetail`、
+`HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`、
+`HCSPTypeTransitionGraphError`、`OutputMode`、`TypeConstructionErrorKind`、
+`TypeCheckingErrorKind`、`TypeTransitionGraphErrorKind`、`HCSPErrorDetail`、
 `TypeAST`、`TypeTransitionGraph`、`construct_hcsp_type`、`check_hcsp_type` 和
 `build_type_transition_graph`。
 
@@ -135,7 +136,9 @@ Type 已被完整消费，`False` 表示明确发现结构不匹配，`None` 表
 
 ```python
 from hcsp_typechecker import (
+    HCSPTypeTransitionGraphError,
     TypeTransitionGraph,
+    TypeTransitionGraphErrorKind,
     build_type_transition_graph,
     construct_hcsp_type,
 )
@@ -144,16 +147,37 @@ type_ast = construct_hcsp_type(source)
 graph = build_type_transition_graph(type_ast, output="full")
 
 assert isinstance(graph, TypeTransitionGraph)
-print(len(graph.states), len(graph.transitions), graph.complete)
+print(len(graph.states), len(graph.transitions))
+```
+
+需要由程序区分第三个接口的失败原因时，可以捕获统一异常：
+
+```python
+try:
+    graph = build_type_transition_graph(
+        type_ast,
+        max_states=1000,
+        max_transitions=5000,
+        output="result",
+    )
+except HCSPTypeTransitionGraphError as error:
+    if error.kind is TypeTransitionGraphErrorKind.SIZE_LIMIT:
+        print(error.limit_name, error.limit)
 ```
 
 该接口先把已有 Type AST 单向转换为操作语义专用的规范化 Type AST，再以初态为
-根穷尽 Table 3 的全部可达非确定性后继。规范化会消除并行排列和空单位元差异，
+根穷尽基于 Table 3 的关键-deadline约化关系。规范化会消除并行排列和空单位元差异，
 把内部选择按结合/交换/幂等律展平排序去重，把外部选择按交换/幂等律排序去重，并
 使用 De Bruijn index 消除递归绑定变量改名差异。图判重时还会把递归绑定转换为
 有限循环项图并做双模拟最小化，所以 `mu t.T` 与任意有限次展开不会形成重复状态。
 Table 3 直接作用于最小循环项图；每个图结点的规范化 AST 仅由该项图确定性生成，
 用于输出而不参与转移计算。项目不提供转回原 Type AST 的接口。
+
+返回的 `TypeTransitionGraph` 包含连续编号的 `states`、去重后的 `transitions` 和
+`initial_state`。每个状态携带可读的规范 Type 展示代表；每条边携带 `tau` 或
+`time(d, ready=R)` 标签。若不同规则实例产生同一源、标签和目标，边只保留一条，
+但其 `derivations` 会保存所有不同证据。可用 `graph.outgoing(state_id)` 按稳定顺序
+取得一个状态的全部出边。
 
 规范状态输出沿用 `parallel`、`empty`、`internal`、`delay`、`forever` 和
 `angelic`；根部增加 `normalized` 标记。由于规范内部选择已经展平，分支不再套
@@ -162,7 +186,7 @@ Table 3 直接作用于最小循环项图；每个图结点的规范化 AST 仅�
 parser。语法见
 [规范化 Type AST 输出格式](document/NORMALIZED_TYPE_OUTPUT_SYNTAX.md)。
 
-`build_type_transition_graph(..., output="result")` 输出图规模、完整性和初始规范
+`build_type_transition_graph(..., output="result")` 输出图规模和初始规范
 类型；`output="full"` 输出全部规范状态、边标签及 Table 3 规则证据。两个内部
 formatter 不从包根公开。完整格式见
 [状态迁移图输出语法](document/TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)。
@@ -172,9 +196,11 @@ formatter 不从包根公开。完整格式见
 并行保留重复分量。相同源、标签和目标由多种规则实例得到时，图只保存一条边，
 但在 `derivations` 中保存全部不同推导证据。
 
-`max_states` 和 `max_transitions` 可限制状态爆炸。触及上限时接口返回部分图，且
-`graph.complete` 为 `False`，`graph.truncation_reason` 明确说明截断原因。当前接口
-只生成图结构，不执行死锁、活锁或其他图上性质分析。详细结构见
+`max_states` 和 `max_transitions` 可限制状态爆炸。第三个接口使用
+`HCSPTypeTransitionGraphError` 统一报告错误；其 `kind` 可区分 `invalid-type`、
+`invalid-limit`、`normalization` 与 `size-limit`，`phase` 指明失败阶段。触及任一上限
+时不会返回没有分析意义的部分图。当前接口只生成图结构，不执行死锁、活锁或其他
+图上性质分析。详细结构见
 [Type 操作语义与状态图](document/TYPE_OPERATIONAL_SEMANTICS.md)。
 
 常用可选参数：
@@ -190,14 +216,14 @@ formatter 不从包根公开。完整格式见
 
 ### 输出模式
 
-TypeConstructor 和 TypeChecker 两个源码接口都支持：
+三个稳定业务接口都支持同一组输出模式：
 
 - `output="none"`：默认，不打印；
-- `output="result"`：打印最终结论；成功时显示可信类型，`unknown` 且构造完整时
-  显示完整候选类型及“不可信”标记，其他失败显示原因和部分进度；
-- `output="full"`：打印原始输入、规则轨迹、FOL/dL 公式、每条证明器结论、
-  未决义务和最终可信性；Constructor 还打印环境摘要与内部 AST 已完成但未暴露的
-  说明。两个接口都不会打印或返回 Process AST 对象/repr。
+- `output="result"`：Constructor/Checker 打印最终结论；图接口打印图规模与初始
+  规范 Type。构造 `unknown` 且类型完整时显示候选 Type 及“不可信”标记；
+- `output="full"`：Constructor/Checker 打印原始输入、规则轨迹、FOL/dL 公式和
+  最终可信性；图接口打印全部规范状态、边标签和 Table 3 推导证据。Constructor
+  与 Checker 都不会打印或返回 Process AST 对象/repr。
 
 凡日志中实际展示 Type 的位置，都统一使用
 [用户 Type 输入语法](document/TYPE_INPUT_SYNTAX.md) 的规范文本，例如
@@ -206,7 +232,7 @@ TypeConstructor 和 TypeChecker 两个源码接口都支持：
 单行；并行、内部选择和 Angelic 分支块会自动换行，并统一使用四个空格缩进。
 
 也可以使用 `OutputMode.NONE/RESULT/FULL`。`stream=` 可把文本写入文件或
-`io.StringIO`；输出模式只改变展示，不改变解析、推导、证明或异常语义。发生
+`io.StringIO`；输出模式只改变展示，不改变解析、推导、证明、图遍历或异常语义。发生
 `false` 时，`full` 显示实际停止点以前的轨迹；发生 `unknown` 时，它显示继续推导
 得到的全部轨迹、完整候选类型（如能形成）以及仍待证明的公式。`none` 不打印，
 但异常对象仍提供相应格式化信息。
@@ -319,6 +345,8 @@ Type AST；**TypeChecker** 在这些输入后再接收一个用户 Type，以该
 - `python type_demo.py`：把 `demo.py` 第六个复杂 ODE 先交给 TypeConstructor，
   再把生成的缩进 Type 源码交回 TypeChecker，验证完整往返；
 - `python new_demo.py`：分别演示 TypeChecker 接受正确 Type 和拒绝错误 Type；
+- `python graph_demo.py`：从几个并行、递归和多 deadline Type AST 构造完整
+  Table 3 状态图；
 - `python -m unittest discover -s tests -p "test_*.py"`：运行全部自动化测试；
 - `python scripts/check_repository.py`：运行隐私扫描、环境检查和全部测试。
 

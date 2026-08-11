@@ -1,8 +1,12 @@
-r"""Table 3 状态转移图的不可变领域数据结构。
+r"""Table 3 状态转移图的领域数据结构。
 
 图边分为无时间消耗的 ``SilentTransitionLabel`` 和携带精确时长、ready set 的
 ``TimedTransitionLabel``。相同源、标签和目标可能由多个规则实例推出，因而一条边
-保存一组 ``TransitionDerivation``，既压缩重复图边又不丢失推导证据。
+保存一组 ``TransitionDerivation``，既压缩重复图边又不丢失推导证据。状态只保存
+连续编号和规范 Type 展示代表；等递归项图状态键属于后端遍历过程，不泄漏进结果。
+
+本模块验证标签、节点编号和边端点等局部结构，不负责重新执行 Table 3 或证明整张图
+确为完整可达闭包；这项保证由唯一公共构造入口和操作语义后端共同提供。
 """
 
 from __future__ import annotations
@@ -109,7 +113,13 @@ class Table3Rule(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class TransitionDerivation:
-    """一条状态图边的一次具体 Table 3 规则应用证据。"""
+    """一条状态图边的一次具体 Table 3 规则应用证据。
+
+    ``component_indices`` 与 ``branch_indices`` 均引用该边源状态所展示的规范
+    Type AST，而不是后端循环项图的内部结点或子边编号。通信证据中的两个元组
+    按相同位置配对：第 ``i`` 个分量采用第 ``i`` 个中断分支。``premises`` 保存
+    ``P-parallel`` 等组合规则的直接子证据，不额外制造递归展开边。
+    """
 
     rule: Table3Rule
     component_indices: tuple[int, ...] = ()
@@ -174,16 +184,18 @@ class TypeTransition:
 
 @dataclass(frozen=True, slots=True)
 class TypeTransitionGraph:
-    """按等递归状态取商后穷尽可达 Table 3 转移的不可变有向图。"""
+    """按等递归状态取商后的完整关键-deadline约化有向图。
+
+    ``states`` 必须按 ``0..n-1`` 连续编号，``initial_state`` 和每条边端点必须引用
+    其中的状态。正常公共构造保证 ``transitions`` 是从初态出发的完整可达闭包。
+    """
 
     initial_state: int
     states: tuple[TypeState, ...]
     transitions: tuple[TypeTransition, ...]
-    complete: bool = True
-    truncation_reason: str | None = None
 
     def __post_init__(self) -> None:
-        """验证连续状态编号、合法边端点和完整性说明的一致性。"""
+        """验证连续状态编号和合法边端点。"""
 
         if not self.states:
             raise ValueError("Type transition graph requires at least one state")
@@ -198,13 +210,9 @@ class TypeTransitionGraph:
             for edge in self.transitions
         ):
             raise ValueError("Type transition refers to an unknown state")
-        if self.complete and self.truncation_reason is not None:
-            raise ValueError("A complete graph cannot have a truncation reason")
-        if not self.complete and not self.truncation_reason:
-            raise ValueError("A truncated graph requires a truncation reason")
 
     def outgoing(self, state_id: int) -> tuple[TypeTransition, ...]:
-        """按图内稳定顺序返回指定状态的全部出边。"""
+        """按图内稳定顺序返回指定状态的全部出边；未知编号抛出 ``KeyError``。"""
 
         if state_id < 0 or state_id >= len(self.states):
             raise KeyError(f"Unknown type-state id: {state_id}")

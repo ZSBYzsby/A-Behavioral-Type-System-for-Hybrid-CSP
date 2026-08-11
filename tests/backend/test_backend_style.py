@@ -3,8 +3,8 @@
 测试内容：检查后端行宽、future annotations、通配符导入、dataclass slots 和
 __init__ 返回标注。
 
-论文对应：本文件不改变 Table 2 数学规则，只保证 Constructor、Checker 与共享
-证明层持续采用一致、可审计的实现风格。
+论文对应：本文件不改变 Table 2/3 数学规则，只保证 Constructor、Checker、共享
+证明层与 Type 操作语义持续采用一致、可审计的实现风格。
 """
 
 from __future__ import annotations

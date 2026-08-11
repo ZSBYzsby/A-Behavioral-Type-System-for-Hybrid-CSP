@@ -2,7 +2,7 @@
 
 本子包把不可变 ``TypeTransitionGraph`` 渲染为状态、边、标签和规则证据清晰分区的
 文本。节点类型复用 ``normalized_type_syntax``；输出不作为用户输入，因而有意不
-提供 parser。
+提供 parser。formatter 只由第三个公共接口的 ``full`` 模式调用，不参与规则执行。
 """
 
 from .serializer import format_type_transition_graph

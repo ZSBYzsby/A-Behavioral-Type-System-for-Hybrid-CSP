@@ -3,14 +3,15 @@ r"""把规范 Type 转成有限正规项图，并计算等递归状态键。
 ``mu`` 与 De Bruijn 变量在构图时解析成循环边；随后用有限图上的双模拟分区
 求无限正规树等价类。内部/外部选择在递归等价暴露出新的嵌套或重复分支后再次
 按既有代数律展平、去重，配置根则删除 Empty 单位元、排序并保留并行重数。模块还
-能为最小项图确定性生成仅供状态图展示的规范 Type AST 代表。
+能为最小项图确定性生成仅供状态图展示的规范 Type AST 代表，并记录项图根/子边
+到该展示代表可见位置的映射，供 Table 3 推导证据使用。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Iterable
+from typing import Any, Callable, Iterable
 
 from ...data_structures.normalized_type_ast import (
     NormalizedAngelicType,
@@ -29,6 +30,8 @@ from ...data_structures.normalized_type_ast import (
     NormalizedProcessType,
     make_normalized_external_choice,
     make_normalized_internal_choice,
+    normalized_angelic_key,
+    normalized_process_key,
 )
 from ...data_structures.regular_type_term_graph import (
     CanonicalRegularTypeNode,
@@ -46,6 +49,21 @@ class _NodeSpec:
     kind: RegularTypeNodeKind
     payload: str | Fraction | None
     children: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _StatePresentation:
+    """项图状态的规范 AST 展示以及语义位置到展示位置的映射。
+
+    项图按循环图的稳定结点编号排列根和选择子边；规范 AST 则按最终重建出的
+    ``normalized_*_key`` 排序。递归回边会在展示时重新引入 ``mu``，所以两种顺序
+    不能假定相同。映射以“出现位置”而不是结点编号为键，从而保留重复并行分量。
+    """
+
+    type_ast: NormalizedConfigurationType
+    component_indices: tuple[int, ...]
+    internal_branch_indices: tuple[tuple[int, ...], ...]
+    interrupt_branch_indices: tuple[tuple[int, ...], ...]
 
 
 class _TermGraphBuilder:
@@ -210,7 +228,11 @@ class _TermGraphBuilder:
 def build_regular_type_term_graph(
     value: NormalizedConfigurationType,
 ) -> RegularTypeTermGraph:
-    """把闭合规范配置转换为不含 ``mu``/变量结点的有限循环项图。"""
+    """把闭合规范配置转换为不含 ``mu``/变量节点的有限循环项图。
+
+    每个递归 binder 先建立占位符，受绑定 De Bruijn 引用再连接到对应占位符；
+    guardedness 保证占位符最终可解析到一个真实 Type 构造。并行分量重数予以保留。
+    """
 
     if not isinstance(value, NormalizedConfigurationType):
         raise TypeError("Regular type conversion requires a normalized configuration")
@@ -222,7 +244,10 @@ def build_regular_type_term_graph(
 def equi_recursive_state_key(
     value: NormalizedConfigurationType,
 ) -> EquiRecursiveStateKey:
-    """返回忽略有限 ``mu`` 展开/折叠差异的稳定、可哈希状态键。"""
+    """返回忽略有限 ``mu`` 展开/折叠差异的稳定、可哈希状态键。
+
+    该键而非展示 AST 是状态图判重和 Table 3 一步推导使用的状态本体。
+    """
 
     return minimize_regular_type_term_graph(build_regular_type_term_graph(value))
 
@@ -239,7 +264,11 @@ def equi_recursive_equivalent(
 def minimize_regular_type_term_graph(
     graph: RegularTypeTermGraph,
 ) -> EquiRecursiveStateKey:
-    """按最大双模拟最小化项图，并对最终商图执行稳定编号。"""
+    """按最大双模拟最小化项图，并对最终商图执行稳定编号。
+
+    每轮先按节点标签和子类颜色求商，再重新展平、排序和去重选择节点；当商图稳定
+    后，把普通节点转换为不可变 ``CanonicalRegularTypeNode`` 状态键。
+    """
 
     if not isinstance(graph, RegularTypeTermGraph):
         raise TypeError("Regular-tree minimization requires RegularTypeTermGraph")
@@ -491,11 +520,120 @@ def normalized_type_from_state_key(
     项图节点可能从多个位置到达，展示树可以复制共享子图，但其正规树语义保持不变。
     """
 
+    return _present_state_key(value).type_ast
+
+
+def _present_state_key(value: EquiRecursiveStateKey) -> _StatePresentation:
+    """重建规范 AST，并记录项图位置在该 AST 中对应的可见索引。
+
+    ``component_indices[i]`` 是项图第 ``i`` 个根在展示配置中的位置。另两个映射
+    分别把该根为内部选择或 delay 时的项图分支位置转换为展示分支位置。不存在
+    对应分支类别时保存空元组。
+    """
+
     if not isinstance(value, EquiRecursiveStateKey):
         raise TypeError("State-key rendering requires EquiRecursiveStateKey")
-    return NormalizedConfigurationType(
-        _reify_process(value, root, ()) for root in value.component_roots
+
+    rendered_components = tuple(
+        (term_index, _reify_process(value, root, ()))
+        for term_index, root in enumerate(value.component_roots)
     )
+    ordered_components = tuple(
+        sorted(
+            rendered_components,
+            key=lambda item: (normalized_process_key(item[1]), item[0]),
+        )
+    )
+    component_indices = _source_to_display_indices(
+        tuple(term_index for term_index, _ in ordered_components),
+        len(rendered_components),
+    )
+    internal_maps: list[tuple[int, ...]] = []
+    interrupt_maps: list[tuple[int, ...]] = []
+    for root in value.component_roots:
+        node = value.nodes[root]
+        if node.kind is RegularTypeNodeKind.INTERNAL_CHOICE:
+            internal_maps.append(
+                _ordered_child_index_map(
+                    tuple(
+                        _reify_process(value, child, (root,))
+                        for child in node.children
+                    ),
+                    normalized_process_key,
+                )
+            )
+        else:
+            internal_maps.append(())
+
+        if node.kind in {
+            RegularTypeNodeKind.FINITE_DELAY,
+            RegularTypeNodeKind.INFINITE_DELAY,
+        }:
+            interrupt_root = node.children[0]
+            interrupt = value.nodes[interrupt_root]
+            if interrupt.kind is RegularTypeNodeKind.EXTERNAL_CHOICE:
+                branch_nodes = interrupt.children
+            elif interrupt.kind in {
+                RegularTypeNodeKind.INPUT,
+                RegularTypeNodeKind.OUTPUT,
+            }:
+                branch_nodes = (interrupt_root,)
+            else:
+                branch_nodes = ()
+            interrupt_maps.append(
+                _ordered_child_index_map(
+                    tuple(
+                        _reify_angelic(value, child, (root,))
+                        for child in branch_nodes
+                    ),
+                    normalized_angelic_key,
+                )
+            )
+        else:
+            interrupt_maps.append(())
+
+    return _StatePresentation(
+        NormalizedConfigurationType(
+            process for _, process in ordered_components
+        ),
+        component_indices,
+        tuple(internal_maps),
+        tuple(interrupt_maps),
+    )
+
+
+def _ordered_child_index_map(
+    values: tuple[NormalizedProcessType | NormalizedAngelicType, ...],
+    key: Callable[[Any], tuple[Any, ...]],
+) -> tuple[int, ...]:
+    """返回子边原位置到最终规范排序位置的双射。"""
+
+    if not values:
+        return ()
+    ordered_sources = tuple(
+        source_index
+        for source_index, _ in sorted(
+            enumerate(values),
+            key=lambda item: (key(item[1]), item[0]),
+        )
+    )
+    return _source_to_display_indices(ordered_sources, len(values))
+
+
+def _source_to_display_indices(
+    ordered_sources: tuple[int, ...],
+    item_count: int,
+) -> tuple[int, ...]:
+    """把按展示顺序排列的原位置转换为 ``原位置 -> 展示位置`` 元组。"""
+
+    if len(ordered_sources) != item_count or set(ordered_sources) != set(
+        range(item_count)
+    ):
+        raise ValueError("Presentation ordering must be a permutation")
+    result = [0] * item_count
+    for display_index, source_index in enumerate(ordered_sources):
+        result[source_index] = display_index
+    return tuple(result)
 
 
 def _reify_process(

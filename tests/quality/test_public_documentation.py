@@ -8,8 +8,8 @@
 
 论文对应
 --------
-本文件不新增论文规则；它保证 TypeConstructor、TypeChecker 及其输入语法文档始终
-描述当前 Table 2 实现，而不会因项目结构迭代重新暴露过时接口。
+本文件不新增论文规则；它保证 TypeConstructor、TypeChecker、Table 3 图接口及其
+语法/输出文档始终描述当前实现，而不会因项目结构迭代重新暴露过时接口。
 """
 
 from __future__ import annotations

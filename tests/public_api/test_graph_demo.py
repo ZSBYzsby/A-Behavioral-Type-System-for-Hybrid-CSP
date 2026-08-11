@@ -3,7 +3,7 @@
 测试内容
 --------
 确认 ``graph_demo`` 的三个手工 Type AST 分别覆盖配对竞争、递归协议、watchdog、
-内部选择、错开 deadline 和 Empty 并行单位元，并全部形成完整状态图。
+内部选择、错开 deadline 和 Empty 并行单位元，并全部成功形成状态图。
 
 论文对应
 --------
@@ -25,11 +25,11 @@ class GraphDemoPipelineTests(unittest.TestCase):
     """锁定三个并行 Type AST 示例及其完整图输出。"""
 
     # 测试输入：graph_demo 构造的三个命名 ParallelType 示例。
-    # 预期行为：每个图都 complete，且至少有两个状态和一条迁移。
+    # 预期行为：每个图都成功返回，且至少有两个状态和一条迁移。
     # 检查内容：不依赖证明器，直接确认 Type AST 可进入公开图接口。
     # 论文对应：Table 3 可独立消费 Table 2 已经产生或人工构造的行为 Type。
-    def test_every_example_builds_a_complete_nontrivial_graph(self) -> None:
-        """全部示例都必须形成非平凡、完整闭包的状态迁移图。"""
+    def test_every_example_builds_a_nontrivial_graph(self) -> None:
+        """全部示例都必须形成非平凡状态迁移图。"""
 
         examples = graph_demo.build_examples()
 
@@ -37,7 +37,6 @@ class GraphDemoPipelineTests(unittest.TestCase):
         for example in examples:
             with self.subTest(title=example.title):
                 graph = build_type_transition_graph(example.type_ast)
-                self.assertTrue(graph.complete)
                 self.assertGreaterEqual(len(graph.states), 2)
                 self.assertGreaterEqual(len(graph.transitions), 1)
 
@@ -56,7 +55,6 @@ class GraphDemoPipelineTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(rendered.count("输入 Type AST 的用户语法"), 3)
         self.assertEqual(rendered.count("type transition graph {"), 3)
-        self.assertEqual(rendered.count("complete = true"), 3)
         self.assertIn("递归服务器与两个竞争客户端", rendered)
         self.assertIn("请求/应答服务器、客户端与 watchdog", rendered)
         self.assertIn("内部选择、错开 deadline", rendered)
@@ -64,7 +62,7 @@ class GraphDemoPipelineTests(unittest.TestCase):
         self.assertIn("P-unrhd", rendered)
         self.assertIn("P-sqcup", rendered)
         self.assertIn("time(1", rendered)
-        self.assertIn("演示结束：全部状态图均已完整闭包", rendered)
+        self.assertIn("演示结束：全部状态图均已成功构造", rendered)
 
 
 if __name__ == "__main__":

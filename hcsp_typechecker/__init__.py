@@ -4,8 +4,9 @@
 :func:`check_hcsp_type` 检查同一输入末尾给出的用户 Type。Process AST、规则
 judgment 和证明请求只在接口内部流转；其余子包不承诺稳定导入路径。
 已有 Type AST 可交给 :func:`build_type_transition_graph`，得到以规范化 Type AST
-为结点内容、覆盖全部 Table 3 非确定性后继的状态转移图；该接口自身通过
-``result/full`` 模式输出初始规范类型或完整图。
+为展示内容、以等递归循环项图为状态身份并覆盖 Table 3 关键-deadline约化关系全部
+后继的状态转移图；该接口通过 ``result/full`` 模式输出初始规范类型或完整图，并以
+:class:`HCSPTypeTransitionGraphError` 结构化报告输入、规范化和规模错误。
 
 当规则推导已完成但证明义务仍为 ``unknown`` 时，接口抛出
 :class:`HCSPUntrustedTypeConstructionError`，并通过其 ``untrusted_type`` 属性保留完整但
@@ -24,12 +25,14 @@ from .api import (
     HCSPInputError,
     HCSPTypeConstructionError,
     HCSPTypeCheckingError,
+    HCSPTypeTransitionGraphError,
     HCSPUntrustedTypeConstructionError,
     OutputMode,
     TypeAST,
     TypeCheckingErrorKind,
     TypeConstructionErrorKind,
     TypeTransitionGraph,
+    TypeTransitionGraphErrorKind,
     build_type_transition_graph,
     construct_hcsp_type,
     check_hcsp_type,
@@ -41,12 +44,14 @@ __all__ = [
     "HCSPInputError",
     "HCSPTypeConstructionError",
     "HCSPTypeCheckingError",
+    "HCSPTypeTransitionGraphError",
     "HCSPUntrustedTypeConstructionError",
     "OutputMode",
     "TypeAST",
     "TypeCheckingErrorKind",
     "TypeConstructionErrorKind",
     "TypeTransitionGraph",
+    "TypeTransitionGraphErrorKind",
     "build_type_transition_graph",
     "construct_hcsp_type",
     "check_hcsp_type",

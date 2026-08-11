@@ -4,11 +4,12 @@ r"""Table 3 单步规则与完整 Type 状态转移图的回归测试。
 --------
 1. 多元内部选择穷尽所有非 bottom 分支。
 2. 所有并行通信配对均产生证据，相同图边合并而不丢推导来源。
-3. 零时延边界同时保留 timeout 和可用通信。
+3. 零时延只在后继非 bottom 时允许 timeout；边界通信仍独立保留。
 4. 并行时间只走到最早有限 deadline，互补 ready 动作阻止时间。
 5. 无穷等待产生 infinity 自循环，递归回边直接形成有限回图。
 6. 等递归且选择幂等的同一项图类具有唯一、完备的出边集合。
-7. 图规模上限明确产生不完整图，不伪装为完整闭包。
+7. 图规模上限直接终止构造并抛错，绝不返回部分图。
+8. 推导证据中的分量和分支编号始终指向状态中实际展示的规范类型。
 
 论文对应
 --------
@@ -22,12 +23,19 @@ from fractions import Fraction
 import unittest
 
 from hcsp_typechecker.backend.type_operational_semantics import (
+    TypeTransitionGraphSizeError,
     build_type_transition_graph,
     derive_one_step,
     equi_recursive_state_key,
     normalized_type_from_state_key,
 )
-from hcsp_typechecker.data_structures.normalized_type_ast import normalize_type_ast
+from hcsp_typechecker.data_structures.normalized_type_ast import (
+    NormalizedExternalChoiceType,
+    NormalizedInfiniteDelayType,
+    NormalizedInternalChoiceType,
+    NormalizedMuType,
+    normalize_type_ast,
+)
 from hcsp_typechecker.data_structures.type_ast import (
     BottomType,
     EmptyType,
@@ -113,6 +121,19 @@ class Table3OneStepTests(unittest.TestCase):
                 for witness in communication_edges[0].derivations
             )
         )
+        self.assertEqual(
+            {
+                witness.component_indices
+                for witness in communication_edges[0].derivations
+            },
+            {(0, 2), (1, 2)},
+        )
+        self.assertTrue(
+            all(
+                witness.branch_indices == (0, 0)
+                for witness in communication_edges[0].derivations
+            )
+        )
 
     # 测试输入：delay(0) 输入分量与同通道无穷输出分量并行。
     # 预期行为：当前状态同时存在 timeout 和通信两条不同 silent 后继。
@@ -139,6 +160,47 @@ class Table3OneStepTests(unittest.TestCase):
         self.assertEqual(
             rules,
             {Table3Rule.TIMEOUT, Table3Rule.COMMUNICATION},
+        )
+
+    # 测试输入：零时延、无通信中断且自然后继为 bottom 的有限 delay。
+    # 预期行为：该状态没有 timeout 边，也没有任何其他直接后继。
+    # 检查内容：不可达自然后继不会被误当作可以执行的异常跳转。
+    # 论文对应：Table 3 [P-triangleright] 明确要求自然后继 T != bottom。
+    def test_zero_deadline_with_bottom_cannot_timeout(self) -> None:
+        """bottom 后继使零时延 timeout 规则不可用。"""
+
+        value = FiniteDelayType(0, NoInterruptType(), BottomType())
+
+        transitions = derive_one_step(
+            equi_recursive_state_key(normalize_type_ast(value))
+        )
+
+        self.assertEqual(transitions, ())
+
+    # 测试输入：零时延且后继为 bottom 的 ch? 分量，与无穷 ch! 分量并行。
+    # 预期行为：只保留互补通信边，不产生进入 bottom 的 timeout 边。
+    # 检查内容：通信规则不受 bottom 后继限制，但 timeout 规则必须受限。
+    # 论文对应：[P-unrhd] 可以执行同步，而 [P-triangleright] 的 T != bottom 不成立。
+    def test_zero_deadline_bottom_keeps_only_available_communication(self) -> None:
+        """bottom 后继不会遮蔽合法通信，也不会额外产生 timeout。"""
+
+        receiver = FiniteDelayType(
+            0,
+            InputType("ch", EmptyType()),
+            BottomType(),
+        )
+        sender = InfiniteDelayType(OutputType("ch", EmptyType()))
+
+        transitions = derive_one_step(
+            equi_recursive_state_key(
+                normalize_type_ast(ParallelType((receiver, sender)))
+            )
+        )
+
+        self.assertEqual(len(transitions), 1)
+        self.assertEqual(
+            transitions[0].derivation.rule,
+            Table3Rule.COMMUNICATION,
         )
 
     # 测试输入：剩余时延 2 和 5、ready set 不互补的两个并行 delay。
@@ -202,7 +264,7 @@ class Table3OneStepTests(unittest.TestCase):
 
 
 class TypeTransitionGraphTests(unittest.TestCase):
-    """检查递归闭包、无穷时间自循环和显式截断元数据。"""
+    """检查递归闭包、无穷时间自循环和图规模硬上限。"""
 
     # 测试输入：无匹配者的无穷 ch? 等待。
     # 预期行为：完整图只有一个状态和一条 infinity/ready={ch?} 自循环。
@@ -215,7 +277,6 @@ class TypeTransitionGraphTests(unittest.TestCase):
 
         graph = build_type_transition_graph(value)
 
-        self.assertTrue(graph.complete)
         self.assertEqual(len(graph.states), 1)
         self.assertEqual(len(graph.transitions), 1)
         edge = graph.transitions[0]
@@ -238,7 +299,6 @@ class TypeTransitionGraphTests(unittest.TestCase):
 
         graph = build_type_transition_graph(ParallelType((recursive, sender)))
 
-        self.assertTrue(graph.complete)
         self.assertLessEqual(len(graph.states), 3)
         self.assertTrue(
             any(
@@ -265,7 +325,6 @@ class TypeTransitionGraphTests(unittest.TestCase):
             ParallelType((server, client, client))
         )
 
-        self.assertTrue(graph.complete)
         self.assertEqual(len(graph.states), 3)
         self.assertEqual(len(graph.transitions), 3)
         displayed_keys = tuple(
@@ -304,12 +363,143 @@ class TypeTransitionGraphTests(unittest.TestCase):
         self.assertEqual(loop_graph.states, choice_graph.states)
         self.assertEqual(loop_graph.transitions, choice_graph.transitions)
 
+    # 测试输入：项图编号顺序与规范 AST 排序顺序相反的递归/forever 内部选择。
+    # 预期行为：到 forever 的证据指向可见分支 0，到 mu 的证据指向可见分支 1。
+    # 检查内容：P-sqcup 的 branch_indices 引用源状态展示出来的分支，而非项图子边。
+    # 论文对应：证据只是规则实例的展示元数据，必须准确指出 [P-sqcup] 采用的 T_i。
+    def test_internal_choice_evidence_indexes_visible_branches(self) -> None:
+        """内部选择证据使用规范 AST 的可见分支编号。"""
+
+        recursive = MuType(
+            "t",
+            FiniteDelayType(
+                1,
+                InputType("ch", TypeVar("t")),
+                BottomType(),
+            ),
+        )
+        value = InternalChoiceType(
+            (recursive, InfiniteDelayType(NoInterruptType()))
+        )
+
+        graph = build_type_transition_graph(value)
+        source = graph.states[0].type_ast.components[0]
+
+        self.assertIsInstance(source, NormalizedInternalChoiceType)
+        assert isinstance(source, NormalizedInternalChoiceType)
+        self.assertIsInstance(source.branches[0], NormalizedInfiniteDelayType)
+        self.assertIsInstance(source.branches[1], NormalizedMuType)
+        outgoing = tuple(
+            edge for edge in graph.transitions if edge.source == 0
+        )
+        for edge in outgoing:
+            target = graph.states[edge.target].type_ast.components[0]
+            branch_index = edge.derivations[0].branch_indices[0]
+            if isinstance(target, NormalizedInfiniteDelayType):
+                self.assertEqual(branch_index, 0)
+            elif isinstance(target, NormalizedMuType):
+                self.assertEqual(branch_index, 1)
+            else:  # pragma: no cover - failure message for a broken target shape
+                self.fail(f"Unexpected internal-choice target: {target!r}")
+
+    # 测试输入：一个内部选择与一个普通有限 delay 并行，项图根排序不同于展示排序。
+    # 预期行为：所有 P-sqcup 证据均把内部选择标为展示分量 0。
+    # 检查内容：component_indices 在并行交换律规范化后仍指向可见的源分量。
+    # 论文对应：[P-|] 可在任意并行分量内执行 [P-sqcup]，位置仅服务于证据展示。
+    def test_local_evidence_indexes_visible_parallel_component(self) -> None:
+        """局部规则证据使用规范配置的可见分量编号。"""
+
+        choice = InternalChoiceType(
+            (
+                FiniteDelayType(1, NoInterruptType(), EmptyType()),
+                InfiniteDelayType(NoInterruptType()),
+            )
+        )
+        other = FiniteDelayType(2, NoInterruptType(), EmptyType())
+
+        graph = build_type_transition_graph(ParallelType((other, choice)))
+        source = graph.states[0].type_ast
+
+        self.assertIsInstance(source.components[0], NormalizedInternalChoiceType)
+        choice_edges = tuple(
+            edge
+            for edge in graph.transitions
+            if edge.source == 0
+            and edge.derivations[0].rule is Table3Rule.INTERNAL_CHOICE
+        )
+        self.assertEqual(len(choice_edges), 2)
+        self.assertTrue(
+            all(
+                edge.derivations[0].component_indices == (0,)
+                for edge in choice_edges
+            )
+        )
+
+    # 测试输入：接收者的两个同信道分支在项图中与展示中顺序相反，并与发送者并行。
+    # 预期行为：通信到 forever/mu 后继分别引用接收者可见分支 0/1。
+    # 检查内容：P-unrhd 的 component_indices 与 branch_indices 保持成对对应。
+    # 论文对应：[P-unrhd] 可选择任意互补通信分支，证据需准确标出两个 A_i。
+    def test_communication_evidence_indexes_visible_interrupt_branches(self) -> None:
+        """通信证据使用 delay 中规范 angelic type 的可见分支编号。"""
+
+        recursive = MuType(
+            "t",
+            FiniteDelayType(
+                1,
+                InputType("again", TypeVar("t")),
+                BottomType(),
+            ),
+        )
+        receiver = InfiniteDelayType(
+            ExternalChoiceType(
+                (
+                    InputType("ch", recursive),
+                    InputType("ch", InfiniteDelayType(NoInterruptType())),
+                )
+            )
+        )
+        sender = InfiniteDelayType(OutputType("ch", EmptyType()))
+
+        graph = build_type_transition_graph(ParallelType((receiver, sender)))
+        source = graph.states[0].type_ast
+        receiver_index = next(
+            index
+            for index, component in enumerate(source.components)
+            if isinstance(component, NormalizedInfiniteDelayType)
+            and isinstance(component.interrupts, NormalizedExternalChoiceType)
+        )
+        receiver_component = source.components[receiver_index]
+        assert isinstance(receiver_component, NormalizedInfiniteDelayType)
+        assert isinstance(
+            receiver_component.interrupts,
+            NormalizedExternalChoiceType,
+        )
+        communication_edges = tuple(
+            edge
+            for edge in graph.transitions
+            if edge.source == 0
+            and edge.derivations[0].rule is Table3Rule.COMMUNICATION
+        )
+
+        self.assertEqual(len(communication_edges), 2)
+        for edge in communication_edges:
+            witness = edge.derivations[0]
+            participant = witness.component_indices.index(receiver_index)
+            branch_index = witness.branch_indices[participant]
+            target = graph.states[edge.target].type_ast.components[0]
+            if isinstance(target, NormalizedInfiniteDelayType):
+                self.assertEqual(branch_index, 0)
+            elif isinstance(target, NormalizedMuType):
+                self.assertEqual(branch_index, 1)
+            else:  # pragma: no cover - failure message for a broken target shape
+                self.fail(f"Unexpected communication target: {target!r}")
+
     # 测试输入：会产生多个可达状态的两个有限并行 delay，max_states=2。
-    # 预期行为：图在达到上限时返回 complete=False 和明确截断原因。
-    # 检查内容：资源限制不能让部分图伪装为完整可达闭包。
-    # 论文对应：不改变 Table 3；这是状态空间爆炸时对实现完备性的审计标记。
-    def test_state_limit_marks_the_graph_as_truncated(self) -> None:
-        """受限生成结果通过结构字段明确声明不完整。"""
+    # 预期行为：注册第三个状态之前抛出状态图规模异常，不返回部分图。
+    # 检查内容：异常结构公开触发的上限名称和值。
+    # 论文对应：资源上限属于工程失败，不构成 Table 3 可达闭包。
+    def test_state_limit_aborts_without_returning_a_partial_graph(self) -> None:
+        """状态数越界必须使整个图构造失败。"""
 
         value = ParallelType(
             (
@@ -318,18 +508,19 @@ class TypeTransitionGraphTests(unittest.TestCase):
             )
         )
 
-        graph = build_type_transition_graph(value, max_states=2)
+        with self.assertRaises(TypeTransitionGraphSizeError) as caught:
+            build_type_transition_graph(value, max_states=2)
 
-        self.assertFalse(graph.complete)
-        self.assertEqual(len(graph.states), 2)
-        self.assertIn("maximum state count 2", graph.truncation_reason or "")
+        self.assertEqual(caught.exception.limit_name, "max_states")
+        self.assertEqual(caught.exception.limit, 2)
+        self.assertIn("no partial graph was returned", str(caught.exception))
 
     # 测试输入：具有多条后继的内部选择和 max_transitions=1。
-    # 预期行为：部分图只加入首条边及其目标，不留下无入边的提前分配目标状态。
-    # 检查内容：边上限检查先于新目标状态注册，保持部分图内部引用一致。
-    # 论文对应：限制只截断 Table 3 枚举，不应伪造未被任何已保存转移到达的状态。
-    def test_transition_limit_does_not_leave_an_orphan_state(self) -> None:
-        """边数截断时图中每个非初态仍由至少一条已保存边到达。"""
+    # 预期行为：准备注册第二条边之前抛出状态图规模异常，不返回第一条边组成的部分图。
+    # 检查内容：边上限检查发生在任何对应新目标状态注册之前。
+    # 论文对应：资源上限属于工程失败，不能伪装为 Table 3 的完整推导结果。
+    def test_transition_limit_aborts_without_returning_a_partial_graph(self) -> None:
+        """转移数越界必须使整个图构造失败。"""
 
         value = InternalChoiceType(
             (
@@ -339,12 +530,12 @@ class TypeTransitionGraphTests(unittest.TestCase):
             )
         )
 
-        graph = build_type_transition_graph(value, max_transitions=1)
+        with self.assertRaises(TypeTransitionGraphSizeError) as caught:
+            build_type_transition_graph(value, max_transitions=1)
 
-        self.assertFalse(graph.complete)
-        self.assertEqual(len(graph.transitions), 1)
-        self.assertEqual(len(graph.states), 2)
-        self.assertEqual(graph.transitions[0].target, 1)
+        self.assertEqual(caught.exception.limit_name, "max_transitions")
+        self.assertEqual(caught.exception.limit, 1)
+        self.assertIn("no partial graph was returned", str(caught.exception))
 
 
 if __name__ == "__main__":

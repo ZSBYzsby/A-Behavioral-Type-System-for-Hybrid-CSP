@@ -1,4 +1,9 @@
-"""按用户 Type 风格输出规范化 Type AST，显式展示其扁平选择和递归位置。"""
+"""按用户 Type 风格输出规范化 Type AST 的稳定只读文本。
+
+输出只服务第三个公共接口的摘要和状态节点展示：扁平选择直接列出分支，匿名递归
+使用 ``mu { ... }``，De Bruijn 引用使用 ``recursion_position(index)``。本模块
+不解析文本，也不把规范化 AST 转回正式 Type AST。
+"""
 
 from __future__ import annotations
 
@@ -23,7 +28,7 @@ from ...data_structures.normalized_type_ast import (
 
 
 def format_normalized_type_ast(value: NormalizedConfigurationType) -> str:
-    """以 ``normalized type`` 开头输出稳定、四空格缩进的规范类型。"""
+    """以 ``normalized type`` 开头输出稳定、四空格缩进的完整配置。"""
 
     if not isinstance(value, NormalizedConfigurationType):
         raise TypeError(

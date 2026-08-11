@@ -1,4 +1,9 @@
-"""把 Table 3 状态迁移图渲染为稳定、带缩进的只读文本。"""
+"""把 Table 3 状态转移图渲染为稳定、带缩进的只读文本。
+
+输出包含初态、全部规范状态、全部去重边以及每条边保存的所有规则证据。状态内容
+委托 ``normalized_type_syntax`` 渲染；本模块不解析图文本，也不参与状态判重或
+Table 3 推导。
+"""
 
 from __future__ import annotations
 
@@ -18,15 +23,12 @@ from ..normalized_type_syntax import format_normalized_type_ast
 
 
 def format_type_transition_graph(value: TypeTransitionGraph) -> str:
-    """输出包含完整元数据、规范状态、转移标签和规则证据的状态图文本。"""
+    """输出初态、规范状态、转移标签和全部规则证据的完整图文本。"""
 
     if not isinstance(value, TypeTransitionGraph):
         raise TypeError("transition graph output requires a TypeTransitionGraph")
     lines = ["type transition graph {"]
     lines.append(_line(1, f"initial = S{value.initial_state}"))
-    lines.append(_line(1, f"complete = {_format_bool(value.complete)}"))
-    if value.truncation_reason is not None:
-        lines.append(_line(1, f"truncation = {value.truncation_reason!r}"))
     lines.extend(_render_states(value.states, 1))
     lines.extend(_render_transitions(value.transitions, 1))
     lines.append("}")
@@ -142,12 +144,6 @@ def _format_indices(values: tuple[int, ...]) -> str:
     """用方括号输出有序的分量或分支索引。"""
 
     return "[" + ", ".join(str(value) for value in values) + "]"
-
-
-def _format_bool(value: bool) -> str:
-    """按项目用户语法输出小写 Boolean 字面量。"""
-
-    return "true" if value else "false"
 
 
 def _prepend_to_first_line(prefix: str, rendered: str) -> str:

@@ -1,4 +1,4 @@
-"""面向普通使用者的 HCSP TypeConstructor 与 TypeChecker 门面。
+"""面向普通使用者的 HCSP TypeConstructor、TypeChecker 与状态图门面。
 
 普通调用者只需把一份完整用户 source 交给 :func:`construct_hcsp_type`。接口会在
 内部依次完成“源码解析 -> Process AST/环境构造 -> Table 2 类型构造与前提证明”，
@@ -17,6 +17,12 @@
 ``OutputMode`` 只控制文本展示，不参与解析、推导或证明。``result`` 输出最终结论
 以及失败时的部分进度，``full`` 进一步输出原始 source、环境摘要、规则轨迹和
 FOL/dL 证明证据；``none`` 供只消费返回值/异常的程序静默调用。
+
+已有的正式 Type AST 可交给 :func:`build_type_transition_graph`。第三个接口依次验证
+Type 根和规模选项，把 Type 降低为规范 AST 与双模拟最小循环项图，再穷尽 Table 3
+关键-deadline状态空间。成功返回不含后端项图编号的 ``TypeTransitionGraph``；失败
+统一抛出 :class:`HCSPTypeTransitionGraphError`，并通过 ``kind``/``phase`` 区分
+失败阶段。和另外两个接口一样，它支持 ``none``、``result`` 与 ``full`` 三档输出。
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ from .frontend.type_transition_graph_syntax import (
 from .data_structures.process_ast.ast import HCSP, Process
 from .data_structures.type_ast.ast import ConfigurationType
 from .data_structures.type_ast.render import format_type_source
+from .data_structures.normalized_type_ast import TypeNormalizationError
 from .backend.type_constructor import (
     TypeConstructionErrorKind,
     TypeConstructionReport,
@@ -56,6 +63,7 @@ from .backend.type_checker import (
     classify_checking_error,
 )
 from .backend.type_operational_semantics import (
+    TypeTransitionGraphSizeError,
     build_type_transition_graph as _build_type_transition_graph,
 )
 from .backend.common.keymaerax import KeYmaeraXConfig
@@ -79,6 +87,15 @@ class OutputMode(str, Enum):
     NONE = "none"
     RESULT = "result"
     FULL = "full"
+
+
+class TypeTransitionGraphErrorKind(str, Enum):
+    """第三个接口可由调用者稳定区分的输入、规范化和规模失败类别。"""
+
+    INVALID_TYPE = "invalid-type"
+    INVALID_LIMIT = "invalid-limit"
+    NORMALIZATION = "normalization"
+    SIZE_LIMIT = "size-limit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,6 +737,165 @@ class HCSPTypeCheckingError(RuntimeError):
         return "\n\n".join(sections)
 
 
+class HCSPTypeTransitionGraphError(RuntimeError):
+    """Type AST 未能生成完整关键-deadline状态图时抛出的公共异常。
+
+    ``kind`` 与 ``phase`` 区分非法 Type 根、非法规模选项、Type 规范化失败和图规模
+    越界；``details`` 提供与另外两个业务接口一致的结构化错误证据。达到规模上限
+    时 ``limit_name``/``limit`` 保存具体限制；非法选项使用
+    ``option_name``/``option_value`` 原样保存调用值。异常保存可读的输入 Type 文本，
+    但绝不携带或返回部分状态图。
+    """
+
+    def __init__(
+        self,
+        kind: TypeTransitionGraphErrorKind,
+        reason: str,
+        type_ast: object,
+        *,
+        limit_name: str = "",
+        limit: int | None = None,
+        option_name: str = "",
+        option_value: object = None,
+    ) -> None:
+        """冻结机器可读错误字段和完整日志所需的输入 Type 文本。"""
+
+        if not isinstance(kind, TypeTransitionGraphErrorKind):
+            raise TypeError("graph error kind must be TypeTransitionGraphErrorKind")
+        self.verdict = "error"
+        self.kind = kind
+        self.phase = {
+            TypeTransitionGraphErrorKind.INVALID_TYPE: "input-validation",
+            TypeTransitionGraphErrorKind.INVALID_LIMIT: "option-validation",
+            TypeTransitionGraphErrorKind.NORMALIZATION: "normalization",
+            TypeTransitionGraphErrorKind.SIZE_LIMIT: "graph-construction",
+        }[kind]
+        self.reason = reason
+        self.limit_name = limit_name
+        self.limit = limit
+        self.option_name = option_name
+        self.option_value = option_value
+        self.details = (
+            HCSPErrorDetail(
+                category=kind.value,
+                verdict="error",
+                message=reason,
+                rule=(
+                    "critical-deadline-graph"
+                    if kind is TypeTransitionGraphErrorKind.SIZE_LIMIT
+                    else "type-normalization"
+                    if kind is TypeTransitionGraphErrorKind.NORMALIZATION
+                    else "public-interface"
+                ),
+                location=(
+                    option_name
+                    if kind is TypeTransitionGraphErrorKind.INVALID_LIMIT
+                    else "Type AST root"
+                ),
+            ),
+        )
+        self.primary_detail = self.details[0]
+        self._input_type = (
+            format_type_source(type_ast)
+            if isinstance(type_ast, ConfigurationType)
+            else repr(type_ast)
+        )
+        super().__init__(self.format_result())
+
+    def format_result(self) -> str:
+        """返回失败类别、阶段、原因和可选规模上限的紧凑结果。"""
+
+        explanations = {
+            TypeTransitionGraphErrorKind.INVALID_TYPE: (
+                "输入对象不是项目支持的正式 Type AST 配置根"
+            ),
+            TypeTransitionGraphErrorKind.INVALID_LIMIT: (
+                "状态或转移数量上限不是严格正整数或 None"
+            ),
+            TypeTransitionGraphErrorKind.NORMALIZATION: (
+                "Type AST 无法转换为闭合的等递归规范状态"
+            ),
+            TypeTransitionGraphErrorKind.SIZE_LIMIT: (
+                "完整可达图超出调用者允许的构造规模"
+            ),
+        }
+        lines = [
+            "=== HCSP Type 状态图构造结果 ===",
+            "Verdict : error",
+            "图构造 : 失败",
+            f"错误类别 : {self.kind.value}",
+            f"错误阶段 : {self.phase}",
+            f"类别说明 : {explanations[self.kind]}",
+            f"原因     : {self.reason}",
+        ]
+        if self.limit_name:
+            lines.append(f"规模上限 : {self.limit_name}={self.limit}")
+        if self.option_name:
+            lines.append(
+                f"非法选项 : {self.option_name}={self.option_value!r}"
+            )
+        lines.append("返回结果 : 无（不会返回部分状态图）")
+        return "\n".join(lines)
+
+    def format_full(self) -> str:
+        """返回输入 Type、各处理阶段和最终失败摘要的完整日志。"""
+
+        if self.kind is TypeTransitionGraphErrorKind.INVALID_TYPE:
+            stages = (
+                "Type 根验证 : 失败",
+                "Type 规范化 : 未启动",
+                "状态图遍历 : 未启动",
+            )
+        elif self.kind is TypeTransitionGraphErrorKind.INVALID_LIMIT:
+            stages = (
+                "Type 根验证 : 成功",
+                "选项验证   : 失败",
+                "Type 规范化 : 未启动",
+                "状态图遍历 : 未启动",
+            )
+        elif self.kind is TypeTransitionGraphErrorKind.NORMALIZATION:
+            stages = (
+                "Type 根验证 : 成功",
+                "选项验证   : 成功",
+                "Type 规范化 : 失败",
+                "状态图遍历 : 未启动",
+            )
+        else:
+            stages = (
+                "Type 根验证 : 成功",
+                "选项验证   : 成功",
+                "Type 规范化 : 成功",
+                "状态图遍历 : 失败（达到规模上限）",
+            )
+        result_lines = self.format_result().splitlines()
+        return "\n\n".join(
+            (
+                "=== HCSP Type 状态图构造完整错误日志 ===\n"
+                "\n".join(stages),
+                "--- 输入 Type ---\n" + self._input_type,
+                "=== 状态图构造失败摘要 ===\n"
+                + "\n".join(result_lines[1:]),
+            )
+        )
+
+
+def _write_graph_error(
+    error: HCSPTypeTransitionGraphError,
+    mode: OutputMode,
+    stream: TextIO | None,
+) -> None:
+    """按照第三个接口的输出模式至多打印一次结构化错误。"""
+
+    if mode is OutputMode.NONE:
+        return
+    _write_output(
+        error.format_full()
+        if mode is OutputMode.FULL
+        else error.format_result(),
+        stream,
+    )
+
+
 def _normalize_initial_states(
     value: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
     component_count: int,
@@ -1065,32 +1241,80 @@ def build_type_transition_graph(
     output: OutputMode | str = OutputMode.NONE,
     stream: TextIO | None = None,
 ) -> TypeTransitionGraph:
-    """按 Table 3 穷尽给定 Type AST 的可达规范状态和全部非确定性转移。
+    """按 Table 3 的关键-deadline约化关系构造完整可达状态图。
 
-    接口先把现有 Type AST 单向转换为规范化 Type AST，再以最大关键 deadline
-    策略生成状态图。可选规模上限只用于防止状态爆炸；触及上限时返回图的
-    ``complete`` 为 false，并在 ``truncation_reason`` 中说明原因。``result`` 输出
-    图规模、完整性和初始规范类型；``full`` 输出全部状态、转移和规则证据。
+    接口先把现有 Type AST 单向转换为规范化 Type AST和等递归循环项图，再以最大
+    关键 deadline 策略生成完整可达图。非法输入、规范化失败或触及规模上限时抛出
+    :class:`HCSPTypeTransitionGraphError`；``kind`` 与 ``phase`` 可供程序区分原因，
+    且不会返回可能被误解为完整结果的部分图。
+
+    ``result`` 输出图规模和初始规范类型；``full`` 输出全部状态、转移和规则证据；
+    ``none`` 保持静默。输出模式不改变图的状态集合、边集合或异常语义。
     """
 
-    if not isinstance(type_ast, ConfigurationType):
-        raise TypeError("type_ast must be a TypeAST/ConfigurationType")
     mode = _normalize_output_mode(output)
-    graph = _build_type_transition_graph(
-        type_ast,
-        max_states=max_states,
-        max_transitions=max_transitions,
-    )
+    if not isinstance(type_ast, ConfigurationType):
+        error = HCSPTypeTransitionGraphError(
+            TypeTransitionGraphErrorKind.INVALID_TYPE,
+            "type_ast 必须是 TypeAST/ConfigurationType",
+            type_ast,
+        )
+        _write_graph_error(error, mode, stream)
+        raise error
+
+    for limit_name, limit in (
+        ("max_states", max_states),
+        ("max_transitions", max_transitions),
+    ):
+        if (
+            limit is not None
+            and (
+                isinstance(limit, bool)
+                or not isinstance(limit, int)
+                or limit <= 0
+            )
+        ):
+            error = HCSPTypeTransitionGraphError(
+                TypeTransitionGraphErrorKind.INVALID_LIMIT,
+                f"{limit_name} 必须是严格正整数或 None",
+                type_ast,
+                option_name=limit_name,
+                option_value=limit,
+            )
+            _write_graph_error(error, mode, stream)
+            raise error
+
+    try:
+        graph = _build_type_transition_graph(
+            type_ast,
+            max_states=max_states,
+            max_transitions=max_transitions,
+        )
+    except TypeNormalizationError as cause:
+        error = HCSPTypeTransitionGraphError(
+            TypeTransitionGraphErrorKind.NORMALIZATION,
+            str(cause),
+            type_ast,
+        )
+        _write_graph_error(error, mode, stream)
+        raise error from cause
+    except TypeTransitionGraphSizeError as cause:
+        error = HCSPTypeTransitionGraphError(
+            TypeTransitionGraphErrorKind.SIZE_LIMIT,
+            "完整状态图超过允许的规模上限",
+            type_ast,
+            limit_name=cause.limit_name,
+            limit=cause.limit,
+        )
+        _write_graph_error(error, mode, stream)
+        raise error from cause
     if mode is OutputMode.RESULT:
         lines = [
             "Table 3 状态迁移图结果",
             f"初始状态 : S{graph.initial_state}",
             f"状态数量 : {len(graph.states)}",
             f"转移数量 : {len(graph.transitions)}",
-            "完整闭包 : " + ("是" if graph.complete else "否"),
         ]
-        if graph.truncation_reason is not None:
-            lines.append("截断原因 : " + graph.truncation_reason)
         initial = graph.states[graph.initial_state].type_ast
         lines.append("初始规范 Type :")
         lines.extend(
@@ -1108,11 +1332,13 @@ __all__ = [
     "HCSPInputError",
     "HCSPTypeConstructionError",
     "HCSPTypeCheckingError",
+    "HCSPTypeTransitionGraphError",
     "HCSPUntrustedTypeConstructionError",
     "OutputMode",
     "TypeAST",
     "TypeCheckingErrorKind",
     "TypeConstructionErrorKind",
+    "TypeTransitionGraphErrorKind",
     "TypeTransitionGraph",
     "build_type_transition_graph",
     "construct_hcsp_type",

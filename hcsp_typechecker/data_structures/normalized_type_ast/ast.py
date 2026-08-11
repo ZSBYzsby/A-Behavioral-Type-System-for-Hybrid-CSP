@@ -56,7 +56,7 @@ class NormalizedBoundTypeVar(NormalizedProcessType):
     index: int
 
     def __post_init__(self) -> None:
-        """拒绝 Boolean 和负数，确保 index 能表示某一外层 ``mu``。"""
+        """拒绝 Boolean 和负数，保证 De Bruijn index 具有合法编码形状。"""
 
         if isinstance(self.index, bool) or not isinstance(self.index, int):
             raise TypeError("Normalized type-variable index must be an integer")

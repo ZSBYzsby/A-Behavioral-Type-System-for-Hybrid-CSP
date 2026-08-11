@@ -33,12 +33,14 @@ from hcsp_typechecker import (
     HCSPInputError,
     HCSPTypeConstructionError,
     HCSPTypeCheckingError,
+    HCSPTypeTransitionGraphError,
     HCSPUntrustedTypeConstructionError,
     OutputMode,
     TypeAST,
     TypeCheckingErrorKind,
     TypeConstructionErrorKind,
     TypeTransitionGraph,
+    TypeTransitionGraphErrorKind,
     build_type_transition_graph,
     construct_hcsp_type,
     check_hcsp_type,
@@ -78,12 +80,14 @@ class PublicFacadeTests(unittest.TestCase):
             "HCSPInputError",
             "HCSPTypeConstructionError",
             "HCSPTypeCheckingError",
+            "HCSPTypeTransitionGraphError",
             "HCSPUntrustedTypeConstructionError",
             "OutputMode",
             "TypeAST",
             "TypeCheckingErrorKind",
             "TypeConstructionErrorKind",
             "TypeTransitionGraph",
+            "TypeTransitionGraphErrorKind",
             "build_type_transition_graph",
             "construct_hcsp_type",
             "check_hcsp_type",
@@ -110,12 +114,13 @@ class PublicFacadeTests(unittest.TestCase):
             "HCSPUntrustedTypeError",
             "format_normalized_type_ast",
             "format_type_transition_graph",
+            "TypeTransitionGraphSizeError",
         ):
             with self.subTest(hidden_name=hidden_name):
                 self.assertFalse(hasattr(hcsp_typechecker, hidden_name))
 
     # 测试输入：通过公开 TypeConstructor 得到的 skip Type AST。
-    # 预期行为：公开图接口返回 complete 的单状态、零边 TypeTransitionGraph。
+    # 预期行为：公开图接口返回完整的单状态、零边 TypeTransitionGraph。
     # 检查内容：用户无需接触规范化 AST 或后端即可连接 Type 构造与 Table 3 图生成。
     # 论文对应：Table 2 的 skip 得到正常空类型；Table 3 下该类型没有可执行转移。
     def test_constructed_type_can_feed_the_public_graph_interface(self) -> None:
@@ -126,12 +131,11 @@ class PublicFacadeTests(unittest.TestCase):
         graph = build_type_transition_graph(constructed)
 
         self.assertIsInstance(graph, TypeTransitionGraph)
-        self.assertTrue(graph.complete)
         self.assertEqual(len(graph.states), 1)
         self.assertEqual(graph.transitions, ())
 
     # 测试输入：skip Type AST 与状态图接口的 result 输出模式。
-    # 预期行为：摘要给出图规模、完整性和 ``normalized type empty`` 初态。
+    # 预期行为：摘要给出图规模和 ``normalized type empty`` 初态。
     # 检查内容：规范 Type formatter 只在图接口内部使用，不需要独立公开函数。
     # 论文对应：Table 3 状态节点以规范配置类型为内容；本测试只锁定工程展示协议。
     def test_graph_result_mode_prints_the_initial_normalized_type(self) -> None:
@@ -150,11 +154,11 @@ class PublicFacadeTests(unittest.TestCase):
         self.assertIn("Table 3 状态迁移图结果", rendered)
         self.assertIn("状态数量 : 1", rendered)
         self.assertIn("转移数量 : 0", rendered)
-        self.assertIn("完整闭包 : 是", rendered)
+        self.assertNotIn("完整闭包", rendered)
         self.assertIn("normalized type empty", rendered)
 
     # 测试输入：公开接口由 skip 构造的单状态、零转移完整图。
-    # 预期行为：整图输出包含初态、完整性、状态块、规范类型和空 transitions 块。
+    # 预期行为：整图输出包含初态、状态块、规范类型和空 transitions 块。
     # 检查内容：普通用户无需遍历内部元组即可获得稳定、完整的图文本。
     # 论文对应：Table 3 下空类型无后继，但仍构成含一个初态的完整可达图。
     def test_graph_full_mode_prints_the_complete_graph(self) -> None:
@@ -176,7 +180,6 @@ class PublicFacadeTests(unittest.TestCase):
                 (
                     "type transition graph {",
                     "    initial = S0",
-                    "    complete = true",
                     "    states {",
                     "        S0 = normalized type empty",
                     "    }",
@@ -184,6 +187,106 @@ class PublicFacadeTests(unittest.TestCase):
                     "}",
                 )
             ),
+        )
+
+    # 测试输入：双分支内部选择以及只允许一个状态的公开图接口调用。
+    # 预期行为：接口抛出公开规模异常，不返回只含初态的部分图。
+    # 检查内容：普通用户可按异常类型及其 limit_name/limit 字段处理资源失败。
+    # 论文对应：工程资源上限不改变 Table 3，也不能产生伪装成语义闭包的结果。
+    def test_graph_size_limit_raises_a_public_error(self) -> None:
+        """公开图接口的规模失败必须具有稳定、可读取的异常协议。"""
+
+        value = parse_type_source(
+            "type internal {(delay(1) then empty), (delay(2) then empty)}"
+        )
+
+        output = StringIO()
+        with self.assertRaises(HCSPTypeTransitionGraphError) as caught:
+            build_type_transition_graph(
+                value,
+                max_states=1,
+                output="result",
+                stream=output,
+            )
+
+        self.assertIs(
+            caught.exception.kind,
+            TypeTransitionGraphErrorKind.SIZE_LIMIT,
+        )
+        self.assertEqual(caught.exception.phase, "graph-construction")
+        self.assertEqual(caught.exception.limit_name, "max_states")
+        self.assertEqual(caught.exception.limit, 1)
+        self.assertEqual(caught.exception.verdict, "error")
+        self.assertEqual(len(caught.exception.details), 1)
+        self.assertIn("返回结果 : 无（不会返回部分状态图）", output.getvalue())
+        self.assertNotIn("type transition graph {", output.getvalue())
+
+    # 测试输入：含自由 Type 变量 X 的正式 Type AST，以及 full 错误输出模式。
+    # 预期行为：规范化阶段失败，日志展示输入 Type 和未启动的状态图阶段。
+    # 检查内容：规范化失败与规模越界具有不同 kind/phase，内部异常保留为 cause。
+    # 论文对应：Table 3 只对闭合类型定义操作语义，自由递归变量没有可执行含义。
+    def test_graph_normalization_error_has_a_complete_failure_log(self) -> None:
+        """自由 Type 变量必须形成可分类、可审计的规范化错误。"""
+
+        output = StringIO()
+        with self.assertRaises(HCSPTypeTransitionGraphError) as caught:
+            build_type_transition_graph(
+                parse_type_source("type X"),
+                output="full",
+                stream=output,
+            )
+
+        self.assertIs(
+            caught.exception.kind,
+            TypeTransitionGraphErrorKind.NORMALIZATION,
+        )
+        self.assertEqual(caught.exception.phase, "normalization")
+        self.assertIsNotNone(caught.exception.__cause__)
+        rendered = output.getvalue()
+        self.assertIn("Type 规范化 : 失败", rendered)
+        self.assertIn("状态图遍历 : 未启动", rendered)
+        self.assertIn("--- 输入 Type ---\ntype X", rendered)
+        self.assertEqual(rendered.count("状态图构造失败摘要"), 1)
+
+    # 测试输入：错误的 Type 根对象和 max_states=0 两类门面调用错误。
+    # 预期行为：分别报告 invalid-type 与 invalid-limit，不泄漏裸 TypeError/ValueError。
+    # 检查内容：第三接口的全部用户输入边界统一进入自身公共错误分类。
+    # 论文对应：这些属于接口良构条件，不启动 Table 3 状态空间构造。
+    def test_graph_call_contract_errors_are_structured(self) -> None:
+        """非法 Type 根与规模选项应使用图接口自己的异常。"""
+
+        with self.assertRaises(HCSPTypeTransitionGraphError) as invalid_type:
+            build_type_transition_graph(object())  # type: ignore[arg-type]
+        self.assertIs(
+            invalid_type.exception.kind,
+            TypeTransitionGraphErrorKind.INVALID_TYPE,
+        )
+        self.assertEqual(invalid_type.exception.phase, "input-validation")
+
+        with self.assertRaises(HCSPTypeTransitionGraphError) as invalid_limit:
+            build_type_transition_graph(
+                parse_type_source("type empty"),
+                max_states=0,
+            )
+        self.assertIs(
+            invalid_limit.exception.kind,
+            TypeTransitionGraphErrorKind.INVALID_LIMIT,
+        )
+        self.assertEqual(invalid_limit.exception.phase, "option-validation")
+        self.assertEqual(invalid_limit.exception.option_name, "max_states")
+        self.assertEqual(invalid_limit.exception.option_value, 0)
+        self.assertEqual(invalid_limit.exception.primary_detail.location, "max_states")
+
+        with self.assertRaises(HCSPTypeTransitionGraphError) as wrong_kind:
+            build_type_transition_graph(
+                parse_type_source("type empty"),
+                max_transitions=True,
+            )
+        self.assertEqual(wrong_kind.exception.option_name, "max_transitions")
+        self.assertIs(wrong_kind.exception.option_value, True)
+        self.assertIn(
+            "非法选项 : max_transitions=True",
+            wrong_kind.exception.format_result(),
         )
 
     # 测试输入：skip 的完整 source 与等价的用户 Type 段 empty。

@@ -1,7 +1,8 @@
 # 后端代码风格约定
 
-本文约束 hcsp_typechecker/backend 的实现风格。目标是让共享规则层、
-TypeConstructor 和 TypeChecker 在保持职责差异的同时，具有相同的阅读方式。
+本文约束 `hcsp_typechecker/backend` 的实现风格。目标是让共享规则层、
+TypeConstructor、TypeChecker 和 Table 3 操作语义在保持职责差异的同时，具有
+相同的阅读方式。
 
 ## 模块结构
 
@@ -11,16 +12,22 @@ TypeConstructor 和 TypeChecker 在保持职责差异的同时，具有相同的
 2. future annotations；
 3. 标准库、领域数据结构、当前后端相对导入；
 4. 私有辅助记录；
-5. 核心类，公开方法在私有实现方法之前；
-6. 低层便捷函数和明确的 __all__。
+5. 核心类或纯函数入口，公开入口在私有实现之前；
+6. 低层便捷函数和明确的 `__all__`。
 
 data_structures 不能反向导入后端。backend/common 不能导入两个业务后端，
 两个业务后端也不能彼此导入。
+
+`type_operational_semantics` 只能消费已有 Type/规范 Type/图数据结构，不能反向调用
+Constructor、Checker、Gamma/Theta 环境准备或证明器。其内部状态身份使用循环项图，
+面向用户的规范 AST 只能作为展示代表。
 
 ## 命名与类型标注
 
 - 业务入口使用 construct/check，共享层使用 rule_t_*、_decide_proof 等
   描述实际动作的名称。
+- Table 3 后端使用 `normalize/build/derive/minimize` 区分规范化、建图、一步推导和
+  等递归最小化；数据结构本身不执行规则遍历。
 - 所有函数和方法都写参数、返回类型；__init__ 显式写 -> None。
 - 后端 dataclass 统一使用 slots=True；只读请求、结果和 premise 还必须使用
   frozen=True，只有符号执行上下文等明确可变记录可以不冻结。
@@ -29,12 +36,13 @@ data_structures 不能反向导入后端。backend/common 不能导入两个业�
 
 ## 注释与排版
 
-- 模块、类和函数必须有简洁 docstring；复杂规则再在定义前补充论文对应、输入、
-  构造约束和失败条件，不重复逐字解释显然的赋值语句。
+- 模块、类和函数必须有简洁 docstring；复杂规则再说明论文对应、输入、输出、
+  规范化边界和失败条件，不重复逐字解释显然的赋值语句。
 - 中文说明负责解释实现语义；论文规则名、Python 标识符、FOL/dL 等正式术语
   保留原写法。
 - 源码行宽不超过 100 字符，不使用通配符导入。
-- result/full 报告属于展示层；规则函数只积累结构化证据，不直接打印。
+- `result/full` 报告属于展示层；Table 2 规则与 Table 3 转移函数只积累结构化证据，
+  不直接打印。
 
 这些约定由 `tests/backend/test_backend_style.py` 和
 `tests/backend/test_backend_boundaries.py` 共同锁定。

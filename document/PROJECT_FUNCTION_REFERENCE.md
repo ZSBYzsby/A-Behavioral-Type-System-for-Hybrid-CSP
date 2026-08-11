@@ -597,12 +597,12 @@ Table 3 操作语义层：
 - `hcsp_typechecker.data_structures.type_ast`：行为类型层，定义 Section 4.1 的行为类型
   ``T/A``、Section 4.2 的组合类型 ``mathcal T`` 和 alpha 等价比较；后续所有
   直接分析或变换 Type AST 的功能也放在这一层；
-- `hcsp_typechecker.data_structures.normalized_type_ast`：Table 3 单步规则使用的
-  De Bruijn 规范 Type AST；保留有限 ``mu`` 结构以记录真实递归推导；
+- `hcsp_typechecker.data_structures.normalized_type_ast`：循环项图构造和状态展示使用的
+  De Bruijn 规范 Type AST；保留有限 ``mu`` 结构，尚不消除有限展开差异；
 - `hcsp_typechecker.data_structures.regular_type_term_graph`：把递归绑定表示为回边的
   有限循环项图，以及双模拟最小化后供状态图判重的等递归键；
-- `hcsp_typechecker.data_structures.type_transition_graph`：状态、转移标签、规则证据
-  和完整性/截断元数据；
+- `hcsp_typechecker.data_structures.type_transition_graph`：完整状态图的状态、
+  转移标签和规则证据；
 - `hcsp_typechecker.data_structures.runtime_context`：Gamma、Theta、共享参数、
   Configuration，以及基础类型、连续向量和通道 refinement 的运行上下文定义；
 - `hcsp_typechecker.backend.common`：Constructor 与 Checker 共享的内部基础层；
@@ -628,8 +628,10 @@ Table 3 操作语义层：
 
 ```text
 HCSPErrorDetail, HCSPInputError, HCSPTypeConstructionError,
-HCSPTypeCheckingError, HCSPUntrustedTypeConstructionError, OutputMode,
+HCSPTypeCheckingError, HCSPTypeTransitionGraphError,
+HCSPUntrustedTypeConstructionError, OutputMode,
 TypeAST, TypeCheckingErrorKind, TypeConstructionErrorKind,
+TypeTransitionGraphErrorKind,
 TypeTransitionGraph, construct_hcsp_type, check_hcsp_type,
 build_type_transition_graph
 ```
@@ -814,11 +816,17 @@ graph: TypeTransitionGraph = build_type_transition_graph(
 )
 ```
 
-`result` 模式只打印图规模、完整性与初始规范 Type；`full` 模式使用两个内部
+`result` 模式只打印图规模与初始规范 Type；`full` 模式使用两个内部
 frontend formatter 打印全部状态、边标签和规则证据。formatter 不进入包根公开白名单。
 
+第三个接口使用公开的 `HCSPTypeTransitionGraphError` 报告失败。`kind` 可稳定区分
+非法 Type 根、非法规模选项、规范化失败与规模越界，`phase` 指明失败阶段；规模错误
+还公开 `limit_name`/`limit`，非法选项公开 `option_name`/`option_value`。任何失败都
+不会返回部分状态图。`result` 输出紧凑摘要，`full` 输出输入 Type 和各阶段状态，
+`none` 保持静默。
+
 该接口先把原 Type AST 单向转换为独立的规范化 Type AST，再由
-`backend/type_operational_semantics` 穷尽 Table 3 可达状态。规范化 AST 与
+`backend/type_operational_semantics` 穷尽基于 Table 3 的关键-deadline约化状态。规范化 AST 与
 `TypeTransitionGraph`、状态、边、标签和规则证据位于 `data_structures`；Type 项图
 转换/最小化、规则执行和 BFS 图构造位于后端。状态判重先把 ``mu``/De Bruijn 结构转换为有限
 循环项图并按最大双模拟取商，因此折叠递归与任意有限展开共享状态编号。Table 3
@@ -827,3 +835,8 @@ frontend formatter 打印全部状态、边标签和规则证据。formatter 不
 [规范化 Type AST 与 Table 3 状态转移图](TYPE_OPERATIONAL_SEMANTICS.md)以及
 [规范化 Type AST 只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)和
 [状态迁移图只读输出语法](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)。
+
+返回对象的 `initial_state` 是初态编号，`states` 保存连续编号和规范展示 AST，
+`transitions` 保存源、目标、`tau`/时间标签及全部推导证据；
+`graph.outgoing(state_id)` 可取得指定状态的稳定有序出边。状态身份实际使用
+`EquiRecursiveStateKey`，因此展示 AST 只负责解释结果，不参与规则执行或判重。

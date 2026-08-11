@@ -1,4 +1,9 @@
-"""把现有行为 Type AST 单向转换为 Table 3 规范化 Type AST。"""
+"""把正式行为 Type AST 单向降低为 Table 3 规范化 Type AST。
+
+转换保留 ``Empty``、``Bottom``、delay 和通信的可观察区别，展平并规范化并行、
+内部选择和外部选择，同时把递归变量名替换为 De Bruijn index。输出仍是有限树；
+本模块不执行等递归双模拟、不计算 Table 3 后继，也不提供到原 Type AST 的逆转换。
+"""
 
 from __future__ import annotations
 
@@ -38,13 +43,18 @@ from .ast import (
 
 
 class TypeNormalizationError(ValueError):
-    """原 Type AST 含自由变量或不受支持结构时的规范化错误。"""
+    """闭合性等规范化前提失败时抛出的领域错误。"""
 
 
 def normalize_type_ast(
     value: ConfigurationType,
 ) -> NormalizedConfigurationType:
-    """将原配置 Type AST 转成唯一、不可变且可哈希的规范化配置。"""
+    """将闭合配置 Type AST 转成不可变、可哈希的规范化配置。
+
+    并行、内部选择和外部选择在此按项目采用的代数律规范化；递归只消除绑定名称，
+    有限展开等价留给循环项图处理。自由 ``TypeVar`` 会抛出
+    :class:`TypeNormalizationError`。
+    """
 
     if not isinstance(value, ConfigurationType):
         raise TypeError("Type normalization requires a ConfigurationType root")
@@ -72,7 +82,7 @@ def _normalize_process(
     value: ProcessType,
     binders: tuple[str, ...],
 ) -> NormalizedProcessType:
-    """递归转换一个过程类型并消除选择与递归命名差异。"""
+    """在当前递归绑定栈下转换过程类型并消除选择与 alpha 差异。"""
 
     if isinstance(value, EmptyType):
         return NormalizedEmptyType()

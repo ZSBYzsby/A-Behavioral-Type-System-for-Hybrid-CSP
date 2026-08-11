@@ -4,8 +4,7 @@ r"""Table 3 状态迁移图的稳定只读输出测试。
 --------
 1. 时间边输出精确时长、稳定排序的 ready set 与嵌套规则证据。
 2. 通信边输出 tau、端点、信道以及分量/分支索引。
-3. 截断图输出不完整标记和截断原因。
-4. 输出子包拒绝错误对象，并且有意不提供 parser。
+3. 输出子包拒绝错误对象，并且有意不提供 parser。
 
 论文对应
 --------
@@ -26,7 +25,6 @@ from hcsp_typechecker.data_structures.type_ast import (
     FiniteDelayType,
     InfiniteDelayType,
     InputType,
-    InternalChoiceType,
     NoInterruptType,
     OutputType,
     ParallelType,
@@ -103,30 +101,6 @@ class TypeTransitionGraphSerializerTests(unittest.TestCase):
             rendered,
         )
         self.assertNotIn("time(", rendered)
-
-    # 测试输入：三分支内部选择和 max_states=1 的显式状态上限。
-    # 预期行为：输出 complete=false 与精确截断原因，且仍包含初态规范类型。
-    # 检查内容：部分图不能通过展示文本伪装成完整闭包。
-    # 论文对应：截断属于工程资源边界，不改变 Table 3 本身。
-    def test_truncated_graph_declares_incompleteness(self) -> None:
-        """图规模上限在输出头部留下机器无关的明显标记。"""
-
-        graph = build_type_transition_graph(
-            InternalChoiceType(
-                (
-                    FiniteDelayType(1, NoInterruptType(), EmptyType()),
-                    FiniteDelayType(2, NoInterruptType(), EmptyType()),
-                    FiniteDelayType(3, NoInterruptType(), EmptyType()),
-                )
-            ),
-            max_states=1,
-        )
-
-        rendered = format_type_transition_graph(graph)
-
-        self.assertIn("complete = false", rendered)
-        self.assertIn("truncation = 'maximum state count 1 reached'", rendered)
-        self.assertIn("S0 = normalized type internal {", rendered)
 
     # 测试输入：原 Type AST 而非图，以及 graph syntax 子包导出命名空间。
     # 预期行为：错误对象抛 TypeError；子包仅导出 formatter，不存在 parse 函数。

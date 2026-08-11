@@ -18,8 +18,8 @@ r"""用多个并行 Type AST 演示 Table 3 状态迁移图构造器。
 取得 Type AST 后只需调用包根的 ``build_type_transition_graph``。
 
 本脚本不解析 HCSP，也不调用 TypeConstructor/TypeChecker，因此不会产生这两套
-业务的结构化异常；图规模受限时由返回图的 ``complete/truncation_reason`` 表达，
-而手工 Type AST 的 Python 类型错误仍作为调用契约错误直接抛出。
+业务的结构化异常；第三个接口用自身的 ``HCSPTypeTransitionGraphError`` 报告
+Type 规范化和图规模错误，且不会返回部分图。
 """
 
 from __future__ import annotations
@@ -28,7 +28,11 @@ from dataclasses import dataclass
 from fractions import Fraction
 import sys
 
-from hcsp_typechecker import TypeAST, build_type_transition_graph
+from hcsp_typechecker import (
+    HCSPTypeTransitionGraphError,
+    TypeAST,
+    build_type_transition_graph,
+)
 from hcsp_typechecker.data_structures.type_ast import (
     EmptyType,
     FiniteDelayType,
@@ -167,8 +171,8 @@ def build_examples() -> tuple[GraphExample, ...]:
     )
 
 
-def _run_example(example: GraphExample) -> bool:
-    """打印一个原始 Type AST 及其完整可达图，并返回图是否完整。"""
+def _run_example(example: GraphExample) -> None:
+    """打印一个原始 Type AST 及其完整可达图。"""
 
     print("\n" + "=" * 76)
     print(example.title)
@@ -184,12 +188,8 @@ def _run_example(example: GraphExample) -> bool:
     print(
         "\n图摘要："
         f"{len(graph.states)} 个规范状态，"
-        f"{len(graph.transitions)} 条迁移，"
-        f"complete={str(graph.complete).lower()}。"
+        f"{len(graph.transitions)} 条迁移。"
     )
-    if not graph.complete:
-        print("截断原因：" + str(graph.truncation_reason))
-    return graph.complete
 
 
 def main() -> int:
@@ -203,13 +203,17 @@ def main() -> int:
 
     print("并行 Type AST -> 规范化 Type -> Table 3 状态图演示")
     print(f"图输出模式：{GRAPH_OUTPUT_MODE!r}")
-    complete = True
-    for example in build_examples():
-        complete = _run_example(example) and complete
+    try:
+        for example in build_examples():
+            _run_example(example)
+    except HCSPTypeTransitionGraphError:
+        # ``_run_example`` 使用 result/full 模式；接口已经打印一次结构化错误，
+        # 此处只决定演示脚本退出码，避免重复输出同一错误。
+        return 1
 
     print("\n" + "=" * 76)
-    print("演示结束：全部状态图均已完整闭包。" if complete else "演示结束：存在被截断的图。")
-    return 0 if complete else 1
+    print("演示结束：全部状态图均已成功构造。")
+    return 0
 
 
 if __name__ == "__main__":
