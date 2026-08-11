@@ -6,13 +6,14 @@ r"""Table 3 单步规则与完整 Type 状态转移图的回归测试。
 2. 所有并行通信配对均产生证据，相同图边合并而不丢推导来源。
 3. 零时延边界同时保留 timeout 和可用通信。
 4. 并行时间只走到最早有限 deadline，互补 ready 动作阻止时间。
-5. 无穷等待产生 infinity 自循环，递归通过 [P-mu] 形成有限回图。
-6. 图规模上限明确产生不完整图，不伪装为完整闭包。
+5. 无穷等待产生 infinity 自循环，递归回边直接形成有限回图。
+6. 等递归且选择幂等的同一项图类具有唯一、完备的出边集合。
+7. 图规模上限明确产生不完整图，不伪装为完整闭包。
 
 论文对应
 --------
 逐项覆盖 Section 4.4 Table 3 的 [P-unrhd]、[P-triangleright]、[P-sqcup]、
-[P-unrhd']、[P-|] 与 [P-mu]；时间采用项目确认的下一个关键 deadline 策略。
+[P-unrhd'] 与 [P-|]；[P-mu] 在有限项图中编译为回边，不再通过 AST 展开执行。
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ import unittest
 from hcsp_typechecker.backend.type_operational_semantics import (
     build_type_transition_graph,
     derive_one_step,
+    equi_recursive_state_key,
+    normalized_type_from_state_key,
 )
 from hcsp_typechecker.data_structures.normalized_type_ast import normalize_type_ast
 from hcsp_typechecker.data_structures.type_ast import (
@@ -67,7 +70,9 @@ class Table3OneStepTests(unittest.TestCase):
         )
 
         transitions = derive_one_step(
-            normalize_type_ast(InternalChoiceType(branches))
+            equi_recursive_state_key(
+                normalize_type_ast(InternalChoiceType(branches))
+            )
         )
 
         self.assertEqual(len(transitions), 3)
@@ -124,7 +129,9 @@ class Table3OneStepTests(unittest.TestCase):
         sender = InfiniteDelayType(OutputType("ch", EmptyType()))
 
         transitions = derive_one_step(
-            normalize_type_ast(ParallelType((receiver, sender)))
+            equi_recursive_state_key(
+                normalize_type_ast(ParallelType((receiver, sender)))
+            )
         )
 
         self.assertEqual(len(transitions), 2)
@@ -145,7 +152,9 @@ class Table3OneStepTests(unittest.TestCase):
         right = FiniteDelayType(5, OutputType("right", EmptyType()), EmptyType())
 
         transitions = derive_one_step(
-            normalize_type_ast(ParallelType((left, right)))
+            equi_recursive_state_key(
+                normalize_type_ast(ParallelType((left, right)))
+            )
         )
 
         self.assertEqual(len(transitions), 1)
@@ -161,8 +170,10 @@ class Table3OneStepTests(unittest.TestCase):
                 }
             ),
         )
+        target_ast = normalized_type_from_state_key(transition.target)
         durations = tuple(
-            component.duration for component in transition.target.components
+            getattr(component, "duration", None)
+            for component in target_ast.components
         )
         self.assertEqual(durations, (Fraction(0), Fraction(3)))
 
@@ -177,7 +188,9 @@ class Table3OneStepTests(unittest.TestCase):
         right = FiniteDelayType(5, OutputType("ch", EmptyType()), EmptyType())
 
         transitions = derive_one_step(
-            normalize_type_ast(ParallelType((left, right)))
+            equi_recursive_state_key(
+                normalize_type_ast(ParallelType((left, right)))
+            )
         )
 
         self.assertEqual(len(transitions), 1)
@@ -211,9 +224,9 @@ class TypeTransitionGraphTests(unittest.TestCase):
         self.assertIs(edge.label.duration, InfiniteTime.VALUE)
 
     # 测试输入：mu t.delay(infinity) interrupt ch?->t 与一次 ch! 并行。
-    # 预期行为：通信经 [P-mu] 发生，递归后续被图判重而非无限复制 AST。
-    # 检查内容：De Bruijn 单步展开、递归证据和有限可达图共同成立。
-    # 论文对应：Table 3 [P-mu] 继承展开体通信，守卫递归形成有限状态回路。
+    # 预期行为：通信直接沿递归项图回边发生，且不会复制 AST 展开状态。
+    # 检查内容：递归协议在有限循环项图上完成通信并形成有限可达图。
+    # 论文对应：[P-mu] 已被回边编码，实际边只记录继承后的通信规则。
     def test_guarded_recursion_builds_a_finite_graph(self) -> None:
         """递归后继通过规范状态键闭合为有限图。"""
 
@@ -229,11 +242,67 @@ class TypeTransitionGraphTests(unittest.TestCase):
         self.assertLessEqual(len(graph.states), 3)
         self.assertTrue(
             any(
-                witness.rule is Table3Rule.RECURSION
+                witness.rule is Table3Rule.COMMUNICATION
                 for edge in graph.transitions
                 for witness in edge.derivations
             )
         )
+
+    # 测试输入：一个递归 request 服务端与两个相同的一次性客户端并行。
+    # 预期行为：图恰有“两个客户端、一个客户端、零客户端”三个状态；服务端展开态不另占节点。
+    # 检查内容：每次同步后的 mu 折叠/展开差异按正规树等价合并，最终 infinity 边回到零客户端状态自身。
+    # 论文对应：[P-mu] 的递归方程被项图回边吸收，[P-unrhd] 直接沿回边执行。
+    def test_equi_recursive_quotient_removes_unfold_only_states(self) -> None:
+        """状态图按等递归树而不是 mu 的有限展开深度判重。"""
+
+        server = MuType(
+            "server",
+            InfiniteDelayType(InputType("request", TypeVar("server"))),
+        )
+        client = InfiniteDelayType(OutputType("request", EmptyType()))
+
+        graph = build_type_transition_graph(
+            ParallelType((server, client, client))
+        )
+
+        self.assertTrue(graph.complete)
+        self.assertEqual(len(graph.states), 3)
+        self.assertEqual(len(graph.transitions), 3)
+        displayed_keys = tuple(
+            equi_recursive_state_key(state.type_ast) for state in graph.states
+        )
+        self.assertEqual(len(set(displayed_keys)), len(graph.states))
+        terminal_edges = graph.outgoing(2)
+        self.assertEqual(len(terminal_edges), 1)
+        self.assertEqual(
+            (terminal_edges[0].source, terminal_edges[0].target),
+            (2, 2),
+        )
+        self.assertEqual(
+            terminal_edges[0].derivations[0].rule,
+            Table3Rule.DELAY,
+        )
+
+    # 测试输入：递归循环 L、其一次展开 U，以及幂等选择 C=L sqcup U，分别与发送者并行。
+    # 预期行为：三者具有同一初始项图状态，并暴露完全相同的通信和时间转移。
+    # 检查内容：Table 3 不再依赖等价类第一次遇到的 AST 代表。
+    # 论文对应：等递归方程与内部选择幂等律共同取商后，操作语义定义在商类上。
+    def test_table3_is_computed_on_the_regular_tree_equivalence_class(self) -> None:
+        """递归等价选择代表不能改变状态的可执行通信行为。"""
+
+        loop = MuType(
+            "loop",
+            InfiniteDelayType(InputType("ch", TypeVar("loop"))),
+        )
+        unfolded = InfiniteDelayType(InputType("ch", loop))
+        choice = InternalChoiceType((loop, unfolded))
+        sender = InfiniteDelayType(OutputType("ch", EmptyType()))
+
+        loop_graph = build_type_transition_graph(ParallelType((loop, sender)))
+        choice_graph = build_type_transition_graph(ParallelType((choice, sender)))
+
+        self.assertEqual(loop_graph.states, choice_graph.states)
+        self.assertEqual(loop_graph.transitions, choice_graph.transitions)
 
     # 测试输入：会产生多个可达状态的两个有限并行 delay，max_states=2。
     # 预期行为：图在达到上限时返回 complete=False 和明确截断原因。

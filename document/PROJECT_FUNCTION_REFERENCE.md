@@ -577,6 +577,12 @@ Table 3 操作语义层：
 - `hcsp_typechecker.data_structures.type_ast`：行为类型层，定义 Section 4.1 的行为类型
   ``T/A``、Section 4.2 的组合类型 ``mathcal T`` 和 alpha 等价比较；后续所有
   直接分析或变换 Type AST 的功能也放在这一层；
+- `hcsp_typechecker.data_structures.normalized_type_ast`：Table 3 单步规则使用的
+  De Bruijn 规范 Type AST；保留有限 ``mu`` 结构以记录真实递归推导；
+- `hcsp_typechecker.data_structures.regular_type_term_graph`：把递归绑定表示为回边的
+  有限循环项图，以及双模拟最小化后供状态图判重的等递归键；
+- `hcsp_typechecker.data_structures.type_transition_graph`：状态、转移标签、规则证据
+  和完整性/截断元数据；
 - `hcsp_typechecker.data_structures.runtime_context`：Gamma、Theta、共享参数、
   Configuration，以及基础类型、连续向量和通道 refinement 的运行上下文定义；
 - `hcsp_typechecker.backend.common`：Constructor 与 Checker 共享的内部基础层；
@@ -589,6 +595,8 @@ Table 3 操作语义层：
 - `hcsp_typechecker.backend.type_checker`：TypeChecker 的独立业务后端，消费用户
   Type AST 的对应子树并检查每个规则结论；其请求和报告也由本目录的
   `model.py` 定义。它与 Constructor 均依赖 common，两个业务后端彼此不依赖；
+- `hcsp_typechecker.backend.type_operational_semantics`：循环项图上的 Table 3 单步语义、
+  正规项图双模拟最小化和 BFS 可达图构造；它不依赖 Constructor 或 Checker；
 - `hcsp_typechecker.tooling`：项目工具层，目前提供跨平台环境诊断程序。
 
 依赖方向保持单向：`frontend` 只把文本转换为 `data_structures` 中的领域对象；
@@ -779,8 +787,11 @@ frontend formatter 打印全部状态、边标签和规则证据。formatter 不
 
 该接口先把原 Type AST 单向转换为独立的规范化 Type AST，再由
 `backend/type_operational_semantics` 穷尽 Table 3 可达状态。规范化 AST 与
-`TypeTransitionGraph`、状态、边、标签和规则证据位于 `data_structures`；递归替换、
-规则执行和 BFS 图构造位于后端。项目不提供规范化树反向转换。完整说明见
+`TypeTransitionGraph`、状态、边、标签和规则证据位于 `data_structures`；Type 项图
+转换/最小化、规则执行和 BFS 图构造位于后端。状态判重先把 ``mu``/De Bruijn 结构转换为有限
+循环项图并按最大双模拟取商，因此折叠递归与任意有限展开共享状态编号。Table 3
+直接改写项图，``[P-mu]`` 被回边吸收而不再产生展开中间态；节点显示由项图确定性
+生成规范 AST 代表。项目不提供规范化 Type 转回原 Type AST 的转换。完整说明见
 [规范化 Type AST 与 Table 3 状态转移图](TYPE_OPERATIONAL_SEMANTICS.md)以及
 [规范化 Type AST 只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)和
 [状态迁移图只读输出语法](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)。

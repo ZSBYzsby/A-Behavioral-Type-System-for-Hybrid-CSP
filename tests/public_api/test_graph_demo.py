@@ -42,9 +42,9 @@ class GraphDemoPipelineTests(unittest.TestCase):
                 self.assertGreaterEqual(len(graph.transitions), 1)
 
     # 测试输入：以 full 模式运行整个 graph_demo。
-    # 预期行为：输出三个原始 Type、三个完整图以及通信/递归/选择/时间规则证据。
+    # 预期行为：输出三个原始 Type、三个完整图以及通信/选择/时间规则证据。
     # 检查内容：Empty 分量不出现在规范初态，复杂图打印不需要外部证明器。
-    # 论文对应：P-unrhd、P-sqcup、P-unrhd-prime、P-| 与 P-mu 均进入演示证据。
+    # 论文对应：P-mu 已编译为项图回边，其余可观察规则进入演示边证据。
     def test_main_prints_all_parallel_semantics_features(self) -> None:
         """完整演示输出应足以人工审计三类并行演化。"""
 
@@ -60,7 +60,8 @@ class GraphDemoPipelineTests(unittest.TestCase):
         self.assertIn("递归服务器与两个竞争客户端", rendered)
         self.assertIn("请求/应答服务器、客户端与 watchdog", rendered)
         self.assertIn("内部选择、错开 deadline", rendered)
-        self.assertIn("P-mu", rendered)
+        self.assertNotIn("P-mu", rendered)
+        self.assertIn("P-unrhd", rendered)
         self.assertIn("P-sqcup", rendered)
         self.assertIn("time(1", rendered)
         self.assertIn("演示结束：全部状态图均已完整闭包", rendered)

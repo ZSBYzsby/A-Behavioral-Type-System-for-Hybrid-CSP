@@ -98,14 +98,13 @@ TransitionLabel: TypeAlias = SilentTransitionLabel | TimedTransitionLabel
 
 
 class Table3Rule(str, Enum):
-    """生成状态图边的六条 Table 3 操作语义规则。"""
+    """循环项图状态图中实际生成边证据的 Table 3 规则。"""
 
     COMMUNICATION = "P-unrhd"
     TIMEOUT = "P-triangleright"
     INTERNAL_CHOICE = "P-sqcup"
     DELAY = "P-unrhd-prime"
     PARALLEL_TIME = "P-parallel"
-    RECURSION = "P-mu"
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +135,7 @@ class TransitionDerivation:
 
 @dataclass(frozen=True, slots=True)
 class TypeState:
-    """状态图中由编号引用的一个规范化配置 Type AST。"""
+    """由编号引用的等递归状态及其项图确定性生成的规范 AST 展示代表。"""
 
     id: int
     type_ast: NormalizedConfigurationType
@@ -175,7 +174,7 @@ class TypeTransition:
 
 @dataclass(frozen=True, slots=True)
 class TypeTransitionGraph:
-    """从一个初始规范类型穷尽可达 Table 3 转移得到的不可变有向图。"""
+    """按等递归状态取商后穷尽可达 Table 3 转移的不可变有向图。"""
 
     initial_state: int
     states: tuple[TypeState, ...]

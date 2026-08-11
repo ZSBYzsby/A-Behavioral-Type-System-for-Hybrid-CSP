@@ -48,12 +48,13 @@ build_type_transition_graph(
 data_structures/
 ├── type_ast/                  原始 Type AST
 ├── normalized_type_ast/       Table 3 规范状态 AST 与单向转换
+├── regular_type_term_graph/   等递归正规树的有限循环项图与状态键
 └── type_transition_graph/     状态、边、标签和推导证据
 
 backend/
 └── type_operational_semantics/
-    ├── substitution.py        De Bruijn 递归替换/展开
-    ├── table3.py              全部一步转移
+    ├── regular_tree.py        正规项图转换、双模拟最小化与稳定状态键
+    ├── table3.py              循环项图上的全部一步转移
     └── graph_builder.py       BFS 可达闭包与同边证据合并
 
 frontend/
@@ -103,12 +104,33 @@ TypeConstructor 和 TypeChecker；规范化 AST 只服务于状态图。
 递归绑定删除原变量名并使用 De Bruijn index。规范化拒绝自由 TypeVar；有限零时延、
 Bottom、内部选择中的 Empty 分支等具有操作语义意义的结构不会被提前消除。
 
+这里的规范化 AST 仍然是有限语法树，因此其 Python 结构相等性有意区分
+``mu t.T`` 和一次展开后的 ``T[mu t.T/t]``。但 Table 3 不在这棵展示树上执行；
+它在下一层的有限循环项图上执行，所以折叠与展开写法不会产生不同的出边。
+
+## 等递归正规树状态键
+
+状态图判重在规范化 AST 之上再建立一层内部表示：
+
+1. 把每个 ``mu`` binder 与 De Bruijn 引用解析成有向回边；
+2. 得到不含 ``mu``/TypeVar 节点的有限循环 ``RegularTypeTermGraph``；
+3. 对有限图做最大双模拟分区和商图最小化；
+4. 对内部/外部选择重新执行展平、交换和幂等规范化；
+5. 删除配置根的 Empty 单位元、稳定排序根，但保留并行分量重数；
+6. 生成不可变、可哈希的 ``EquiRecursiveStateKey``。
+
+因此 ``mu t.T``、``T[mu t.T/t]`` 以及任意有限次展开共享同一个状态编号。
+通道名、输入/输出方向、delay 时长、顺序子结构和并行重数仍是可观察结构，不会被
+该商错误合并。最小项图既是状态键，也是 Table 3 的正式运行状态。为了输出，后端
+会从项图确定性生成一棵带 De Bruijn ``mu`` 的规范 AST 代表；该代表不参与推导。
+
 ## 图模型
 
 `TypeTransitionGraph` 保存：
 
 - `initial_state`：初始状态编号；
-- `states`：连续编号的 `TypeState` 元组，每项携带规范化配置 AST；
+- `states`：连续编号的 `TypeState` 元组，每项携带由其项图确定性生成的规范配置
+  AST 展示代表；
 - `transitions`：`TypeTransition` 元组；
 - `complete` 与 `truncation_reason`：可达闭包是否完整。
 
@@ -125,13 +147,16 @@ Bottom、内部选择中的 Empty 分支等具有操作语义意义的结构不�
 
 ## Table 3 单步规则
 
-后端为每个状态枚举：
+后端直接读取每个最小循环项图状态并枚举：
 
 1. 内部选择的每个不同非 Bottom 分支；
 2. 每个零时延 timeout；
 3. 任意两并行分量之间的全部互补通信分支配对；
-4. 递归类型一次展开后继承的真实转移；
-5. 满足共同等待前提时唯一的下一个关键 deadline 时间步。
+4. 满足共同等待前提时唯一的下一个关键 deadline 时间步。
+
+论文的 ``[P-mu]`` 在这一实现层被编译为项图回边：通信 continuation 可以直接回到
+已有节点，无需先构造 ``T[mu t.T/t]`` 这样的临时 AST。因此状态边证据只保存真正
+发生的内部选择、通信、timeout 或时间规则，不再保存行政性的递归展开步骤。
 
 零时延 timeout 与边界处可用通信若同时满足 Table 3 前提，两条边都会保留。
 
@@ -147,5 +172,7 @@ Bottom 或其他不能等待的分量，不生成共同时间边。互补通信�
 
 ## 图遍历
 
-图生成器以规范状态为哈希键进行 BFS。新状态获得稳定连续编号；已访问状态形成
-回边而不继续复制递归树。遍历直到队列为空，或达到用户指定的状态/边上限。
+图生成器以最小 ``EquiRecursiveStateKey`` 为状态本体进行 BFS。Table 3 的目标项图
+在每一步后立即删除不可达节点、重新最小化并用作目标状态键；已访问的递归状态形成
+回边而不复制语法树。每个 ``TypeState`` 的规范 AST 只负责展示。遍历直到队列为空，
+或达到用户指定的状态/边上限。

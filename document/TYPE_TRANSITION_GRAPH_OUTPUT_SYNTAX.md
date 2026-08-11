@@ -78,7 +78,9 @@ state_id
 全部列在同一个 `by` 块中；递归或并行规则的前提证据嵌套在所属规则块中。
 
 状态右侧的 `normalized_type_output` 使用
-[规范化 Type AST 只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)。
+[规范化 Type AST 只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)。图节点按等递归
+正规树判重，所以 `mu t.T` 与其有限展开共用一个 `state_id`；右侧文本打印该等价类
+由最小循环项图确定性生成的规范 AST 展示代表。该展示树不参与状态判等或转移计算。
 
 ## 示例
 

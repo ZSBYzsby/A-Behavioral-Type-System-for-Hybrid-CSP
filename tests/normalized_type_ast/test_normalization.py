@@ -119,7 +119,7 @@ class NormalizedTypeConversionTests(unittest.TestCase):
     # 测试输入：仅递归绑定变量名称不同的两个 mu，以及一个裸自由 TypeVar。
     # 预期行为：两个 mu 规范成相同 De Bruijn 树；自由变量抛规范化错误。
     # 检查内容：alpha 等价成为普通结构相等，规范图状态始终闭合。
-    # 论文对应：Table 3 [P-mu] 使用词法绑定替换，绑定变量拼写没有行为意义。
+    # 论文对应：[P-mu] 的等递归方程不依赖绑定变量的具体拼写。
     def test_recursive_names_become_de_bruijn_indices(self) -> None:
         """递归规范化消除绑定名并拒绝无绑定引用。"""
 

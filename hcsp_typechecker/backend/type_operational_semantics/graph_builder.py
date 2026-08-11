@@ -1,4 +1,4 @@
-"""从原 Type AST 构造规范化、穷尽非确定性的一张 Table 3 可达状态图。"""
+"""把 Type AST 编译成循环项图，并在项图语义上穷尽 Table 3 状态图。"""
 
 from __future__ import annotations
 
@@ -15,6 +15,10 @@ from ...data_structures.type_transition_graph import (
     TypeState,
     TypeTransition,
     TypeTransitionGraph,
+)
+from .regular_tree import (
+    equi_recursive_state_key,
+    normalized_type_from_state_key,
 )
 from .table3 import derive_one_step
 
@@ -43,10 +47,18 @@ def _build_normalized_graph(
     max_states: int | None,
     max_transitions: int | None,
 ) -> TypeTransitionGraph:
-    """为已规范化初态分配稳定编号、合并同边证据并冻结图。"""
+    """以最小循环项图作为状态本体，合并同边证据并冻结可达图。
 
-    state_ids: dict[NormalizedConfigurationType, int] = {initial: 0}
-    state_values: list[NormalizedConfigurationType] = [initial]
+    Table 3 直接作用于 ``state_keys`` 中的项图。``state_values`` 仅保存由该规范
+    项图确定性重建的可读 AST 代表，因此展示形式不会反过来影响状态出边。
+    """
+
+    initial_key = equi_recursive_state_key(initial)
+    state_ids = {initial_key: 0}
+    state_keys = [initial_key]
+    state_values: list[NormalizedConfigurationType] = [
+        normalized_type_from_state_key(initial_key)
+    ]
     pending: deque[int] = deque((0,))
     edge_derivations: dict[
         tuple[int, TransitionLabel, int],
@@ -57,9 +69,10 @@ def _build_normalized_graph(
 
     while pending and complete:
         source_id = pending.popleft()
-        source = state_values[source_id]
+        source = state_keys[source_id]
         for derived in derive_one_step(source):
-            target_id = state_ids.get(derived.target)
+            target_key = derived.target
+            target_id = state_ids.get(target_key)
             if target_id is None:
                 if (
                     max_transitions is not None
@@ -75,8 +88,9 @@ def _build_normalized_graph(
                     truncation_reason = f"maximum state count {max_states} reached"
                     break
                 target_id = len(state_values)
-                state_ids[derived.target] = target_id
-                state_values.append(derived.target)
+                state_ids[target_key] = target_id
+                state_keys.append(target_key)
+                state_values.append(normalized_type_from_state_key(target_key))
                 pending.append(target_id)
 
             edge_key = (source_id, derived.label, target_id)

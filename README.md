@@ -133,8 +133,10 @@ print(len(graph.states), len(graph.transitions), graph.complete)
 该接口先把已有 Type AST 单向转换为操作语义专用的规范化 Type AST，再以初态为
 根穷尽 Table 3 的全部可达非确定性后继。规范化会消除并行排列和空单位元差异，
 把内部选择按结合/交换/幂等律展平排序去重，把外部选择按交换/幂等律排序去重，并
-使用 De Bruijn index 消除递归绑定变量改名差异。规范化 AST 只作为图结点内容，
-不提供转回原 Type AST 的接口。
+使用 De Bruijn index 消除递归绑定变量改名差异。图判重时还会把递归绑定转换为
+有限循环项图并做双模拟最小化，所以 `mu t.T` 与任意有限次展开不会形成重复状态。
+Table 3 直接作用于最小循环项图；每个图结点的规范化 AST 仅由该项图确定性生成，
+用于输出而不参与转移计算。项目不提供转回原 Type AST 的接口。
 
 规范状态输出沿用 `parallel`、`empty`、`internal`、`delay`、`forever` 和
 `angelic`；根部增加 `normalized` 标记。由于规范内部选择已经展平，分支不再套

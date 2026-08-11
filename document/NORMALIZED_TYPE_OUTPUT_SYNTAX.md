@@ -1,6 +1,7 @@
 # 规范化 Type AST 只读输出语法
 
-状态迁移图的每个 `TypeState` 都保存一个 `NormalizedConfigurationType`。为了让用户
+状态迁移图的每个 `TypeState` 都保存一个由其最小循环项图确定性生成的
+`NormalizedConfigurationType` 展示代表。为了让用户
 不必学习一套完全不同的 Type 写法，状态图接口的内部 formatter 尽量复用原用户
 Type 语法，只在规范化真正改变结构的地方采用新的明确写法：根部使用
 `normalized type`，扁平内部选择不再使用规则分块圆括号，匿名递归使用 `mu {T}`，
@@ -118,5 +119,8 @@ normalized type parallel {
 
 该文本继续使用用户熟悉的 `parallel`、`delay`、`angelic`、`internal`、`empty`、
 `bottom`、`forever` 和 `mu`。规范化已经完成的排序、展平、去重、并行单位元删除
-和 alpha 等价消除，会直接反映在分支顺序、分支数量及递归位置中。因此，在项目
-已确认的规范等价关系下，同一状态只会得到一份相同文本。
+和 alpha 等价消除，会直接反映在分支顺序、分支数量及递归位置中。
+
+状态图还会把 `mu t.T` 与 `T[mu t.T/t]` 按等递归正规树合并。只读 formatter 不把
+原 Type AST，而是从规范循环项图生成一个稳定的 De Bruijn `mu` 展示树；因此同一个
+状态编号始终只有一份展示文本，但单独比较两段输出文本不能代替等递归状态键。

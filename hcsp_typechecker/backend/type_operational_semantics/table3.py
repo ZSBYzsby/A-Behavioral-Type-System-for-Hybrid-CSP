@@ -1,8 +1,13 @@
-r"""在规范化 Type AST 上穷尽计算 Table 3 的全部一步转移。
+r"""直接在有限循环 Type 项图上计算 Table 3 的一步操作语义。
 
-实现采用项目确认的最大共同时间策略：时间边只前进到所有并行分量的下一个最早
-有限 deadline；若全部可等待分量均为无穷时延，则生成带 ``infinity`` 的时间自循环。
-内部/外部选择已经在规范化 AST 中按已确认的代数律取商。
+递归 ``mu`` 与递归变量在进入本模块前已经编译成项图回边；内部/外部选择也已经
+按照项目采用的结合、交换和幂等律取商。因此，本模块不选择某棵规范 Type AST
+作为状态代表，也不执行语法树展开。每条转移直接读取项图根，替换相应的根或
+deadline 节点，再把目标项图裁剪并按等递归正规树重新最小化。
+
+时间语义采用项目确认的“下一个关键 deadline”策略：全部非空并行分量必须能够
+共同等待，且不同分量的 ready set 中不能存在互补动作；有限 deadline 取最小值，
+全部为无穷时生成 ``infinity`` 时间自循环。
 """
 
 from __future__ import annotations
@@ -10,21 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 
-from ...data_structures.normalized_type_ast import (
-    NormalizedAngelicType,
-    NormalizedBottomType,
-    NormalizedBoundTypeVar,
-    NormalizedConfigurationType,
-    NormalizedEmptyType,
-    NormalizedExternalChoiceType,
-    NormalizedFiniteDelayType,
-    NormalizedInfiniteDelayType,
-    NormalizedInputType,
-    NormalizedInternalChoiceType,
-    NormalizedMuType,
-    NormalizedNoInterruptType,
-    NormalizedOutputType,
-    NormalizedProcessType,
+from ...data_structures.regular_type_term_graph import (
+    CanonicalRegularTypeNode,
+    EquiRecursiveStateKey,
+    RegularTypeNode,
+    RegularTypeNodeKind,
+    RegularTypeTermGraph,
 )
 from ...data_structures.type_transition_graph import (
     CommunicationDirection,
@@ -36,103 +32,102 @@ from ...data_structures.type_transition_graph import (
     TransitionDerivation,
     TransitionLabel,
 )
-from .substitution import unfold_mu
+from .regular_tree import minimize_regular_type_term_graph
 
 
 @dataclass(frozen=True, slots=True)
 class DerivedTransition:
-    """尚未分配图状态编号的一条 Table 3 直接后继。"""
+    """尚未分配状态编号的一条项图级 Table 3 直接后继。"""
 
-    target: NormalizedConfigurationType
+    target: EquiRecursiveStateKey
     label: TransitionLabel
     derivation: TransitionDerivation
 
 
 @dataclass(frozen=True, slots=True)
-class _ProcessStep:
-    """一个并行分量可独立完成的瞬时过程转移。"""
+class _RootStep:
+    """一个并行根能够独立完成的瞬时替换。"""
 
-    target: NormalizedProcessType
+    target_root: int
     derivation: TransitionDerivation
 
 
 @dataclass(frozen=True, slots=True)
 class _CommunicationOffer:
-    """一个 delay 分量经零或多层递归暴露出的通信分支。"""
+    """一个 delay 根的 angelic 子图暴露出的通信分支。"""
 
     branch_index: int
-    branch: NormalizedInputType | NormalizedOutputType
-    recursion_depth: int
+    branch_node: int
+    channel: str
+    direction: CommunicationDirection
+    continuation: int
 
 
 @dataclass(frozen=True, slots=True)
 class _WaitProfile:
-    """分量当前可等待的 deadline 与 ready set。"""
+    """一个项图根当前剩余的 deadline 与 ready set。"""
 
     deadline: Fraction | InfiniteTime
     ready: frozenset[ReadyAction]
 
 
 def derive_one_step(
-    state: NormalizedConfigurationType,
+    state: EquiRecursiveStateKey,
 ) -> tuple[DerivedTransition, ...]:
-    """枚举给定规范状态按 Table 3 可执行的全部瞬时和最大时间转移。"""
+    """枚举一个规范循环项图状态的全部瞬时和最大时间转移。
 
-    if not isinstance(state, NormalizedConfigurationType):
-        raise TypeError("Table 3 semantics requires a normalized configuration")
-    _validate_closed_configuration(state)
+    ``state`` 已经是等递归正规树的最小有限表示，所以 ``[P-mu]`` 在这里表现为
+    沿回边读取 continuation，而不是额外的 AST 展开规则。返回的每个目标也立即
+    重新最小化，因而调用者无需再次做状态等价判定。
+    """
+
+    if not isinstance(state, EquiRecursiveStateKey):
+        raise TypeError("Table 3 semantics requires an equi-recursive state key")
+
     transitions: list[DerivedTransition] = []
-    components = state.components
+    roots = state.component_roots
 
-    for index, component in enumerate(components):
-        for process_step in _process_silent_steps(component):
-            target = _replace_components(state, {index: process_step.target})
+    for component_index, root in enumerate(roots):
+        for step in _root_silent_steps(state, root):
+            target = _replace_roots(
+                state,
+                {component_index: step.target_root},
+            )
             transitions.append(
                 DerivedTransition(
                     target,
                     SilentTransitionLabel(),
-                    _with_component(process_step.derivation, index),
+                    _with_component(step.derivation, component_index),
                 )
             )
 
-    offers = tuple(_communication_offers(component) for component in components)
-    for left_index in range(len(components)):
-        for right_index in range(left_index + 1, len(components)):
+    offers = tuple(_communication_offers(state, root) for root in roots)
+    for left_index in range(len(roots)):
+        for right_index in range(left_index + 1, len(roots)):
             for left_offer in offers[left_index]:
                 for right_offer in offers[right_index]:
                     if not _offers_match(left_offer, right_offer):
                         continue
-                    target = _replace_components(
+                    target = _replace_roots(
                         state,
                         {
-                            left_index: left_offer.branch.continuation,
-                            right_index: right_offer.branch.continuation,
+                            left_index: left_offer.continuation,
+                            right_index: right_offer.continuation,
                         },
-                    )
-                    derivation = TransitionDerivation(
-                        Table3Rule.COMMUNICATION,
-                        component_indices=(left_index, right_index),
-                        branch_indices=(
-                            left_offer.branch_index,
-                            right_offer.branch_index,
-                        ),
-                        channel=left_offer.branch.channel,
-                    )
-                    derivation = _wrap_recursion_derivation(
-                        derivation,
-                        left_index,
-                        left_offer.recursion_depth,
-                    )
-                    derivation = _wrap_recursion_derivation(
-                        derivation,
-                        right_index,
-                        right_offer.recursion_depth,
                     )
                     transitions.append(
                         DerivedTransition(
                             target,
                             SilentTransitionLabel(),
-                            derivation,
+                            TransitionDerivation(
+                                Table3Rule.COMMUNICATION,
+                                component_indices=(left_index, right_index),
+                                branch_indices=(
+                                    left_offer.branch_index,
+                                    right_offer.branch_index,
+                                ),
+                                channel=left_offer.channel,
+                            ),
                         )
                     )
 
@@ -142,151 +137,151 @@ def derive_one_step(
     return _deduplicate_derived(transitions)
 
 
-def _process_silent_steps(value: NormalizedProcessType) -> tuple[_ProcessStep, ...]:
-    """计算单个过程分量的 timeout、内部选择或递归继承瞬时步。"""
+def _root_silent_steps(
+    state: EquiRecursiveStateKey,
+    root: int,
+) -> tuple[_RootStep, ...]:
+    """计算项图根的内部选择与零时延 timeout 瞬时步。"""
 
-    if isinstance(value, NormalizedInternalChoiceType):
+    node = state.nodes[root]
+    if node.kind is RegularTypeNodeKind.INTERNAL_CHOICE:
         return tuple(
-            _ProcessStep(
+            _RootStep(
                 branch,
                 TransitionDerivation(
                     Table3Rule.INTERNAL_CHOICE,
                     branch_indices=(index,),
                 ),
             )
-            for index, branch in enumerate(value.branches)
-            if not isinstance(branch, NormalizedBottomType)
+            for index, branch in enumerate(node.children)
+            if state.nodes[branch].kind is not RegularTypeNodeKind.BOTTOM
         )
-    if isinstance(value, NormalizedFiniteDelayType) and value.duration == 0:
+    if (
+        node.kind is RegularTypeNodeKind.FINITE_DELAY
+        and node.payload == Fraction(0)
+    ):
         return (
-            _ProcessStep(
-                value.continuation,
+            _RootStep(
+                node.children[1],
                 TransitionDerivation(Table3Rule.TIMEOUT),
             ),
-        )
-    if isinstance(value, NormalizedMuType):
-        unfolded = unfold_mu(value)
-        return tuple(
-            _ProcessStep(
-                step.target,
-                TransitionDerivation(
-                    Table3Rule.RECURSION,
-                    premises=(step.derivation,),
-                ),
-            )
-            for step in _process_silent_steps(unfolded)
         )
     return ()
 
 
 def _communication_offers(
-    value: NormalizedProcessType,
-    recursion_depth: int = 0,
+    state: EquiRecursiveStateKey,
+    root: int,
 ) -> tuple[_CommunicationOffer, ...]:
-    """提取 delay 顶层全部通信分支，并记录递归透明展开层数。"""
+    """提取 delay 根的全部输入/输出中断分支。"""
 
-    if isinstance(value, (NormalizedFiniteDelayType, NormalizedInfiniteDelayType)):
-        return tuple(
-            _CommunicationOffer(index, branch, recursion_depth)
-            for index, branch in enumerate(_communication_branches(value.interrupts))
-        )
-    if isinstance(value, NormalizedMuType):
-        return _communication_offers(unfold_mu(value), recursion_depth + 1)
-    return ()
-
-
-def _communication_branches(
-    value: NormalizedAngelicType,
-) -> tuple[NormalizedInputType | NormalizedOutputType, ...]:
-    """把规范 angelic type 统一查看为零个或多个通信分支。"""
-
-    if isinstance(value, NormalizedNoInterruptType):
+    node = state.nodes[root]
+    if node.kind not in {
+        RegularTypeNodeKind.FINITE_DELAY,
+        RegularTypeNodeKind.INFINITE_DELAY,
+    }:
         return ()
-    if isinstance(value, (NormalizedInputType, NormalizedOutputType)):
-        return (value,)
-    if isinstance(value, NormalizedExternalChoiceType):
-        return value.branches
-    raise TypeError(f"Unsupported normalized angelic type: {type(value).__name__}")
+    interrupt_root = node.children[0]
+    branch_nodes = _communication_branch_nodes(state, interrupt_root)
+    offers: list[_CommunicationOffer] = []
+    for index, branch_id in enumerate(branch_nodes):
+        branch = state.nodes[branch_id]
+        if branch.kind is RegularTypeNodeKind.INPUT:
+            direction = CommunicationDirection.INPUT
+        elif branch.kind is RegularTypeNodeKind.OUTPUT:
+            direction = CommunicationDirection.OUTPUT
+        else:  # pragma: no cover - protected by term-graph invariants
+            raise TypeError("Angelic branch is not a communication node")
+        if not isinstance(branch.payload, str):  # defensive payload narrowing
+            raise TypeError("Communication node does not contain a channel")
+        offers.append(
+            _CommunicationOffer(
+                index,
+                branch_id,
+                branch.payload,
+                direction,
+                branch.children[0],
+            )
+        )
+    return tuple(offers)
 
 
-def _offers_match(left: _CommunicationOffer, right: _CommunicationOffer) -> bool:
-    """判断两个通信 offer 是否同信道且输入输出方向互补。"""
+def _communication_branch_nodes(
+    state: EquiRecursiveStateKey,
+    interrupt_root: int,
+) -> tuple[int, ...]:
+    """把 angelic 子图根统一查看为零个或多个通信节点编号。"""
 
-    if left.branch.channel != right.branch.channel:
-        return False
-    return isinstance(left.branch, NormalizedInputType) != isinstance(
-        right.branch,
-        NormalizedInputType,
+    node = state.nodes[interrupt_root]
+    if node.kind is RegularTypeNodeKind.NO_INTERRUPT:
+        return ()
+    if node.kind in {RegularTypeNodeKind.INPUT, RegularTypeNodeKind.OUTPUT}:
+        return (interrupt_root,)
+    if node.kind is RegularTypeNodeKind.EXTERNAL_CHOICE:
+        return node.children
+    raise TypeError(
+        f"Delay interrupt child has invalid kind: {node.kind.value!r}"
     )
 
 
-def _ready_set(value: NormalizedAngelicType) -> frozenset[ReadyAction]:
-    """根据 Table 3 的定义计算一个 angelic type 的 ready set。"""
+def _offers_match(left: _CommunicationOffer, right: _CommunicationOffer) -> bool:
+    """判断两个 offer 是否同信道且输入输出方向互补。"""
+
+    return (
+        left.channel == right.channel
+        and left.direction is not right.direction
+    )
+
+
+def _ready_set(
+    state: EquiRecursiveStateKey,
+    interrupt_root: int,
+) -> frozenset[ReadyAction]:
+    """直接从 angelic 子图计算 Table 3 ready set。"""
 
     actions: set[ReadyAction] = set()
-    for branch in _communication_branches(value):
+    for branch_id in _communication_branch_nodes(state, interrupt_root):
+        branch = state.nodes[branch_id]
         direction = (
             CommunicationDirection.INPUT
-            if isinstance(branch, NormalizedInputType)
+            if branch.kind is RegularTypeNodeKind.INPUT
             else CommunicationDirection.OUTPUT
         )
-        actions.add(ReadyAction(branch.channel, direction))
+        if not isinstance(branch.payload, str):
+            raise TypeError("Communication node does not contain a channel")
+        actions.add(ReadyAction(branch.payload, direction))
     return frozenset(actions)
 
 
-def _wait_profile(value: NormalizedProcessType) -> _WaitProfile | None:
-    """返回分量的剩余 deadline/ready set；不能等待时返回 None。"""
+def _wait_profile(
+    state: EquiRecursiveStateKey,
+    root: int,
+) -> _WaitProfile | None:
+    """返回项图根的剩余 deadline/ready set；不能等待时返回 ``None``。"""
 
-    if isinstance(value, NormalizedFiniteDelayType):
-        if value.duration == 0:
+    node = state.nodes[root]
+    if node.kind is RegularTypeNodeKind.FINITE_DELAY:
+        if node.payload == Fraction(0):
             return None
-        return _WaitProfile(value.duration, _ready_set(value.interrupts))
-    if isinstance(value, NormalizedInfiniteDelayType):
-        return _WaitProfile(InfiniteTime.VALUE, _ready_set(value.interrupts))
-    if isinstance(value, NormalizedMuType):
-        return _wait_profile(unfold_mu(value))
+        if not isinstance(node.payload, Fraction):
+            raise TypeError("Finite-delay node does not contain a rational duration")
+        return _WaitProfile(node.payload, _ready_set(state, node.children[0]))
+    if node.kind is RegularTypeNodeKind.INFINITE_DELAY:
+        return _WaitProfile(
+            InfiniteTime.VALUE,
+            _ready_set(state, node.children[0]),
+        )
     return None
 
 
-def _advance_process(
-    value: NormalizedProcessType,
-    duration: Fraction | InfiniteTime,
-) -> _ProcessStep:
-    """让一个已确认可等待的分量前进共同时间并给出规则证据。"""
-
-    if isinstance(value, NormalizedFiniteDelayType):
-        if not isinstance(duration, Fraction) or duration > value.duration:
-            raise ValueError("Finite delay cannot advance by the requested duration")
-        return _ProcessStep(
-            NormalizedFiniteDelayType(
-                value.duration - duration,
-                value.interrupts,
-                value.continuation,
-            ),
-            TransitionDerivation(Table3Rule.DELAY),
-        )
-    if isinstance(value, NormalizedInfiniteDelayType):
-        return _ProcessStep(value, TransitionDerivation(Table3Rule.DELAY))
-    if isinstance(value, NormalizedMuType):
-        step = _advance_process(unfold_mu(value), duration)
-        return _ProcessStep(
-            step.target,
-            TransitionDerivation(
-                Table3Rule.RECURSION,
-                premises=(step.derivation,),
-            ),
-        )
-    raise ValueError(f"Process type {type(value).__name__} cannot wait")
-
-
 def _derive_maximal_time_step(
-    state: NormalizedConfigurationType,
+    state: EquiRecursiveStateKey,
 ) -> DerivedTransition | None:
-    """在全部分量可等待且无互补 ready 动作时生成唯一最大共同时间步。"""
+    """在全部根可等待且无互补 ready 动作时生成唯一最大共同时间步。"""
 
     profiles: list[_WaitProfile] = []
-    for component in state.components:
-        profile = _wait_profile(component)
+    for root in state.component_roots:
+        profile = _wait_profile(state, root)
         if profile is None:
             return None
         profiles.append(profile)
@@ -311,20 +306,44 @@ def _derive_maximal_time_step(
     else:
         duration = InfiniteTime.VALUE
 
-    process_steps = tuple(
-        _advance_process(component, duration) for component in state.components
-    )
-    target = NormalizedConfigurationType(step.target for step in process_steps)
-    ready = frozenset(
-        action for profile in profiles for action in profile.ready
-    )
-    if len(process_steps) == 1:
-        derivation = process_steps[0].derivation
+    nodes = list(state.nodes)
+    advanced: dict[int, int] = {}
+    target_roots: list[int] = []
+    component_derivations: list[TransitionDerivation] = []
+    for root in state.component_roots:
+        node = state.nodes[root]
+        if node.kind is RegularTypeNodeKind.INFINITE_DELAY:
+            target_root = root
+        else:
+            if not isinstance(duration, Fraction):
+                raise ValueError("Finite delay cannot advance by infinity")
+            target_root = advanced.get(root, -1)
+            if target_root < 0:
+                if not isinstance(node.payload, Fraction):
+                    raise TypeError("Finite-delay node has an invalid duration")
+                target_root = len(nodes)
+                nodes.append(
+                    CanonicalRegularTypeNode(
+                        RegularTypeNodeKind.FINITE_DELAY,
+                        node.payload - duration,
+                        node.children,
+                    )
+                )
+                advanced[root] = target_root
+        target_roots.append(target_root)
+        component_derivations.append(
+            TransitionDerivation(Table3Rule.DELAY)
+        )
+
+    target = _canonicalize_graph(tuple(target_roots), tuple(nodes))
+    ready = frozenset(action for profile in profiles for action in profile.ready)
+    if len(target_roots) == 1:
+        derivation = component_derivations[0]
     else:
         derivation = TransitionDerivation(
             Table3Rule.PARALLEL_TIME,
-            component_indices=tuple(range(len(process_steps))),
-            premises=tuple(step.derivation for step in process_steps),
+            component_indices=tuple(range(len(target_roots))),
+            premises=tuple(component_derivations),
         )
     return DerivedTransition(
         target,
@@ -333,24 +352,54 @@ def _derive_maximal_time_step(
     )
 
 
-def _replace_components(
-    state: NormalizedConfigurationType,
-    replacements: dict[int, NormalizedProcessType],
-) -> NormalizedConfigurationType:
-    """替换指定并行分量并重新执行并行规范化。"""
+def _replace_roots(
+    state: EquiRecursiveStateKey,
+    replacements: dict[int, int],
+) -> EquiRecursiveStateKey:
+    """替换指定并行根并把目标项图重新裁剪、最小化。"""
 
-    components = tuple(
-        replacements.get(index, component)
-        for index, component in enumerate(state.components)
+    roots = tuple(
+        replacements.get(index, root)
+        for index, root in enumerate(state.component_roots)
     )
-    return NormalizedConfigurationType(components)
+    return _canonicalize_graph(roots, state.nodes)
+
+
+def _canonicalize_graph(
+    roots: tuple[int, ...],
+    nodes: tuple[CanonicalRegularTypeNode, ...],
+) -> EquiRecursiveStateKey:
+    """删除不可达节点，建立普通项图，再复用统一双模拟最小化器。"""
+
+    reachable: set[int] = set()
+    pending = list(roots)
+    while pending:
+        node_id = pending.pop()
+        if node_id in reachable:
+            continue
+        reachable.add(node_id)
+        pending.extend(nodes[node_id].children)
+    ordered = tuple(sorted(reachable))
+    renumber = {old_id: new_id for new_id, old_id in enumerate(ordered)}
+    graph = RegularTypeTermGraph(
+        tuple(renumber[root] for root in roots),
+        tuple(
+            RegularTypeNode(
+                nodes[old_id].kind,
+                nodes[old_id].payload,
+                tuple(renumber[child] for child in nodes[old_id].children),
+            )
+            for old_id in ordered
+        ),
+    )
+    return minimize_regular_type_term_graph(graph)
 
 
 def _with_component(
     derivation: TransitionDerivation,
     component_index: int,
 ) -> TransitionDerivation:
-    """把局部过程规则证据关联到规范配置中的分量出现位置。"""
+    """把局部规则证据关联到规范配置中的分量位置。"""
 
     return TransitionDerivation(
         derivation.rule,
@@ -361,27 +410,10 @@ def _with_component(
     )
 
 
-def _wrap_recursion_derivation(
-    derivation: TransitionDerivation,
-    component_index: int,
-    depth: int,
-) -> TransitionDerivation:
-    """按通信 offer 穿过的递归层数包裹 ``[P-mu]`` 证据。"""
-
-    wrapped = derivation
-    for _ in range(depth):
-        wrapped = TransitionDerivation(
-            Table3Rule.RECURSION,
-            component_indices=(component_index,),
-            premises=(wrapped,),
-        )
-    return wrapped
-
-
 def _deduplicate_derived(
     transitions: list[DerivedTransition],
 ) -> tuple[DerivedTransition, ...]:
-    """删除完全相同的规则实例，但保留同边的不同推导证据供图层合并。"""
+    """删除完全相同的规则实例，保留同边的不同推导证据。"""
 
     seen: set[DerivedTransition] = set()
     ordered: list[DerivedTransition] = []
@@ -393,41 +425,4 @@ def _deduplicate_derived(
     return tuple(ordered)
 
 
-def _validate_closed_configuration(state: NormalizedConfigurationType) -> None:
-    """防御性检查规范状态中的 De Bruijn 引用均落在所属递归作用域内。"""
-
-    for component in state.components:
-        _validate_closed_process(component, 0)
-
-
-def _validate_closed_process(value: NormalizedProcessType, depth: int) -> None:
-    """在当前 binder depth 下递归检查一个规范过程类型。"""
-
-    if isinstance(value, (NormalizedEmptyType, NormalizedBottomType)):
-        return
-    if isinstance(value, NormalizedBoundTypeVar):
-        if value.index >= depth:
-            raise ValueError("Normalized state contains a free type variable")
-        return
-    if isinstance(value, NormalizedInternalChoiceType):
-        for branch in value.branches:
-            _validate_closed_process(branch, depth)
-        return
-    if isinstance(value, NormalizedFiniteDelayType):
-        _validate_closed_angelic(value.interrupts, depth)
-        _validate_closed_process(value.continuation, depth)
-        return
-    if isinstance(value, NormalizedInfiniteDelayType):
-        _validate_closed_angelic(value.interrupts, depth)
-        return
-    if isinstance(value, NormalizedMuType):
-        _validate_closed_process(value.body, depth + 1)
-        return
-    raise TypeError(f"Unsupported normalized process type: {type(value).__name__}")
-
-
-def _validate_closed_angelic(value: NormalizedAngelicType, depth: int) -> None:
-    """检查 angelic type 的全部通信 continuation 均为闭合过程类型。"""
-
-    for branch in _communication_branches(value):
-        _validate_closed_process(branch.continuation, depth)
+__all__ = ["DerivedTransition", "derive_one_step"]

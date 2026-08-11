@@ -132,7 +132,7 @@ class NormalizedTypeSerializerTests(unittest.TestCase):
     # 测试输入：外层 outer 与内层 inner 都经通信受保护，内层体分别引用两层变量。
     # 预期行为：inner 显示 recursion_position(0)，outer 显示 recursion_position(1)。
     # 检查内容：匿名 mu 不丢失 De Bruijn 绑定距离，且不重新伪造变量名称。
-    # 论文对应：Table 3 的递归展开必须区分最近 binder 与再外一层 binder。
+    # 论文对应：循环项图重建递归展示树时必须区分最近 binder 与再外一层 binder。
     def test_nested_mu_displays_de_bruijn_recursion_positions(self) -> None:
         """嵌套递归用位置而不是合成变量名表达绑定关系。"""
 
