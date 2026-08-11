@@ -3,8 +3,8 @@
 完整入口按 ``document/GAMMA_THETA_INPUT_SYNTAX.md`` 从同一 token 流中依次构造
 Gamma、可选共享参数环境、Theta 和 Process AST；Process/Expr 子语法仍由
 ``document/HCSP_INPUT_SYNTAX.md`` 定义。语句块统一交给 ``Sequence.of`` lowering，
-使内部选择后面的公共后继进入多元 ``InternalChoice.continuation``，
-而不会形成项目禁止的外置 ``Sequence(InternalChoice(...), Q)`` 结构。
+使条件、内部选择和 ODE 后面的公共后继进入各自的 ``continuation`` 字段，
+而不会形成项目禁止的外置 ``Sequence(control, Q)`` 结构。
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from ...data_structures.runtime_context import (
     GammaType,
     ParameterEnvironment,
 )
-from .errors import HCSPInputError, SourcePosition
+from ..errors import HCSPInputError, SourcePosition
 from .lexer import Token, tokenize
 from .source import ParsedHCSPSource
 
@@ -436,6 +436,7 @@ class Parser:
                 "statement block cannot be empty; use skip for no behavior",
                 expected=("statement",),
             )
+        statement_tokens = [self.current]
         statements = [self._parse_statement()]
         while self._match(";") is not None:
             if self.current.kind in {";", "}"}:
@@ -443,8 +444,15 @@ class Parser:
                     "semicolon must be followed by another statement",
                     expected=("statement",),
                 )
+            statement_tokens.append(self.current)
             statements.append(self._parse_statement())
         self._expect("}")
+        if isinstance(statements[-1], ODE):
+            raise self._validation_error(
+                "an ODE must have an explicit sequential successor; append "
+                "'; skip' when it has no actual successor",
+                statement_tokens[-1],
+            )
         return self._construct(start, lambda: Sequence.of(*statements))
 
     def _parse_statement(self) -> Process:

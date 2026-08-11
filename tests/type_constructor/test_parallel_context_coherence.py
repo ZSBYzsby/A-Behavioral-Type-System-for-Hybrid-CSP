@@ -1,12 +1,12 @@
-r"""Table 2 [T-||] 的 Gamma/路径组合一致性测试。
+r"""Table 2 [T-||] 的共享 Gamma、状态所有权与路径组合测试。
 
 测试内容
 --------
-本文件专门验证 Assumption 2.1 之外的并行 typing-context 条件：
+本文件专门验证统一 Gamma 下的并行 typing-context 条件：
 
 1. Assumption 2.1 已在 process AST 层保证并行进程不共享程序变量；
-2. 每个 Configuration 的局部 Gamma 还必须是全局 Gamma 的同型分区，不能
-   新增变量、改变类型或在所有分量的并集中遗漏变量；
+2. 所有 Configuration 直接使用同一份 Gamma；低层接口还会把 state 定义域
+   纳入所有权检查，防止多个配置绕过 Process AST 共享状态；
 3. 使用局部路径时，所有并行叶子必须同时提供，外层 ``true`` 表示 Table 2
    结论路径由局部路径的合取形成，不能再给一条相互冲突的全局路径；
 4. 论文中的有状态配置必须写成多个 ``(sigma, P)`` 叶子。单个
@@ -15,10 +15,9 @@ r"""Table 2 [T-||] 的 Gamma/路径组合一致性测试。
 
 论文对应
 --------
-对应 Definition 4.1 中上下文组合 ``Gamma,Gamma'`` 的定义域不交条件，以及
-Table 2 [T-||]：两个前提分别使用 ``Gamma,phi`` 和 ``Gamma',phi'``，结论使用
-它们的不交并集与合取。Assumption 2.1 负责程序变量集合不交；本文件验证类型
-判断输入本身也确实形成同一个可组合的上下文。
+项目把 Gamma 解释为整个判断共享的类型声明环境，并以 Assumption 2.1 和
+configuration state 所有权保证并行分量不共享可变状态。Theta 和全局参数同样
+共享，局部路径仍按 Table 2 [T-||] 的前提分别建立。
 """
 
 from __future__ import annotations
@@ -42,24 +41,52 @@ from hcsp_typechecker._internal import (
 
 
 class ParallelContextCoherenceTests(unittest.TestCase):
-    """验证并行分量局部上下文能精确组成入口处的全局判断。"""
+    """验证共享 Gamma 不会放松并行分量的状态所有权约束。"""
 
-    # 测试输入：全局 Gamma 声明 x:Int，唯一局部 Gamma 把同一个 x 改成 Bool。
-    # 预期行为：T-|| 在建立子 judgment 前拒绝改型，结果 false 且无正式类型。
-    # 检查内容：诊断明确展示 global/local 类型，而不是等到状态求值时偶然失败。
-    # 论文对应：Definition 4.1 的上下文组合只能合并既有、互不相交的类型项。
-    def test_local_gamma_cannot_change_a_global_variable_type(self) -> None:
-        """局部 Gamma 不是能够重新声明全局变量类型的覆盖层。"""
+    # 测试输入：全局 Gamma 额外声明 unused:Int，两个自动分区的 skip 都不使用它。
+    # 预期行为：两个 T-sigma 都直接读取完整 Gamma，仍生成 ParallelType。
+    # 检查内容：Gamma 是声明环境而不是状态所有权分区，未使用项可以重复可见。
+    # 论文对应：项目统一 Gamma 约定不改变两个 skip 的行为类型。
+    def test_every_component_uses_the_same_complete_gamma(self) -> None:
+        """每个并行配置直接使用同一份完整 Gamma。"""
+
+        report = construct_type(
+            gamma={"unused": BasicType.INT},
+            theta={},
+            configurations=[
+                Configuration({}, Skip()),
+                Configuration({}, Skip()),
+            ],
+        )
+
+        self.assertEqual(report.verdict, Verdict.TRUE)
+        self.assertTrue(
+            types_equivalent(
+                report.constructed_type,
+                ParallelType((EmptyType(), EmptyType())),
+            )
+        )
+        sigma_gammas = [
+            dict(step.gamma) for step in report.steps if step.rule == "T-sigma"
+        ]
+        self.assertEqual(
+            sigma_gammas,
+            [{"unused": "Int"}, {"unused": "Int"}],
+        )
+
+    # 测试输入：两个低层 Configuration 的 state 都给 x 赋初值，Process 均为 skip。
+    # 预期行为：即使 Process AST 本身没有变量，也拒绝重复拥有同一可变状态 x。
+    # 检查内容：共享 Gamma 不会被误当作共享状态许可。
+    # 论文对应：并行配置的可变状态空间仍必须互不重叠。
+    def test_configuration_states_cannot_share_a_variable(self) -> None:
+        """共享 Gamma 下两个配置仍不能同时拥有同一个状态变量。"""
 
         report = construct_type(
             gamma={"x": BasicType.INT},
             theta={},
             configurations=[
-                Configuration(
-                    {"x": True},
-                    Skip(),
-                    gamma={"x": BasicType.BOOL},
-                )
+                Configuration({"x": 0}, Skip()),
+                Configuration({"x": 1}, Skip()),
             ],
         )
 
@@ -67,60 +94,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         self.assertIsNone(report.constructed_type)
         self.assertTrue(
             any(
-                "global Int, local Bool" in item.message
-                for item in report.diagnostics
-            )
-        )
-
-    # 测试输入：全局 Gamma 含 left/right，但两个局部分量合起来只声明 left。
-    # 预期行为：即使局部 Gamma 两两不交，也因并集不等于全局 Gamma 而失败。
-    # 检查内容：排除“只检查 overlap、不检查 coverage”造成的上下文静默丢失。
-    # 论文对应：[T-||] 结论 Gamma,Gamma' 正是两个前提上下文的完整不交并集。
-    def test_local_gamma_union_must_cover_the_global_gamma(self) -> None:
-        """两两不交只是必要条件，局部 Gamma 还必须完整覆盖全局 Gamma。"""
-
-        report = construct_type(
-            gamma={"left": BasicType.INT, "right": BasicType.INT},
-            theta={},
-            configurations=[
-                Configuration({}, Skip(), gamma={"left": BasicType.INT}),
-                Configuration({}, Skip(), gamma={}),
-            ],
-        )
-
-        self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.constructed_type)
-        self.assertTrue(
-            any(
-                "do not cover the global Gamma: right" in item.message
-                for item in report.diagnostics
-            )
-        )
-
-    # 测试输入：全局 Gamma 为空，局部 Gamma 凭空声明 y:Int。
-    # 预期行为：T-|| 立即拒绝局部新增项，不能把局部环境伪装成全局判断的前提。
-    # 检查内容：结果必须为 false/None，并报告 y 不存在于 global Gamma。
-    # 论文对应：结论上下文由前提上下文组成，检查器入口不能同时声称全局为空。
-    def test_local_gamma_cannot_invent_a_global_variable(self) -> None:
-        """局部 Gamma 中的每个变量都必须来自入口全局 Gamma。"""
-
-        report = construct_type(
-            gamma={},
-            theta={},
-            configurations=[
-                Configuration(
-                    {"y": 1},
-                    Skip(),
-                    gamma={"y": BasicType.INT},
-                )
-            ],
-        )
-
-        self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.constructed_type)
-        self.assertTrue(
-            any(
-                "absent from the global Gamma: y" in item.message
+                "share state variables: x" in item.message
                 for item in report.diagnostics
             )
         )
@@ -199,12 +173,12 @@ class ParallelContextCoherenceTests(unittest.TestCase):
             )
         )
 
-    # 测试输入：把上一个 x/y 系统按论文写成两个状态、Gamma、路径均独立的配置。
+    # 测试输入：把上一个 x/y 系统按论文写成两个状态、路径独立的配置。
     # 预期行为：两个 T-sigma 分别成功，T-|| 生成 ParallelType((0,0))。
-    # 检查内容：验证新增一致性检查不会拒绝合法的不交分区与局部路径合取。
+    # 检查内容：验证共享 Gamma 不会被误判为共享状态，局部路径仍可合取。
     # 论文对应：Table 2 [T-sigma] 两次应用后由 [T-||] 组合。
     def test_explicit_stateful_leaves_form_a_valid_parallel_judgment(self) -> None:
-        """有状态并行的规范输入是多个上下文互不相交的 Configuration。"""
+        """有状态并行的规范输入是多个状态所有权互不相交的 Configuration。"""
 
         report = construct_type(
             gamma={"x": BasicType.INT, "y": BasicType.INT},
@@ -213,14 +187,12 @@ class ParallelContextCoherenceTests(unittest.TestCase):
                 Configuration(
                     {"x": 1},
                     Assert("x > 0"),
-                    gamma={"x": BasicType.INT},
                     path_condition="x > 0",
                     name="left",
                 ),
                 Configuration(
                     {"y": 1},
                     Assert("y > 0"),
-                    gamma={"y": BasicType.INT},
                     path_condition="y > 0",
                     name="right",
                 ),

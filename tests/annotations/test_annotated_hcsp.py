@@ -33,6 +33,7 @@ import unittest
 from hcsp_typechecker._internal import (
     Assign,
     BasicType,
+    BottomType,
     ChannelType,
     Configuration,
     ContinuousType,
@@ -65,6 +66,13 @@ def _approve_dl(_obligation: object) -> Verdict:
     """模拟已经验证全部动态逻辑义务的可信后端。"""
 
     return Verdict.TRUE
+
+
+def _select_communication_only(obligation: object) -> Verdict:
+    """证明纯通信候选，并否证具有真实 deadline 后继的候选。"""
+
+    role = getattr(getattr(obligation, "formula", None), "role", "")
+    return Verdict.FALSE if role == "boundary" else Verdict.TRUE
 
 
 class AnnotationAstTests(unittest.TestCase):
@@ -205,6 +213,7 @@ class AnnotationAstTests(unittest.TestCase):
                 "constraint",
                 "interrupts",
                 "annotation",
+                "continuation",
                 "local_clock",
             ),
         )
@@ -247,10 +256,13 @@ class ODEAnnotationTypingTests(unittest.TestCase):
     def test_true_safety_is_accepted_without_a_dl_backend(self) -> None:
         """安全性质 true 应本地判真，不能因为没有外部证明器变成 unknown。"""
 
-        process = ODE(
-            [("x", 0)],
-            True,
-            annotation=ODEAnnotation(safety=True, delay=math.inf),
+        process = Sequence.of(
+            ODE(
+                [("x", 0)],
+                True,
+                annotation=ODEAnnotation(safety=True, delay=math.inf),
+            ),
+            Skip(),
         )
         report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
@@ -269,60 +281,67 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         self.assertEqual(safety_obligations[0].verdict, Verdict.TRUE)
 
     # 测试输入：静止 ODE，批注明确给出精确有理 delay=1/2。
-    # 预期行为：可信 dL 后端批准域前提后，得到以 EmptyType 为边界后继的
-    #           FiniteDelayType(1/2, NoInterruptType(), EmptyType())。
-    # 检查内容：末尾 ODE 直接通过 T-End 得到空通信行为，不依赖补造 Skip。
-    # 论文对应：Section 4.3 的有限自然到时分支与 Table 2 [T-End]。
+    # 预期行为：可信 dL 后端批准域前提后，得到以 BottomType 表示不可达
+    #           deadline 后继的 FiniteDelayType。
+    # 检查内容：显式 skip 的两条候选都被审计，规范 Type 精确保留有理时延。
+    # 论文对应：Section 4.3 的有限 ODE 候选规则与统一时延类型。
     def test_delay_annotation_appears_in_the_constructed_type(self) -> None:
         """有限有理 d 必须精确形成 delay(d)，而不是由检查器重新计算。"""
 
-        process = ODE(
-            [("x", 0)],
-            True,
-            annotation=ODEAnnotation(delay="1 / 2"),
+        process = Sequence.of(
+            ODE(
+                [("x", 0)],
+                True,
+                annotation=ODEAnnotation(delay="1 / 2"),
+            ),
+            Skip(),
         )
         report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
-            dl_checker=_approve_dl,
+            dl_checker=_select_communication_only,
         )
         expected = FiniteDelayType(
-            Fraction(1, 2), NoInterruptType(), EmptyType()
+            Fraction(1, 2), NoInterruptType(), BottomType()
         )
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(types_equivalent(report.constructed_type, expected))
         self.assertIsInstance(report.constructed_type, FiniteDelayType)
         self.assertEqual(report.constructed_type.duration, Fraction(1, 2))
-        self.assertIsInstance(report.constructed_type.continuation, EmptyType)
-        rules = {item.rule for item in report.obligations}
-        self.assertIn("T-ODE-boundary", rules)
-        self.assertNotIn("T-ODE-domain", rules)
+        self.assertIsInstance(report.constructed_type.continuation, BottomType)
+        rules = {item.rule for item in report.obligations if item.active}
+        self.assertIn("T-ODE-domain", rules)
+        self.assertNotIn("T-ODE-boundary", rules)
         self.assertNotIn("T-ODE-delay", rules)
 
     # 测试输入：x'=1、域 x<=10、安全式 x<=8、delay=2。
     # 预期行为：可信 mock 后端批准后结果为 true。
-    # 检查内容：报告必须同时含 T-ODE-safety 和 T-ODE-boundary 义务。
-    # 论文对应：T-ODE 与带安全性质的连续演化规则需要 dL 验证。
+    # 检查内容：报告必须同时含 T-ODE-safety 和 T-ODE-domain 义务。
+    # 论文对应：无后继的 T-ODE 与纯通信规则需要 safety/domain 验证。
     def test_nontrivial_safety_generates_a_dl_obligation(self) -> None:
         """非恒真安全性质必须交给 dL 后端验证。"""
 
-        process = ODE(
-            [("x", 1)],
-            "x <= 10",
-            annotation=ODEAnnotation(safety="x <= 8", delay=2),
+        process = Sequence.of(
+            ODE(
+                [("x", 1)],
+                "x <= 10",
+                annotation=ODEAnnotation(safety="x <= 8", delay=2),
+            ),
+            Skip(),
         )
         report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
             configurations=[Configuration({"x": 0}, process)],
             path_condition="x == 0",
-            dl_checker=_approve_dl,
+            dl_checker=_select_communication_only,
         )
         self.assertEqual(report.verdict, Verdict.TRUE)
-        rules = {item.rule for item in report.obligations}
+        rules = {item.rule for item in report.obligations if item.active}
         self.assertIn("T-ODE-safety", rules)
-        self.assertIn("T-ODE-boundary", rules)
+        self.assertIn("T-ODE-domain", rules)
+        self.assertNotIn("T-ODE-boundary", rules)
 
     # 测试输入：有限时延 ODE 后顺序连接具有 Int 载荷的 ``done!0``。
     # 预期行为：无通信中断使结果成为 FiniteDelayType，continuation 是 done!。

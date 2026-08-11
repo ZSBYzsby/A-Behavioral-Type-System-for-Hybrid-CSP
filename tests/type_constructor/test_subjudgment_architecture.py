@@ -28,6 +28,8 @@ from hcsp_typechecker._internal import (
     Configuration,
     ODE,
     ODEAnnotation,
+    Sequence,
+    Skip,
     TypeConstructor,
     TypeConstructionRequest,
     Verdict,
@@ -131,7 +133,14 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
                 configurations=[
                     Configuration(
                         {},
-                        ODE((), "t < 1", annotation=ODEAnnotation(delay=1)),
+                        Sequence.of(
+                            ODE(
+                                (),
+                                "t < 1",
+                                annotation=ODEAnnotation(delay=1),
+                            ),
+                            Skip(),
+                        ),
                     )
                 ],
             )
@@ -154,12 +163,12 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
         self.assertIn("formula[dl:T-ODE-safety]", ode_step.detail)
         self.assertIn("formula[dl:T-ODE-boundary]", ode_step.detail)
         self.assertIn("event[E]", ode_step.detail)
-        self.assertIn("process[T-End]", ode_step.detail)
+        self.assertIn("process[skip]", ode_step.detail)
         step_rules = tuple(step.rule for step in report.steps)
         self.assertIn("Proof", step_rules)
         self.assertEqual(
             tuple(item[0] for item in proof_observations),
-            ("boundary",),
+            ("domain", "boundary"),
         )
         for _role, rules_at_call, obligations_at_call in proof_observations:
             with self.subTest(role=_role):

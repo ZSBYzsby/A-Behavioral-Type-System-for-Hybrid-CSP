@@ -511,7 +511,10 @@ lower_block({P1; ...; Pn})
     = Sequence.of(P1, ..., Pn)
 ```
 
-对于内部选择，块中位于选择之后的语句是所有分支的公共后继。解析器必须直接构造当前项目使用的多元 `InternalChoice`，不能先构造二元选择再包一层普通 `Sequence`。
+对于 `if`、内部选择和 ODE，块中位于控制节点之后的语句是它的公共后继。
+解析器必须把该后继直接写入相应节点的 `continuation` 字段，不能再包一层普通
+`Sequence`。因此这些控制节点只会位于各自顺序主干的末端；它们内部的 Q 仍按
+Table 2 继续执行。
 
 ### 6.3 通信
 
@@ -542,9 +545,15 @@ lower_block({P1; ...; Pn})
 - `t` 可以用于方程右端、`domain` 和 `safety`，但不能写在用户方程左端。
 - 隐式时钟不计入用户连续变量向量，也不进入中断分支或 ODE 外部后继的作用域。
 - 有限 `delay` 必须求值为非负有理数；普通 ODE 还允许 `delay(inf)`。
-- 不支持 `wait(d)` 语法糖。若要表示有限等待，应显式写
-  `ode(flow(), domain(t < d), delay(d))`；若它位于语句块末尾，构造器将其
-  正常结束解释为隐式 `skip`，因此得到 `delay(d).0`。
+- 不支持 `wait(d)` 语法糖。若要表示在 `d` 时自然结束的有限等待，应显式写
+  `ode(flow(), domain(t < d), delay(d)); skip`。
+- 每个 ODE 后都必须显式存在顺序语句；没有实际后继时也要写 `; skip`。裸 ODE
+  结束语句块会在输入前端报错。
+- 前端把 `ODE; Q` 规范为 `ODE(..., continuation=Q)`；不会生成
+  `Sequence(ODE(...), Q)`。
+- `ODE; skip` 同时试用两种解释：`skip` 可作为 `T-\unrhd` 的无后继占位，
+  也可作为 `T-\unrhd'` 的真实空后继；Constructor 根据 domain/boundary 的
+  证明结果选择。`ODE; P` 且 `P` 非 skip 时只使用 prime 规则。
 
 ## 7. Expr AST 对应关系
 

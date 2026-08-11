@@ -38,8 +38,8 @@ r"""Type System 层中 Section 4.1/4.2 行为类型的规范化抽象语法树�
 
 当 ``delta = infinity`` 时，超时事件永远不会发生，process 到 type 的转换会把
 超时后继固定为 ``\bot``，再按论文定义式规范成 ``A``。因此 AST 不保存不可达的
-``T``。有限时延统一保存为非负 ``Fraction``，观察节点类即可区分纯等待、通信
-超时和带自然结束后继的定时外部选择。
+``T``。有限时延统一保存为非负 ``Fraction``；其 continuation 的
+``BottomType``/普通 ``ProcessType`` 明确区分不可达 deadline 与真实自然后继。
 
 ────────────────── 规范 AST 的抽象架构 ─────────────────────────────────────
 
@@ -88,9 +88,9 @@ Python 继承层次把论文 ``mathcal T``、``T``、``A`` 分为三个独立语
     delta = infinity                       -> InfiniteDelayType(A)
     delta < infinity                       -> FiniteDelayType(delta, A, T)
 
-有限时延的普通后继绝不能是 ``\bot``；缺省后继与空通信后继统一为
-``EmptyType``。因此类型构造不会把正常终止误写成错误行为，也无需先决定
-它应属于哪种缩写类别。
+有限时延允许两类语义不同的后继：``BottomType`` 表示 `T-\unrhd` 保证不会
+到达的 deadline；其他 ``ProcessType`` 表示 `T-\unrhd'` 的真实后继，其中
+``EmptyType`` 是真实后继没有可观察通信行为的特例。构造器不能把二者合并。
 
 ────────────────── 构造责任与检查边界 ──────────────────────────────────────
 
@@ -382,9 +382,10 @@ def _normalize_finite_duration(duration: Any) -> Fraction:
 
 # 论文对应：有限统一产生式 delay(d) \unrhd A \triangleright T。
 # 构造方式：FiniteDelayType(duration, interrupts, continuation)。
-# 构造检查：d 为有限非负有理数；A 必须是 angelic type，T 必须是 process type；
-#           T 不能是 BottomType。NoInterruptType 和 EmptyType 是字段的合法值，
-#           不再被拆成多个互斥 Python 类。
+# 构造检查：d 为有限非负有理数；A 必须是 angelic type，T 必须是 process type。
+#           BottomType 表示该有限 deadline 的自然后继不可达，对应 T-\unrhd；
+#           EmptyType 表示到时后存在后继位置、但该后继没有可观察通信行为，对应
+#           T-\unrhd' 的空行为特例。二者必须保持为不同的正式 AST 节点。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class FiniteDelayType(ProcessType):
@@ -405,18 +406,16 @@ class FiniteDelayType(ProcessType):
             raise TypeError("Finite delay interrupts must be an angelic type A")
         if not isinstance(continuation, ProcessType):
             raise TypeError("Finite delay continuation must be a process type T")
-        if isinstance(continuation, BottomType):
-            raise ValueError("Finite delay continuation must not be BottomType")
         object.__setattr__(self, "duration", _normalize_finite_duration(duration))
         object.__setattr__(self, "interrupts", interrupts)
         object.__setattr__(self, "continuation", continuation)
 
     def __str__(self) -> str:
         """按 A/T 的取值使用论文的三个有限时延缩写。"""
+        if isinstance(self.continuation, BottomType):
+            return f"delay({self.duration}) \\unrhd ({self.interrupts})"
         if isinstance(self.interrupts, NoInterruptType):
             return f"delay({self.duration}).({self.continuation})"
-        if isinstance(self.continuation, EmptyType):
-            return f"delay({self.duration}) \\unrhd ({self.interrupts})"
         return (
             f"delay({self.duration}) \\unrhd ({self.interrupts}) "
             f"\\triangleright ({self.continuation})"
@@ -447,7 +446,7 @@ class InfiniteDelayType(ProcessType):
 
 # 论文对应：统一产生式 delay(delta) \unrhd A \triangleright T。
 # 功能：按时延是否无穷构造两种正式 delay AST 节点；本函数不是 AST 节点。
-# 构造检查：有限 T 不得为 BottomType；无穷情形的 BottomType 后继由
+# 构造检查：有限情形原样保留 BottomType 或普通 T；无穷情形的 BottomType 后继由
 #           InfiniteDelayType 固定表达，调用方传入的普通 continuation 不进入结果。
 def make_delay_type(
     duration: Any,
@@ -474,8 +473,6 @@ def make_delay_type(
         raise ValueError("Type duration cannot be negative infinity")
 
     finite = _normalize_finite_duration(duration)
-    if isinstance(continuation, BottomType):
-        raise ValueError("Finite delay continuation must not be BottomType")
     return FiniteDelayType(finite, interrupts, continuation)
 
 
@@ -516,7 +513,7 @@ class MuType(ProcessType):
 # --------------------------------------------------------------------------
 # 论文对应：Section 4.2 的 mathcal T ::= T | mathcal T | mathcal T。
 # 构造方式：ParallelType((left, right, ...))；嵌套二元并行按结合律压平。
-# 构造检查：压平后至少两个 configuration 分量；Gamma 分区仍由 [T-||] 检查。
+# 构造检查：压平后至少两个 configuration 分量；状态所有权仍由 [T-||] 检查。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ParallelType(ConfigurationType):

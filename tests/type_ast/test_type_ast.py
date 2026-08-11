@@ -199,20 +199,24 @@ class TimedTypeNormalizationTests(unittest.TestCase):
             InfiniteDelayType(NoInterruptType()),
         )
 
-    # 测试输入：非法 A、bottom 后继和无穷时延直接传给有限时延节点。
-    # 预期行为：字段类别或有限时延不变量不成立时，构造立即拒绝。
-    # 检查内容：统一节点仍严格区分 A/T，并禁止把 bottom 用作有限正常后继。
-    # 论文对应：有限 delay(d) \unrhd A \triangleright T 中 T 不可为 bottom。
-    def test_delay_node_constructors_reject_overlapping_forms(self) -> None:
-        """具体 delay 节点不能重新表达另一个节点负责的缩写。"""
+    # 测试输入：非法 A，以及有限时延分别携带 bottom/empty 后继。
+    # 预期行为：非法 A 被拒绝；bottom 与 empty 均被保留为不同正式节点。
+    # 检查内容：T-unrhd 的不可达 deadline 后继不会再与可达空行为混淆。
+    # 论文对应：bottom 表示规则保证不会抵达的后继，empty 表示可达的空行为。
+    def test_finite_delay_distinguishes_bottom_from_empty(self) -> None:
+        """有限 delay 必须同时容纳并区分不可达后继与正常空后继。"""
 
         communication = OutputType("ch", EmptyType())
         with self.assertRaises(TypeError):
             FiniteDelayType(1, "not-an-interrupt", EmptyType())  # type: ignore[arg-type]
-        with self.assertRaises(ValueError):
-            FiniteDelayType(1, NoInterruptType(), BottomType())
-        with self.assertRaises(ValueError):
-            FiniteDelayType(1, communication, BottomType())
+        self.assertEqual(
+            make_delay_type(1, communication, BottomType()),
+            FiniteDelayType(1, communication, BottomType()),
+        )
+        self.assertNotEqual(
+            FiniteDelayType(1, communication, BottomType()),
+            FiniteDelayType(1, communication, EmptyType()),
+        )
 
     # 测试输入：int、float、Decimal 的同值时延，以及负数、Bool、NaN 等非法值。
     # 预期行为：有限合法值成为最简 Fraction，正无穷工厂规范为 A，其余失败。
@@ -394,6 +398,11 @@ class TypeRenderingTests(unittest.TestCase):
         )
         self.assertEqual(
             str(FiniteDelayType(2, choices, EmptyType())),
+            r"delay(2) \unrhd ((reset?.(0)) \sqcap (alarm!.(0))) "
+            r"\triangleright (0)",
+        )
+        self.assertEqual(
+            str(FiniteDelayType(2, choices, BottomType())),
             r"delay(2) \unrhd ((reset?.(0)) \sqcap (alarm!.(0)))",
         )
 

@@ -4,7 +4,7 @@
 TypeConstructor 调用使用的内部 ``ParsedHCSPSource``。它不属于包根稳定接口。
 """
 
-from .errors import HCSPInputError, SourcePosition
+from ..errors import HCSPInputError, SourcePosition
 from .lexer import Token, tokenize
 from .parser import (
     parse_expression,

@@ -10,7 +10,7 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Callable, TypeVar
 
-from ..type_constructor_frontend.errors import HCSPInputError, SourcePosition
+from ..errors import HCSPInputError, SourcePosition
 from ..type_constructor_frontend.lexer import Token, tokenize
 from ...data_structures.type_ast.ast import (
     AngelicType,

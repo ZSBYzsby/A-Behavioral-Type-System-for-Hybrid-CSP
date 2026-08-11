@@ -17,7 +17,6 @@ from ...data_structures.runtime_context import (
     ParameterEnvironment,
 )
 from ...data_structures.type_ast.ast import ConfigurationType
-from ...data_structures.type_ast.render import format_type_source
 from ..common.model import RuleDerivationReport, Verdict
 
 
@@ -35,12 +34,18 @@ class TypeCheckingRequest:
 
 @dataclass(frozen=True, slots=True)
 class TypeCheckingReport:
-    """给定 Type 的递归规则检查结果及其全部证明证据。"""
+    """给定 Type 的递归规则检查结果及其全部证明证据。
+
+    ``mismatch`` 只保存明确的用户 Type 结构不匹配；环境或其他规则错误写入
+    ``failure_reason``。二者分离，使公开错误分类不会把环境失败误报成 Type
+    mismatch。
+    """
 
     verdict: Verdict
     expected_type: ConfigurationType
     evidence: RuleDerivationReport
     mismatch: str = ""
+    failure_reason: str = ""
 
     @property
     def passed(self) -> bool:
@@ -50,7 +55,11 @@ class TypeCheckingReport:
 
     @property
     def structurally_matched(self) -> bool:
-        """给定 Type 已被规则递归完整消费时返回真。"""
+        """给定 Type 已连同全部先行 premise 被规则递归完整消费时返回真。
+
+        公式在结构递归之前被明确否证时也会返回假；因此本属性表示“完整检查已
+        形成结论”，而不是单独隔离公式后的纯语法形状判断。
+        """
 
         return self.evidence.constructed_type is not None
 
@@ -58,27 +67,11 @@ class TypeCheckingReport:
         """显示给定 Type 的规则匹配、公式义务和证明结果。
 
         证明证据的底层布局由 common 层提供，以确保 FOL/dL 公式不会在
-        两套功能间出现不同的编号或遗漏；这里只把展示术语改为“检查给定 Type”。
+        两套功能间出现不同的编号或遗漏；业务术语由共享 formatter 的
+        ``checking`` 模式直接生成，不再依赖字符串替换。
         """
 
-        rendered = self.evidence.format_detailed()
-        replacements = (
-            ("=== 类型构造与证明详细报告 ===", "=== 给定 Type 检查与证明详细报告 ==="),
-            ("规则推导 :", "规则检查 :"),
-            ("类型构造 :", "Type 匹配 :"),
-            ("构造 Type 源码 :", "给定 Type 源码 :"),
-            ("本次类型构造的", "本次类型检查的"),
-            ("配置分量候选类型", "配置分量给定类型"),
-            ("配置分量类型", "配置分量给定类型"),
+        return self.evidence.format_detailed(
+            purpose="checking",
+            displayed_type=self.expected_type,
         )
-        for old, new in replacements:
-            rendered = rendered.replace(old, new)
-        lines = rendered.splitlines()
-        for index, line in enumerate(lines):
-            if line.startswith("给定 Type 源码 :"):
-                lines[index] = (
-                    "给定 Type 源码 : "
-                    + format_type_source(self.expected_type)
-                )
-                break
-        return "\n".join(lines)

@@ -30,6 +30,7 @@ Type AST，但该候选会被明确标为未验证、不可信。使用
 
 包根稳定白名单只有 `HCSPInputError`、`HCSPTypeConstructionError`、
 `HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`、`OutputMode`、
+`TypeConstructionErrorKind`、`TypeCheckingErrorKind`、`HCSPErrorDetail`、
 `TypeAST`、`TypeTransitionGraph`、`construct_hcsp_type`、`check_hcsp_type` 和
 `build_type_transition_graph`。
 
@@ -80,9 +81,16 @@ except HCSPTypeConstructionError as error:
 只有构造完整且全部证明义务均为 `true` 时，接口才正常返回可信 `TypeAST`。
 `HCSPUntrustedTypeConstructionError` 是 `HCSPTypeConstructionError` 的子类；
 需要读取 `untrusted_type` 时应像
-示例一样先捕获它。`BottomType` 是用户 Type AST 中的正式不可达错误行为，
-TypeChecker 可以读取并按规则检查；当前 TypeConstructor 不会把它作为已构造 HCSP
-行为的结果。
+示例一样先捕获它。`BottomType` 是 Type AST 中正式的不可达行为：有限 ODE 使用
+`T-\unrhd` 时，它表示规则保证不会抵达的 deadline 后继；无限时延也隐含同样的
+不可达后继。它不是构造失败占位。`EmptyType` 则表示可达但没有通信行为的正常
+过程类型，两者会由 Constructor 生成并由 Checker 分别检查。
+
+类型构造异常还提供机器可读的 `kind`、`phase`、`rule`、`location` 和
+`details`。`kind` 是 `TypeConstructionErrorKind`：环境不合法、规则推导失败、
+证明被否证和证明未决分别为 `environment`、`derivation`、`proof-failed`、
+`proof-unknown`。每个 `HCSPErrorDetail` 保存消息、规则、判断位置；证明错误还
+保存公式类别、实际公式和证明器说明。调用方无需解析中文日志来判断失败种类。
 
 ### 检查用户给定的 Type
 
@@ -113,6 +121,13 @@ TypeChecker 不会先运行 TypeConstructor 再比较两棵完整 Type AST。它
 TypeConstructor 相同的可信证明机制。Type 结构不匹配、静态规则失败或必要公式
 为 `false/unknown` 时抛出 `HCSPTypeCheckingError`；只有全部规则和证明均为
 `true` 时返回用户给定的正式 `TypeAST`。
+
+`HCSPTypeCheckingError.kind` 使用独立的 `TypeCheckingErrorKind`，区分
+`environment`、`type-mismatch`、`rule-application`、`proof-failed` 和
+`proof-unknown`。异常还公开 `phase`、`rule`、`location`、`details`、
+`type_mismatch_detected`，以及三值的 `type_structure_matched`：`True` 表示给定
+Type 已被完整消费，`False` 表示明确发现结构不匹配，`None` 表示环境或前提失败
+使检查尚未完整走完。
 
 ### 从 Type AST 生成 Table 3 状态图
 

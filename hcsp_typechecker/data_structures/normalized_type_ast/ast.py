@@ -194,8 +194,6 @@ class NormalizedFiniteDelayType(NormalizedProcessType):
             raise TypeError("Normalized finite delay requires an angelic type")
         if not isinstance(continuation, NormalizedProcessType):
             raise TypeError("Normalized finite delay requires a process continuation")
-        if isinstance(continuation, NormalizedBottomType):
-            raise ValueError("Normalized finite-delay continuation cannot be bottom")
         object.__setattr__(self, "duration", _normalize_duration(duration))
         object.__setattr__(self, "interrupts", interrupts)
         object.__setattr__(self, "continuation", continuation)

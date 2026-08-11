@@ -10,7 +10,7 @@ r"""Definition 4.1 连续 Gamma 项及 T-ODE 使用边界测试。
 5. Gamma 只登记 process 中允许出现的完整 ODE 演化向量，ODE 左侧的真子集
    或真超集被拒绝，但成员顺序无关，隐式时钟不参加向量匹配；
 6. 连续演化中恒成立的性质只来自 ODE safety，不再由 ContinuousType 重复定义；
-7. 顶层/局部 Gamma 必须完整、一致地登记连续向量的所有成员。
+7. 统一 Gamma 必须完整、一致地登记连续向量的所有成员。
 
 预期行为
 --------
@@ -58,6 +58,13 @@ def _approve_dl(_obligation: object) -> Verdict:
     return Verdict.TRUE
 
 
+def _select_communication_only(obligation: object) -> Verdict:
+    """批准 T-unrhd，并否证与其互斥的自然 timeout 候选。"""
+
+    role = getattr(getattr(obligation, "formula", None), "role", "")
+    return Verdict.FALSE if role == "boundary" else Verdict.TRUE
+
+
 def _single_ode_gamma(name: str = "x") -> dict[str, BasicType | ContinuousType]:
     """建立一个 Real 标量及其独立单元素 ODE 向量声明。"""
 
@@ -65,6 +72,14 @@ def _single_ode_gamma(name: str = "x") -> dict[str, BasicType | ContinuousType]:
         name: BasicType.REAL,
         f"ode_{name}": ContinuousType((name,)),
     }
+
+
+def _with_explicit_skip(ode: ODE) -> ODE:
+    """按用户语法约束为没有实际后继的 ODE 补写显式 skip。"""
+
+    result = Sequence.of(ode, Skip())
+    assert isinstance(result, ODE)
+    return result
 
 
 class ContinuousGammaTests(unittest.TestCase):
@@ -77,14 +92,14 @@ class ContinuousGammaTests(unittest.TestCase):
     def test_explicit_continuous_vector_accepts_ordinary_real_parameter(self) -> None:
         """ODE 左端 Real 集合声明与右端普通 Real 参数可以共存。"""
 
-        process = ODE(
+        process = _with_explicit_skip(ODE(
             [("x", "v"), ("v", "-x * gain")],
             "x * x + v * v <= 4",
             annotation=ODEAnnotation(
                 safety="x * x + v * v <= 4",
                 delay=inf,
             ),
-        )
+        ))
         oscillator = ContinuousType(variables=("x", "v"))
         report = construct_type(
             gamma={
@@ -122,7 +137,7 @@ class ContinuousGammaTests(unittest.TestCase):
             """保存正式义务；本测试只审计公式构造，不测试外部证明器。"""
 
             captured.append(obligation)
-            return Verdict.TRUE
+            return _select_communication_only(obligation)
 
         report = construct_type(
             gamma=_single_ode_gamma(),
@@ -130,11 +145,11 @@ class ContinuousGammaTests(unittest.TestCase):
             configurations=[
                 Configuration(
                     {"x": 0},
-                    ODE(
+                    _with_explicit_skip(ODE(
                         [("x", 0)],
                         True,
                         annotation=ODEAnnotation(safety="x <= 10", delay=1),
-                    ),
+                    )),
                 )
             ],
             path_condition="x == 0",
@@ -169,14 +184,14 @@ class ContinuousGammaTests(unittest.TestCase):
             configurations=[
                 Configuration(
                     {"x": 0, "y": 0},
-                    ODE(
+                    _with_explicit_skip(ODE(
                         [("y", 0), ("x", 0)],
                         True,
                         annotation=ODEAnnotation(safety="x + y >= 123", delay=1),
-                    ),
+                    )),
                 )
             ],
-            dl_checker=_approve_dl,
+            dl_checker=_select_communication_only,
         )
 
         safety = next(
@@ -221,11 +236,11 @@ class ContinuousGammaTests(unittest.TestCase):
                     configurations=[
                         Configuration(
                             state,
-                            ODE(
+                            _with_explicit_skip(ODE(
                                 equations,
                                 True,
                                 annotation=ODEAnnotation(safety=True, delay=1),
-                            ),
+                            )),
                         )
                     ],
                     dl_checker=_approve_dl,
@@ -257,14 +272,14 @@ class ContinuousGammaTests(unittest.TestCase):
             configurations=[
                 Configuration(
                     {"x": 0},
-                    ODE(
+                    _with_explicit_skip(ODE(
                         [("x", 0)],
                         True,
                         annotation=ODEAnnotation(safety="t >= 0", delay=1),
-                    ),
+                    )),
                 )
             ],
-            dl_checker=_approve_dl,
+            dl_checker=_select_communication_only,
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
@@ -330,11 +345,11 @@ class ContinuousGammaTests(unittest.TestCase):
             configurations=[
                 Configuration(
                     {"x": 0},
-                    ODE(
+                    _with_explicit_skip(ODE(
                         [("x", 0)],
                         True,
                         annotation=ODEAnnotation(safety="x + 1", delay=1),
-                    ),
+                    )),
                 )
             ],
             path_condition="x == 0",
@@ -356,14 +371,14 @@ class ContinuousGammaTests(unittest.TestCase):
     def test_ode_safety_is_available_at_interrupt(self) -> None:
         """已证明的 ODE safety 必须进入通信后继上下文。"""
 
-        process = ODE(
+        process = _with_explicit_skip(ODE(
             [("x", 0)],
             True,
             EventChoice.of(
                 (OutputChannel("tick", 0), Assert("x >= 0")),
             ),
             annotation=ODEAnnotation(safety="x >= 0", delay=inf),
-        )
+        ))
         report = construct_type(
             gamma=_single_ode_gamma(),
             theta={"tick": ChannelType(BasicType.INT)},
@@ -403,11 +418,11 @@ class ContinuousGammaTests(unittest.TestCase):
             configurations=[
                 Configuration(
                     {"x": 0},
-                    ODE(
+                    _with_explicit_skip(ODE(
                         [("x", 1)],
                         True,
                         annotation=ODEAnnotation(delay=inf),
-                    ),
+                    )),
                 )
             ],
             dl_checker=backend,
@@ -437,6 +452,7 @@ class ContinuousGammaTests(unittest.TestCase):
                 True,
                 annotation=ODEAnnotation(delay=inf),
             ),
+            Skip(),
         )
         report = construct_type(
             gamma=_single_ode_gamma(),
@@ -466,6 +482,7 @@ class ContinuousGammaTests(unittest.TestCase):
                 True,
                 annotation=ODEAnnotation(delay=inf),
             ),
+            Skip(),
         )
         report = construct_type(
             gamma=_single_ode_gamma(),
@@ -514,7 +531,7 @@ class ContinuousGammaTests(unittest.TestCase):
                 "state",
                 {},
                 Configuration({"ode_x": 0}, Skip()),
-                "not declared in the local Gamma",
+                "not declared in Gamma",
             ),
             (
                 "assignment",
@@ -550,7 +567,7 @@ class ContinuousGammaTests(unittest.TestCase):
                 )
 
     # 测试输入：两个并行配置分别读取普通 Real x 和 y，process 中没有 ODE。
-    # 预期行为：自动 Gamma 分区按普通标量拆分，不凭空制造联合连续向量。
+    # 预期行为：共享 Gamma 不会把声明本身误当成进程间共享的可变状态。
     # 检查内容：总体 true 且产生正式并行类型。
     # 论文对应：ContinuousType 只描述实际可能出现的 ODE，不给普通 Real 分组。
     def test_parallel_real_values_are_not_grouped_without_ode(self) -> None:
@@ -571,12 +588,12 @@ class ContinuousGammaTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertIsNotNone(report.constructed_type)
 
-    # 测试输入：全局 Gamma 含 x:Real 和 ode_x 向量声明，局部 Gamma 只保留 x。
-    # 预期行为：局部 Gamma 未覆盖独立向量声明，T-parallel 拒绝该分区。
-    # 检查内容：false、无正式类型和全局 Gamma 覆盖诊断。
-    # 论文对应：ODE vector 是独立 Gamma 项，不能通过保留成员 Real 来冒充。
-    def test_local_gamma_cannot_drop_ode_vector_declaration(self) -> None:
-        """局部 Gamma 必须显式保留归属本配置的 ODE 向量声明。"""
+    # 测试输入：Gamma 含 x:Real 和未被当前 skip 使用的 ode_x 向量声明。
+    # 预期行为：额外声明不影响空行为的类型构造。
+    # 检查内容：共享 Gamma 作为声明超集，允许包含当前分量未使用的 ContinuousType。
+    # 论文对应：连续向量声明只约束实际出现的 ODE 左端集合。
+    def test_shared_gamma_may_contain_unused_ode_vector_declaration(self) -> None:
+        """没有 ODE 的判断允许 Gamma 含未使用的连续向量声明。"""
 
         report = construct_type(
             gamma=_single_ode_gamma(),
@@ -585,50 +602,12 @@ class ContinuousGammaTests(unittest.TestCase):
                 Configuration(
                     {"x": 0},
                     Skip(),
-                    gamma={"x": BasicType.REAL},
-                )
-            ],
-        )
-
-        self.assertEqual(report.verdict, Verdict.FALSE)
-        self.assertIsNone(report.constructed_type)
-        self.assertTrue(
-            any("do not cover the global Gamma" in item.message for item in report.diagnostics)
-        )
-
-    # 测试输入：全局/局部 Gamma 分别以 (x,y) 和 (y,x) 声明同一 ODE 集合。
-    # 预期行为：成员顺序无语义差异，局部 Gamma 与全局 Gamma 相等并通过。
-    # 检查内容：true、正式类型存在且没有局部类型变化诊断。
-    # 论文对应：ODE 是联立方程集合，源代码排列不改变演化 vector。
-    def test_local_gamma_accepts_reordered_ode_vector(self) -> None:
-        """局部 Gamma 可以用不同顺序书写同一个 ODE 成员集合。"""
-
-        trajectory = ContinuousType(variables=("x", "y"))
-        report = construct_type(
-            gamma={
-                "x": BasicType.REAL,
-                "y": BasicType.REAL,
-                "xy_ode": trajectory,
-            },
-            theta={},
-            configurations=[
-                Configuration(
-                    {"x": 0, "y": 0},
-                    Skip(),
-                    gamma={
-                        "x": BasicType.REAL,
-                        "y": BasicType.REAL,
-                        "xy_ode": ContinuousType(("y", "x")),
-                    },
                 )
             ],
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertIsNotNone(report.constructed_type)
-        self.assertFalse(
-            any("changes global variable types" in item.message for item in report.diagnostics)
-        )
 
 
 if __name__ == "__main__":

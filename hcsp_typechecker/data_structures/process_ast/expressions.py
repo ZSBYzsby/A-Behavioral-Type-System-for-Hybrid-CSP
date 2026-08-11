@@ -49,7 +49,7 @@ HCSP 节点内部只保存本模块定义的 :class:`Expr`。为了让示例保�
 ────────────────── 明确不支持的表达式 ──────────────────────────────────────
 
 * 表达式级条件：``a if B else b``；条件控制流只能使用 HCSP 进程级
-  ``If(B, P, P')``；
+  ``If(B, P, P', continuation=Q)``；
 * 属性访问和方法调用：``plant.temperature``、``obj.f(x)``；
 * 下标和动态调用：``array[i]``、``functions[i](x)``；
 * lambda 和推导式：``lambda x: x + 1``、``[f(x) for x in values]``；
@@ -97,7 +97,7 @@ class Expr(ABC):
     """所有项目内表达式节点的抽象基类。"""
 
     # 功能：为所有表达式节点规定统一的自由变量收集接口。
-    # 检查/语法关系：变量集合供 HCSP AST 的 fv/V 分析及 Gamma 分区使用；
+    # 检查/语法关系：变量集合供 HCSP AST 的 fv/V 分析及状态所有权检查使用；
     #                是否已在 Gamma 声明由后续表达式翻译阶段检查。
     @abstractmethod
     def get_vars(self) -> set[str]:

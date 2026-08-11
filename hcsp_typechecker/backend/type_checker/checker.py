@@ -14,11 +14,10 @@ FOL/dL 公式生成和证明机制；二者的递归目标不同：前者组合�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import inf
 from typing import Any, Mapping, Sequence
 
-from ...identifiers import is_hcsp_identifier
 from ...data_structures.process_ast.ast import (
     Assert,
     Assign,
@@ -40,6 +39,7 @@ from ...data_structures.type_ast.ast import (
     AngelicType,
     ConfigurationType,
     EmptyType,
+    BottomType,
     ExternalChoiceType,
     FiniteDelayType,
     InfiniteDelayType,
@@ -57,12 +57,7 @@ from ...data_structures.type_ast.render import (
     format_process_type,
 )
 from ...data_structures.runtime_context import (
-    BasicType,
     Configuration,
-    GammaType,
-    normalize_channel_type,
-    normalize_gamma_type,
-    normalize_type,
 )
 from ..common.model import Verdict
 from ..common.rule_engine import (
@@ -71,12 +66,50 @@ from ..common.rule_engine import (
     _ConfigurationJudgment,
     _EventJudgment,
     _FormulaPremise,
+    _ODETypeRule,
     _ProcessJudgment,
     _RuleExpansion,
     _SystemJudgment,
 )
-from ..common.logic import ExpressionError, ExpressionTranslator, conjunction
 from .model import TypeCheckingReport, TypeCheckingRequest
+
+
+@dataclass(frozen=True, slots=True)
+class _AlphaEnvironment:
+    """按词法作用域关联内部递归变量与用户 Type 变量。
+
+    两侧名称分别映射到同一个不透明绑定身份，而不是直接互相映射字符串。
+    因此内层 ``mu t.`` 即使复用外层名字 ``t``，也会在 ``supplied`` 中遮蔽
+    外层身份；退出该子判断后，父环境仍保持原绑定。
+    """
+
+    internal: Mapping[str, object]
+    supplied: Mapping[str, object]
+
+    @classmethod
+    def empty(cls) -> "_AlphaEnvironment":
+        """建立不含递归绑定的根词法环境。"""
+
+        return cls({}, {})
+
+    def bind(self, internal_name: str, supplied_name: str) -> "_AlphaEnvironment":
+        """为一对新进入的 ``mu`` 绑定建立唯一且可遮蔽的身份。"""
+
+        identity = object()
+        internal = dict(self.internal)
+        supplied = dict(self.supplied)
+        internal[internal_name] = identity
+        supplied[supplied_name] = identity
+        return _AlphaEnvironment(internal, supplied)
+
+    def matches(self, internal_name: str, supplied_name: str) -> bool:
+        """判断两个变量引用是否指向同一层词法递归绑定。"""
+
+        internal_identity = self.internal.get(internal_name)
+        return (
+            internal_identity is not None
+            and self.supplied.get(supplied_name) is internal_identity
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +117,20 @@ class _ExpectedChild:
     """一个子 judgment 及其必须匹配的用户 Type 和递归 alpha 环境。"""
 
     expected: ConfigurationType | AngelicType
-    alpha: Mapping[str, str]
+    alpha: _AlphaEnvironment
+
+
+@dataclass(frozen=True, slots=True)
+class _ODECheckAttempt:
+    """TypeChecker 对一条 ODE 候选规则的隔离匹配结果。"""
+
+    mode: _ODETypeRule
+    matched: bool
+    verdict: Verdict
+    obligations: tuple[Any, ...]
+    diagnostics: tuple[Any, ...]
+    steps: tuple[Any, ...]
+    mismatches: tuple[str, ...]
 
 
 class TypeChecker(Table2RuleEngine):
@@ -105,16 +151,30 @@ class TypeChecker(Table2RuleEngine):
         self._type_var_counter = 0
         self._type_mismatches: list[str] = []
 
-        prepared = self._prepare_environment(request)
+        prepared = self._prepare_typing_environment(
+            gamma_source=request.gamma,
+            theta_source=request.theta,
+            parameter_environment=request.parameters,
+            path_condition=request.path_condition,
+        )
         if prepared is None:
             evidence = self._report(None, ())
-            return TypeCheckingReport(
-                evidence.verdict,
-                request.expected_type,
-                evidence,
-                "The typing environment is not well formed",
+            reason = (
+                self.diagnostics[-1].message
+                if self.diagnostics
+                else "The typing environment is not well formed"
             )
-        gamma, theta, parameters, parameter_symbols, parameter_condition = prepared
+            return TypeCheckingReport(
+                verdict=evidence.verdict,
+                expected_type=request.expected_type,
+                evidence=evidence,
+                failure_reason=reason,
+            )
+        gamma = prepared.gamma
+        theta = prepared.theta
+        parameters = prepared.parameters
+        parameter_symbols = prepared.parameter_symbols
+        parameter_condition = prepared.parameter_condition
 
         configurations = request.configurations
         if not configurations:
@@ -125,10 +185,10 @@ class TypeChecker(Table2RuleEngine):
             )
             evidence = self._report(None, ())
             return TypeCheckingReport(
-                evidence.verdict,
-                request.expected_type,
-                evidence,
-                "No configuration was supplied",
+                verdict=evidence.verdict,
+                expected_type=request.expected_type,
+                evidence=evidence,
+                failure_reason="No configuration was supplied",
             )
 
         component_expectations = self._top_level_expectations(
@@ -138,10 +198,13 @@ class TypeChecker(Table2RuleEngine):
         if component_expectations is None:
             evidence = self._report(None, tuple(None for _ in configurations))
             return TypeCheckingReport(
-                evidence.verdict,
-                request.expected_type,
-                evidence,
-                "The supplied parallel Type shape does not match the HCSP components",
+                verdict=evidence.verdict,
+                expected_type=request.expected_type,
+                evidence=evidence,
+                mismatch=(
+                    self._last_mismatch_message()
+                    or "The supplied parallel Type shape does not match the HCSP components"
+                ),
             )
 
         before = len(self.steps)
@@ -155,7 +218,7 @@ class TypeChecker(Table2RuleEngine):
             parameter_condition,
             request.parameters.constraint,
         )
-        # rule_t_parallel 已对 Gamma 分区做完整静态检查。发生静态错误时不应
+        # rule_t_parallel 已对共享 Gamma 和状态所有权做完整静态检查。发生错误时不应
         # 尝试把余下的 Type 分支错配到别的配置。
         if any(item.verdict is Verdict.FALSE for item in self.diagnostics):
             matched = False
@@ -175,7 +238,11 @@ class TypeChecker(Table2RuleEngine):
             else:
                 matched = True
                 for premise, expected in zip(children, component_expectations):
-                    if not self._check_child(premise.judgment, expected, {}):
+                    if not self._check_child(
+                        premise.judgment,
+                        expected,
+                        _AlphaEnvironment.empty(),
+                    ):
                         matched = False
                         break
         if len(self.steps) > before:
@@ -198,133 +265,11 @@ class TypeChecker(Table2RuleEngine):
         if not matched:
             mismatch = self._last_mismatch_message()
         return TypeCheckingReport(
-            evidence.verdict,
-            request.expected_type,
-            evidence,
-            mismatch,
+            verdict=evidence.verdict,
+            expected_type=request.expected_type,
+            evidence=evidence,
+            mismatch=mismatch,
         )
-
-    def _prepare_environment(
-        self,
-        request: TypeCheckingRequest,
-    ) -> tuple[
-        dict[str, GammaType],
-        dict[str, Any],
-        dict[str, BasicType],
-        dict[str, Any],
-        Any,
-    ] | None:
-        """执行 Constructor/Checker 共用的 Gamma、Theta 与参数规范化。"""
-
-        try:
-            invalid_gamma_names = {
-                repr(name) for name in request.gamma if not is_hcsp_identifier(name)
-            }
-            if invalid_gamma_names:
-                raise ValueError(
-                    "Invalid Gamma names: " + ", ".join(sorted(invalid_gamma_names))
-                )
-            gamma = {
-                name: normalize_gamma_type(value, subject="Gamma entry")
-                for name, value in request.gamma.items()
-            }
-            self._validate_continuous_vectors(gamma)
-
-            invalid_parameter_names = {
-                repr(name)
-                for name in request.parameters.declarations
-                if not is_hcsp_identifier(name)
-            }
-            if invalid_parameter_names:
-                raise ValueError(
-                    "Invalid parameter names: "
-                    + ", ".join(sorted(invalid_parameter_names))
-                )
-            parameters = {
-                name: normalize_type(value, subject="Parameter declaration")
-                for name, value in request.parameters.declarations.items()
-            }
-            overlap = set(gamma) & set(parameters)
-            if overlap:
-                raise ValueError(
-                    "Gamma and the shared parameter environment overlap: "
-                    + ", ".join(sorted(overlap))
-                )
-            theta = {
-                self._channel_name(name): normalize_channel_type(value)
-                for name, value in request.theta.items()
-            }
-        except (TypeError, ValueError) as exc:
-            self._diagnose(
-                Verdict.FALSE,
-                f"Invalid typing environment: {exc}",
-                "environment",
-            )
-            return None
-
-        parameter_symbols: dict[str, Any] = {}
-        translator = ExpressionTranslator(
-            parameters,
-            parameter_symbols,
-            name_prefix="parameter__",
-        )
-        try:
-            for name, value_type in parameters.items():
-                translator.symbol(name, value_type)
-            constraint = translator.boolean_result(request.parameters.constraint)
-            parameter_condition = conjunction(
-                self._defined_term(constraint),
-                *(
-                    domain_constraint
-                    for name, value_type in parameters.items()
-                    for domain_constraint in self._type_domain_constraints(
-                        value_type,
-                        parameter_symbols[name],
-                    )
-                ),
-            )
-        except ExpressionError as exc:
-            self._diagnose(
-                Verdict.FALSE,
-                f"Invalid shared parameter constraint: {exc}",
-                "parameters",
-            )
-            return None
-
-        parameter_verdict, detail = self.proof_engine.satisfiable(
-            parameter_condition
-        )
-        if parameter_verdict is Verdict.FALSE:
-            self._diagnose(
-                Verdict.FALSE,
-                "Shared parameter constraint must be satisfiable: " + detail,
-                "parameters",
-            )
-            return None
-        if parameter_verdict is Verdict.UNKNOWN:
-            self._diagnose(
-                Verdict.UNKNOWN,
-                "Shared parameter constraint satisfiability is unknown; "
-                "type checking continues but cannot be trusted: " + detail,
-                "parameters",
-            )
-
-        step = self._start_step(
-            "environment",
-            "judgment",
-            "规范化 TypeChecker 的 Gamma、Theta 与共享参数",
-            gamma=gamma,
-            parameters=parameters,
-            parameter_constraint=request.parameters.constraint,
-            theta=theta,
-            path=request.path_condition,
-        )
-        self._finish_step(
-            step,
-            "环境规范化成功",
-            "后续规则与 TypeConstructor 使用完全相同的符号类型环境。",
-        )
-        return gamma, theta, parameters, parameter_symbols, parameter_condition
 
     def _top_level_expectations(
         self,
@@ -394,7 +339,7 @@ class TypeChecker(Table2RuleEngine):
         self,
         judgment: Any,
         expected: ConfigurationType | AngelicType,
-        alpha: Mapping[str, str],
+        alpha: _AlphaEnvironment,
     ) -> bool:
         """按显式 judgment 类别分派给对应的给定类型检查函数。"""
 
@@ -424,7 +369,7 @@ class TypeChecker(Table2RuleEngine):
         self,
         judgment: _ConfigurationJudgment,
         expected: ConfigurationType | AngelicType,
-        alpha: Mapping[str, str],
+        alpha: _AlphaEnvironment,
     ) -> bool:
         """检查 [T-sigma] 的状态前提和系统子判断。"""
 
@@ -461,7 +406,7 @@ class TypeChecker(Table2RuleEngine):
         self,
         judgment: _SystemJudgment,
         expected: ConfigurationType | AngelicType,
-        alpha: Mapping[str, str],
+        alpha: _AlphaEnvironment,
     ) -> bool:
         """检查系统层 Process 或二元 Parallel 的给定类型。"""
 
@@ -521,7 +466,7 @@ class TypeChecker(Table2RuleEngine):
         self,
         judgment: _ProcessJudgment,
         expected: ProcessType,
-        alpha: Mapping[str, str],
+        alpha: _AlphaEnvironment,
     ) -> bool:
         """按当前 Process 头结点拆解并检查给定 ProcessType。"""
 
@@ -531,6 +476,14 @@ class TypeChecker(Table2RuleEngine):
             return self._match_terminal(judgment.terminal, expected, alpha, context.location)
 
         head = nodes[0]
+        if isinstance(head, ODE) and self._needs_ode_skip_rule_selection(
+            judgment
+        ):
+            return self._check_ode_skip_rule_candidates(
+                judgment,
+                expected,
+                alpha,
+            )
         terminal_skip = isinstance(head, Skip) and len(nodes) == 1
         if terminal_skip:
             return self._match_terminal(judgment.terminal, expected, alpha, context.location)
@@ -627,7 +580,7 @@ class TypeChecker(Table2RuleEngine):
             if expansion is None:
                 return False
         elif isinstance(head, Mu):
-            if judgment.nodes[1:]:
+            if self._observable_recursion_tail(judgment.nodes[1:]):
                 return self._finish_mismatch_step(
                     step,
                     "T-mu only supports guarded tail recursion without a later sequence tail",
@@ -661,8 +614,10 @@ class TypeChecker(Table2RuleEngine):
                         "T-mu did not create a recursive type-variable binding",
                         context.location,
                     )
-                body_alpha = dict(alpha)
-                body_alpha[binding.type_var.name] = expected.variable
+                body_alpha = alpha.bind(
+                    binding.type_var.name,
+                    expected.variable,
+                )
                 children = (_ExpectedChild(expected.body, body_alpha),)
             else:
                 children = (_ExpectedChild(expected, alpha),)
@@ -674,11 +629,13 @@ class TypeChecker(Table2RuleEngine):
                     f"Unbound process variable {head.name!r}",
                     context.location,
                 )
-            expected_name = alpha.get(binding.type_var.name)
-            if not isinstance(expected, TypeVar) or expected.name != expected_name:
+            if not isinstance(expected, TypeVar) or not alpha.matches(
+                binding.type_var.name,
+                expected.name,
+            ):
                 return self._finish_mismatch_step(
                     step,
-                    f"T-X expects recursive TypeVar {expected_name!r}",
+                    f"T-X expects the TypeVar bound to process variable {head.name!r}",
                     context.location,
                 )
             expansion = self.rule_t_x(judgment)
@@ -704,12 +661,205 @@ class TypeChecker(Table2RuleEngine):
         )
         return matched
 
+    def _attempt_ode_check_candidate(
+        self,
+        judgment: _ProcessJudgment,
+        expected: ProcessType,
+        alpha: _AlphaEnvironment,
+        mode: _ODETypeRule,
+    ) -> _ODECheckAttempt:
+        """隔离检查一个 ODE 候选，随后回滚共享报告状态。"""
+
+        obligation_start = len(self.obligations)
+        diagnostic_start = len(self.diagnostics)
+        step_start = len(self.steps)
+        mismatch_start = len(self._type_mismatches)
+        step = self._start_step(
+            "T-ODE",
+            judgment.context.location,
+            f"按 {mode.value} 检查给定 Type = "
+            + format_process_type(expected),
+            context=judgment.context,
+        )
+        expansion, children = self._check_ode_shape(
+            judgment,
+            expected,
+            alpha,
+            step,
+            candidate=mode,
+        )
+        static_failure = any(
+            item.verdict is Verdict.FALSE
+            for item in self.diagnostics[diagnostic_start:]
+        )
+        matched = (
+            expansion is not None
+            and not static_failure
+            and self._check_expansion(expansion, children)
+        )
+        self._finish_step(
+            step,
+            "候选规则匹配" if matched else "候选规则不匹配",
+            "" if expansion is None else self._premise_summary(expansion),
+        )
+
+        obligations = tuple(self.obligations[obligation_start:])
+        diagnostics = tuple(self.diagnostics[diagnostic_start:])
+        steps = tuple(self.steps[step_start:])
+        mismatches = tuple(self._type_mismatches[mismatch_start:])
+        del self.obligations[obligation_start:]
+        del self.diagnostics[diagnostic_start:]
+        del self.steps[step_start:]
+        del self._type_mismatches[mismatch_start:]
+
+        verdict_inputs = [item.verdict for item in obligations]
+        verdict_inputs.extend(item.verdict for item in diagnostics)
+        if not matched and not any(
+            item is Verdict.FALSE for item in verdict_inputs
+        ):
+            verdict_inputs.append(Verdict.FALSE)
+        return _ODECheckAttempt(
+            mode,
+            matched,
+            Verdict.combine(verdict_inputs),
+            obligations,
+            diagnostics,
+            steps,
+            mismatches,
+        )
+
+    def _check_ode_skip_rule_candidates(
+        self,
+        judgment: _ProcessJudgment,
+        expected: ProcessType,
+        alpha: _AlphaEnvironment,
+    ) -> bool:
+        r"""对 ``ODE;skip`` 的 ``T-\unrhd``/``T-\unrhd'`` 分别检查。"""
+
+        step = self._start_step(
+            "T-ODE-Select",
+            judgment.context.location,
+            "ODE 后继为终端 skip：检查给定 Type 可由哪条规则推出",
+            context=judgment.context,
+        )
+        attempts = tuple(
+            self._attempt_ode_check_candidate(
+                judgment,
+                expected,
+                alpha,
+                mode,
+            )
+            for mode in (
+                _ODETypeRule.COMMUNICATION_ONLY,
+                _ODETypeRule.NATURAL_TIMEOUT,
+            )
+        )
+        proved = tuple(
+            item
+            for item in attempts
+            if item.matched and item.verdict is Verdict.TRUE
+        )
+        unknown = tuple(
+            item
+            for item in attempts
+            if item.matched and item.verdict is Verdict.UNKNOWN
+        )
+
+        selected: _ODECheckAttempt | None = None
+        warning = ""
+        if len(proved) == 1:
+            selected = proved[0]
+            # 两条 ODE 规则的适用条件互斥。一个候选已证明接受给定 Type 时，
+            # 另一个 UNKNOWN 候选只作为未选中的审计记录保存，不影响结论。
+        elif len(proved) > 1:
+            # Checker 的右侧 Type 已固定；若两条规则都证明并完整消费同一棵
+            # supplied Type，它们在本次检查中给出等价结论。保留第一条即可，
+            # 与 Constructor 对等价候选的规范化策略一致。
+            selected = proved[0]
+        elif unknown:
+            selected = next(
+                (
+                    item
+                    for item in unknown
+                    if item.mode is _ODETypeRule.NATURAL_TIMEOUT
+                ),
+                unknown[0],
+            )
+            if len(unknown) > 1:
+                warning = (
+                    "Both ODE rule checks remain unknown; the natural-timeout "
+                    "match is retained provisionally"
+                )
+
+        for attempt in attempts:
+            active = attempt is selected
+            self.obligations.extend(
+                replace(
+                    obligation,
+                    active=active,
+                    candidate=attempt.mode.value,
+                )
+                for obligation in attempt.obligations
+            )
+        if selected is not None:
+            self.diagnostics.extend(selected.diagnostics)
+            self.steps.extend(selected.steps)
+            self._type_mismatches.extend(selected.mismatches)
+        if warning:
+            self._diagnose(
+                Verdict.UNKNOWN,
+                warning,
+                "T-ODE-Select",
+                judgment.context.location,
+            )
+
+        summary = "; ".join(
+            f"{item.mode.value}: matched={item.matched}, "
+            f"verdict={item.verdict.value}"
+            for item in attempts
+        )
+        if selected is not None:
+            self._finish_step(
+                step,
+                f"给定 Type 由 {selected.mode.value} 接受",
+                summary,
+            )
+            return True
+
+        seen: set[tuple[Verdict, str, str, str]] = set()
+        for attempt in attempts:
+            for diagnostic in attempt.diagnostics:
+                key = (
+                    diagnostic.verdict,
+                    diagnostic.message,
+                    diagnostic.rule,
+                    diagnostic.location,
+                )
+                if key not in seen:
+                    self.diagnostics.append(diagnostic)
+                    seen.add(key)
+            self._type_mismatches.extend(attempt.mismatches)
+        if not warning:
+            message = "Neither ODE rule accepts the supplied Type"
+            self._diagnose(
+                Verdict.FALSE,
+                message,
+                "T-ODE-Select",
+                judgment.context.location,
+            )
+            if not self._type_mismatches:
+                self._type_mismatches.append(message)
+        self._finish_step(step, "给定 Type 未通过 ODE 候选选择", summary)
+        return False
+
     def _check_ode_shape(
         self,
         judgment: _ProcessJudgment,
         expected: ProcessType,
-        alpha: Mapping[str, str],
+        alpha: _AlphaEnvironment,
         step: int,
+        *,
+        candidate: _ODETypeRule | None = None,
     ) -> tuple[_RuleExpansion | None, tuple[_ExpectedChild, ...]]:
         """检查 ODE 的 delay 外形，并把 A/T 分配给事件和自然后继。"""
 
@@ -730,7 +880,7 @@ class TypeChecker(Table2RuleEngine):
                     judgment.context.location,
                 )
                 return None, ()
-            expansion = self.rule_t_ode(judgment)
+            expansion = self.rule_t_ode(judgment, candidate=candidate)
             return expansion, (_ExpectedChild(expected.interrupts, alpha),)
 
         if not isinstance(expected, FiniteDelayType):
@@ -748,7 +898,26 @@ class TypeChecker(Table2RuleEngine):
                 judgment.context.location,
             )
             return None, ()
-        expansion = self.rule_t_ode(judgment)
+        expansion = self.rule_t_ode(judgment, candidate=candidate)
+        if candidate is _ODETypeRule.COMMUNICATION_ONLY:
+            if not isinstance(expected.continuation, BottomType):
+                self._finish_mismatch_step(
+                    step,
+                    "T-unrhd requires BottomType as its unreachable "
+                    "deadline continuation",
+                    judgment.context.location,
+                )
+                return None, ()
+            return expansion, (_ExpectedChild(expected.interrupts, alpha),)
+        # 非 skip 后继或显式选择的 T-\unrhd' 都把 continuation 作为真实子
+        # judgment；该真实后继本身允许是终端 skip。
+        if isinstance(expected.continuation, BottomType):
+            self._finish_mismatch_step(
+                step,
+                "T-unrhd-prime requires a reachable non-bottom continuation",
+                judgment.context.location,
+            )
+            return None, ()
         return expansion, (
             _ExpectedChild(expected.interrupts, alpha),
             _ExpectedChild(expected.continuation, alpha),
@@ -758,7 +927,7 @@ class TypeChecker(Table2RuleEngine):
         self,
         judgment: _EventJudgment,
         expected: AngelicType,
-        alpha: Mapping[str, str],
+        alpha: _AlphaEnvironment,
     ) -> bool:
         """按规范多元分支顺序检查 ODE 外部中断的 angelic type。"""
 
@@ -808,7 +977,7 @@ class TypeChecker(Table2RuleEngine):
         self,
         terminal: ProcessType,
         expected: ProcessType,
-        alpha: Mapping[str, str],
+        alpha: _AlphaEnvironment,
         location: str,
     ) -> bool:
         """匹配 T-End 的 EmptyType 或递归体的类型变量终点。"""
@@ -816,7 +985,7 @@ class TypeChecker(Table2RuleEngine):
         if isinstance(terminal, EmptyType) and isinstance(expected, EmptyType):
             return True
         if isinstance(terminal, TypeVar) and isinstance(expected, TypeVar):
-            if alpha.get(terminal.name) == expected.name:
+            if alpha.matches(terminal.name, expected.name):
                 return True
         return self._mismatch(
             "T-End",

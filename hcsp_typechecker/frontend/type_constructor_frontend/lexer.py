@@ -17,7 +17,7 @@ from ...identifiers import (
     is_hcsp_identifier_continue,
     is_hcsp_identifier_start,
 )
-from .errors import HCSPInputError, SourcePosition
+from ..errors import HCSPInputError, SourcePosition
 
 
 KEYWORDS = frozenset(

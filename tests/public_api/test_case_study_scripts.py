@@ -2,8 +2,8 @@
 
 测试内容
 --------
-1. ``case.py`` 与 ``new_case.py`` 只能从包根导入 ``construct_hcsp_type`` 和公共
-   异常，不能重新依赖旧两阶段入口、内部 AST 构造器或低层构造器；
+1. ``case.py`` 与 ``new_case.py`` 只能从包根导入 ``construct_hcsp_type``、公共
+   异常及稳定错误枚举，不能重新依赖旧两阶段入口、内部 AST 构造器或低层构造器；
 2. 两个脚本生成的完整用户 source 都必须能通过同一个公开入口越过解析阶段。
    为避免在接口契约测试中重复执行昂贵 dL 证明，测试用恒假路径条件让推导在
    T-sigma 处稳定停止，并以 ``HCSPTypeConstructionError``（而非输入错误）证明解析成功。
@@ -35,11 +35,15 @@ COMMON_PUBLIC_IMPORTS = {
     "construct_hcsp_type",
 }
 EXPECTED_PUBLIC_IMPORTS = {
-    # 原始案例需要单独识别“已得到完整候选类型，但证明仍为 unknown”，
-    # 因而显式捕获更具体的不可信类型异常；改良案例只需把所有类型构造
-    # 失败统一视为非零退出码，捕获其公共基类即可。
-    "case.py": COMMON_PUBLIC_IMPORTS | {"HCSPUntrustedTypeConstructionError"},
-    "new_case.py": COMMON_PUBLIC_IMPORTS,
+    # 原始案例需要单独确认 proof-unknown 是预期结果；改良案例则把不可信
+    # 候选与确定构造失败分开报告，但两者都返回非零退出码。
+    "case.py": COMMON_PUBLIC_IMPORTS
+    | {
+        "HCSPUntrustedTypeConstructionError",
+        "TypeConstructionErrorKind",
+    },
+    "new_case.py": COMMON_PUBLIC_IMPORTS
+    | {"HCSPUntrustedTypeConstructionError"},
 }
 
 
@@ -60,7 +64,7 @@ class CaseStudyPublicInterfaceTests(unittest.TestCase):
     """防止可执行案例重新绕过项目承诺的单一用户入口。"""
 
     # 测试输入：解析两个 case-study Python 文件的项目导入语句。
-    # 预期行为：项目包导入只来自根 hcsp_typechecker，名称恰为单入口与两个异常。
+    # 预期行为：项目包导入只来自根 hcsp_typechecker，名称恰为入口及结构化错误接口。
     # 检查内容：拒绝 _internal、子包路径、旧 parse/infer、AST 构造器和 construct_type。
     # 论文对应：这里只约束案例进入论文推导规则的工程边界，不改动案例公式。
     def test_case_scripts_import_only_the_single_stable_facade(self) -> None:

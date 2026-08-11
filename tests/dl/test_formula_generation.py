@@ -38,6 +38,7 @@ from hcsp_typechecker._internal import (
     ODEAnnotation,
     OutputChannel,
     Sequence,
+    Skip,
     UntranslatedDLFormula,
     Verdict,
     construct_type,
@@ -56,19 +57,15 @@ def _approve_and_collect(storage: list[object]):
     return checker
 
 
-def _select_boundary_and_collect(storage: list[object]):
-    """记录两个 ODE 候选，否证 domain 并唯一选中 boundary 规则。"""
+def _select_timeout_and_collect(storage: list[object]):
+    """记录全部候选，否证 domain 并证明自然 boundary 候选。"""
 
     def checker(obligation: object) -> Verdict:
-        """按 dL role 返回可区分两条规则的模拟结果。"""
+        """让显式 skip 在本测试中唯一解释成可达空后继。"""
 
         storage.append(obligation)
-        formula = getattr(obligation, "formula", None)
-        return (
-            Verdict.FALSE
-            if getattr(formula, "role", "") == "domain"
-            else Verdict.TRUE
-        )
+        role = getattr(getattr(obligation, "formula", None), "role", "")
+        return Verdict.FALSE if role == "domain" else Verdict.TRUE
 
     return checker
 
@@ -98,10 +95,16 @@ class DLFormulaGenerationTests(unittest.TestCase):
         """同一 ODE 的 safety/domain 公式都应显式包含自动局部时钟。"""
 
         captured: list[object] = []
-        process = ODE(
-            [("x", "t + 1")],
-            "t <= 10 and x <= 10",
-            annotation=ODEAnnotation(safety="x >= t and t <= 2", delay=inf),
+        process = Sequence.of(
+            ODE(
+                [("x", "t + 1")],
+                "t <= 10 and x <= 10",
+                annotation=ODEAnnotation(
+                    safety="x >= t and t <= 2",
+                    delay=inf,
+                ),
+            ),
+            Skip(),
         )
         report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
@@ -246,6 +249,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
                 True,
                 annotation=ODEAnnotation(safety="x >= 1", delay=1),
             ),
+            Skip(),
         )
         report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
@@ -278,10 +282,13 @@ class DLFormulaGenerationTests(unittest.TestCase):
         """d=infinity 不比较时限，但仍保留每个 ODE 固有的局部时钟。"""
 
         captured: list[object] = []
-        process = ODE(
-            [("x", 0)],
-            "x >= 0",
-            annotation=ODEAnnotation(safety="x >= 0", delay=inf),
+        process = Sequence.of(
+            ODE(
+                [("x", 0)],
+                "x >= 0",
+                annotation=ODEAnnotation(safety="x >= 0", delay=inf),
+            ),
+            Skip(),
         )
         report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
@@ -305,7 +312,7 @@ class DLFormulaGenerationTests(unittest.TestCase):
             or f"0 = {clock}" in safety.source
         )
 
-    # 测试输入：没有任何用户 ODE 分量或向量声明的空 flow 有限 ODE。
+    # 测试输入：没有用户 ODE 分量的空 flow 有限 ODE，后面显式连接 skip。
     # 预期行为：dL 可构造；自动局部时钟是 ODE 模态中的唯一微分方程。
     # 检查内容：要求公式含 t=0、t'=1、t<1 -> B 和 t=1 -> not B；其中
     #           演化域 B 显式写为严格边界 t<1。
@@ -314,12 +321,15 @@ class DLFormulaGenerationTests(unittest.TestCase):
         """空用户方程仍应通过自动 t'=1 形成正式的 boundary 公式。"""
 
         captured: list[object] = []
-        process = ODE((), "t < 1", annotation=ODEAnnotation(delay=1))
+        process = Sequence.of(
+            ODE((), "t < 1", annotation=ODEAnnotation(delay=1)),
+            Skip(),
+        )
         report = construct_type(
             gamma={},
             theta={},
             configurations=[Configuration({}, process)],
-            dl_checker=_select_boundary_and_collect(captured),
+            dl_checker=_select_timeout_and_collect(captured),
         )
 
         boundary = next(
@@ -384,10 +394,13 @@ class DLFormulaGenerationTests(unittest.TestCase):
     def test_uninterpreted_derivative_is_not_string_spliced(self) -> None:
         """未解释函数不能被猜测成 KeYmaera 定义，义务必须保持 unknown。"""
 
-        process = ODE(
-            [("x", "mystery(x)")],
-            True,
-            annotation=ODEAnnotation(safety="x >= 0", delay=1),
+        process = Sequence.of(
+            ODE(
+                [("x", "mystery(x)")],
+                True,
+                annotation=ODEAnnotation(safety="x >= 0", delay=1),
+            ),
+            Skip(),
         )
         report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
@@ -412,10 +425,13 @@ class DLFormulaGenerationTests(unittest.TestCase):
     def test_boolean_state_in_precondition_is_rejected_conservatively(self) -> None:
         """KeYmaera 实变量不能冒充 Bool 状态变量，不能产生不可靠编码。"""
 
-        process = ODE(
-            [("x", 0)],
-            True,
-            annotation=ODEAnnotation(safety="x >= 0", delay=1),
+        process = Sequence.of(
+            ODE(
+                [("x", 0)],
+                True,
+                annotation=ODEAnnotation(safety="x >= 0", delay=1),
+            ),
+            Skip(),
         )
         report = construct_type(
             gamma={

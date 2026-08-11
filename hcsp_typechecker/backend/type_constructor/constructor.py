@@ -9,22 +9,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from ...identifiers import is_hcsp_identifier
 from ...data_structures.runtime_context import (
     ChannelType,
     Configuration,
     GammaType,
     ParameterEnvironment,
-    normalize_channel_type,
-    normalize_gamma_type,
-    normalize_type,
 )
 from ...data_structures.type_ast.ast import ConfigurationType, ParallelType
-from ..common.logic import (
-    ExpressionError,
-    ExpressionTranslator,
-    conjunction,
-)
 from ..common.model import DLChecker, Verdict
 from ..common.keymaerax import KeYmaeraXConfig
 from ..common.rule_engine import Table2RuleEngine, _ConstructionFailure
@@ -50,7 +41,7 @@ class TypeConstructor(Table2RuleEngine):
         """把共享引擎证据收束成 TypeConstructor 专属报告。"""
 
         verdict = Verdict.combine(
-            [item.verdict for item in self.obligations]
+            [item.verdict for item in self.obligations if item.active]
             + [item.verdict for item in self.diagnostics]
         )
         return TypeConstructionReport(
@@ -81,135 +72,19 @@ class TypeConstructor(Table2RuleEngine):
         self._fresh_counter = 0
         self._type_var_counter = 0
 
-        # 在进入规则前集中规范化 Gamma/Theta，避免每条规则接受不同输入别名。
-        try:
-            invalid_gamma_names = {
-                repr(name)
-                for name in request.gamma
-                if not is_hcsp_identifier(name)
-            }
-            if invalid_gamma_names:
-                raise ValueError(
-                    "Invalid Gamma names: "
-                    + ", ".join(sorted(invalid_gamma_names))
-                )
-            gamma = {
-                name: normalize_gamma_type(value, subject="Gamma entry")
-                for name, value in request.gamma.items()
-            }
-            self._validate_continuous_vectors(gamma)
-            invalid_parameter_names = {
-                repr(name)
-                for name in request.parameters.declarations
-                if not is_hcsp_identifier(name)
-            }
-            if invalid_parameter_names:
-                raise ValueError(
-                    "Invalid parameter names: "
-                    + ", ".join(sorted(invalid_parameter_names))
-                )
-            parameters = {
-                name: normalize_type(
-                    value,
-                    subject="Parameter declaration",
-                )
-                for name, value in request.parameters.declarations.items()
-            }
-            shared_names = set(gamma) & set(parameters)
-            if shared_names:
-                raise ValueError(
-                    "Gamma and the shared parameter environment overlap: "
-                    + ", ".join(sorted(shared_names))
-                )
-            theta = {
-                self._channel_name(name): normalize_channel_type(value)
-                for name, value in request.theta.items()
-            }
-        except (TypeError, ValueError) as exc:
-            self._diagnose(Verdict.FALSE, f"Invalid typing environment: {exc}", "environment")
+        prepared = self._prepare_typing_environment(
+            gamma_source=request.gamma,
+            theta_source=request.theta,
+            parameter_environment=request.parameters,
+            path_condition=request.path_condition,
+        )
+        if prepared is None:
             return self._report(None, ())
-
-        parameter_symbols: dict[str, Any] = {}
-        parameter_translator = ExpressionTranslator(
-            parameters,
-            parameter_symbols,
-            name_prefix="parameter__",
-        )
-        try:
-            for name, value_type in parameters.items():
-                parameter_translator.symbol(name, value_type)
-            parameter_constraint_result = parameter_translator.boolean_result(
-                request.parameters.constraint
-            )
-            parameter_condition = conjunction(
-                self._defined_term(parameter_constraint_result),
-                *(
-                    constraint
-                    for name, value_type in parameters.items()
-                    for constraint in self._type_domain_constraints(
-                        value_type,
-                        parameter_symbols[name],
-                    )
-                ),
-            )
-        except ExpressionError as exc:
-            self._diagnose(
-                Verdict.FALSE,
-                f"Invalid shared parameter constraint: {exc}",
-                "parameters",
-            )
-            return self._report(None, ())
-
-        parameter_verdict, parameter_detail = self.proof_engine.satisfiable(
-            parameter_condition
-        )
-        if parameter_verdict is Verdict.FALSE:
-            self._diagnose(
-                parameter_verdict,
-                "Shared parameter constraint must be satisfiable: "
-                + parameter_detail,
-                "parameters",
-            )
-            return self._report(None, ())
-        if parameter_verdict is Verdict.UNKNOWN:
-            # 不可满足会让所有后续蕴含式真空成立，必须立即拒绝；求解器未能决定
-            # 可满足性却不等于已经发现矛盾。保留符号约束继续推导，并让最终
-            # UNKNOWN 诊断明确降低候选类型的可信度。
-            self._diagnose(
-                Verdict.UNKNOWN,
-                "Shared parameter constraint satisfiability is unknown; "
-                "type construction continues, but the constructed type is untrusted: "
-                + parameter_detail,
-                "parameters",
-            )
-
-        environment_step = self._start_step(
-            "environment",
-            "judgment",
-            "规范化类型环境 Gamma 与 Theta",
-            gamma=gamma,
-            parameters=parameters,
-            parameter_constraint=request.parameters.constraint,
-            theta=theta,
-            path=request.path_condition,
-        )
-        self._finish_step(
-            environment_step,
-            (
-                "环境规范化完成；参数约束可满足性未决"
-                if parameter_verdict is Verdict.UNKNOWN
-                else "环境规范化成功"
-            ),
-            (
-                "后续规则统一使用这里展示的基础类型和通道 refinement type。"
-                + (
-                    " 参数约束未被判定为不可满足，因此继续符号推导；"
-                    "最终类型保持 UNKNOWN、不可信。"
-                    if parameter_verdict is Verdict.UNKNOWN
-                    else ""
-                )
-            ),
-        )
+        gamma = prepared.gamma
+        theta = prepared.theta
+        parameters = prepared.parameters
+        parameter_symbols = prepared.parameter_symbols
+        parameter_condition = prepared.parameter_condition
 
         if not request.configurations:
             self._diagnose(
@@ -219,7 +94,7 @@ class TypeConstructor(Table2RuleEngine):
             )
             return self._report(None, ())
 
-        # 即使只有一个配置也经 T-|| 入口处理，以保持 Gamma 分区和 T-sigma 一致。
+        # 即使只有一个配置也经 T-|| 入口处理，以保持共享 Gamma 和 T-sigma 一致。
         parallel_expansion = self.rule_t_parallel(
             request.configurations,
             gamma,

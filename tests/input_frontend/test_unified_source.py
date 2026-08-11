@@ -239,8 +239,8 @@ process {{skip}}"""
     # 测试输入：refinement 含外部自由名，且整体是数值而不是 Bool 公式。
     # 预期行为：统一前端只保存合法 Expr，不抢先重复完整判断上下文的类型工作。
     # 检查内容：精确比较 ChannelType.refinement 与严格表达式入口生成的 AST。
-    # 论文对应：Theta 的公式类型和自由名最终由含 Gamma/参数的类型判断检查。
-    def test_refinement_semantics_remain_for_the_type_constructor(self) -> None:
+    # 论文对应：Theta 的公式类型和自由名最终由含 Gamma/参数的后端环境检查。
+    def test_refinement_semantics_remain_for_backend_validation(self) -> None:
         """语法合法的 refinement 应被无损保存，即使其后仍可能类型错误。"""
 
         source = _source_with(

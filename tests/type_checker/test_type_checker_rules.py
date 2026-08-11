@@ -59,6 +59,10 @@ _PARALLEL_SOURCE = """gamma(x: Int)
 theta(ch: channel(v: Int))
 process {{ch!(1)}, {ch?(x)}}"""
 
+_PARALLEL_UNUSED_GAMMA_SOURCE = """gamma(unused: Int)
+theta()
+process {{skip}, {skip}}"""
+
 _NESTED_IF_SOURCE = """gamma(x: Int)
 theta(a: channel(v: Int), b: channel(v: Int), c: channel(v: Int))
 process {{if (x >= 0) {choose {a!(0)} or {b!(0)}} else {c!(0)}}}"""
@@ -74,7 +78,29 @@ process {{ode(
     domain(true),
     delay(inf),
     interrupt(on ch!(0) {skip}, on reset?(value) {skip})
-)}}"""
+); skip}}"""
+
+_NESTED_CROSS_SCOPE_RECURSION_SOURCE = """gamma(flag: Bool)
+theta(a: channel(v: Int), b: channel(v: Int), c: channel(v: Int), d: channel(v: Int))
+process {{mu X invariant(true) {
+    a!(0);
+    if (flag) {call X} else {
+        d!(0);
+        mu Y invariant(true) {
+            if (flag) {b!(0); call X} else {c!(0); call Y}
+        }
+    }
+}}}"""
+
+_NESTED_SHADOW_ONLY_RECURSION_SOURCE = """gamma(flag: Bool)
+theta(a: channel(v: Int), c: channel(v: Int), d: channel(v: Int))
+process {{mu X invariant(true) {
+    a!(0);
+    if (flag) {call X} else {
+        d!(0);
+        mu Y invariant(true) {c!(0); call Y}
+    }
+}}}"""
 
 
 class TypeDirectedRuleTests(unittest.TestCase):
@@ -102,13 +128,59 @@ class TypeDirectedRuleTests(unittest.TestCase):
     def test_constructor_roundtrip_covers_recursion_and_parallel(self) -> None:
         """递归 alpha 绑定和并行分量均应按判断结构检查。"""
 
-        for source in (_RECURSION_SOURCE, _PARALLEL_SOURCE):
+        for source in (
+            _RECURSION_SOURCE,
+            _PARALLEL_SOURCE,
+            _PARALLEL_UNUSED_GAMMA_SOURCE,
+        ):
             with self.subTest(source=source):
                 constructed = construct_hcsp_type(source)
                 checked = check_hcsp_type(
                     source + "\n" + format_type_source(constructed)
                 )
                 self.assertEqual(checked, constructed)
+
+    # 测试输入：内层递归体同时含指向外层 X 与内层 Y 的回边，再故意让用户
+    #           Type 的两个 mu 都叫 t1，使外层回边被内层同名 binder 捕获。
+    # 预期行为：Checker 拒绝该类型；字符串相同不能替代词法绑定身份相同。
+    # 检查内容：覆盖跨层回边、同名遮蔽和 T-X 的绑定身份比较。
+    # 论文对应：mu t.T 中 TypeVar 由最近的同名 mu 绑定，alpha 改名不能捕获
+    #           原本属于外层递归的自由出现。
+    def test_nested_same_name_mu_cannot_capture_outer_recursive_edge(self) -> None:
+        """内层同名 Type binder 不能冒充外层递归回边的目标。"""
+
+        constructed = construct_hcsp_type(_NESTED_CROSS_SCOPE_RECURSION_SOURCE)
+        supplied = format_type_source(constructed)
+        supplied = supplied.replace("mu t2.", "mu t1.")
+        supplied = supplied.replace("c! -> t2", "c! -> t1")
+
+        with self.assertRaises(HCSPTypeCheckingError) as caught:
+            check_hcsp_type(
+                _NESTED_CROSS_SCOPE_RECURSION_SOURCE + "\n" + supplied
+            )
+        self.assertEqual(caught.exception.verdict, "false")
+        self.assertIn(
+            "TypeVar bound to process variable 'X'",
+            caught.exception.reason,
+        )
+
+    # 测试输入：嵌套递归中没有从内层体返回外层的回边，用户把两层 binder
+    #           都改名为 t1，并让内层回边继续指向最近的 t1。
+    # 预期行为：Checker 接受；无捕获的同名遮蔽是合法 alpha 改名。
+    # 检查内容：防止修复退化为简单禁止重复名字，保留真正的词法作用域。
+    # 论文对应：内层 mu t.T 合法遮蔽外层同名 binder，前提是引用归属不改变。
+    def test_nested_same_name_mu_is_allowed_without_cross_scope_edge(self) -> None:
+        """没有外层回边穿过内层作用域时应允许同名递归绑定器。"""
+
+        constructed = construct_hcsp_type(_NESTED_SHADOW_ONLY_RECURSION_SOURCE)
+        supplied = format_type_source(constructed)
+        supplied = supplied.replace("mu t2.", "mu t1.")
+        supplied = supplied.replace("c! -> t2", "c! -> t1")
+
+        checked = check_hcsp_type(
+            _NESTED_SHADOW_ONLY_RECURSION_SOURCE + "\n" + supplied
+        )
+        self.assertEqual(format_type_source(checked), supplied)
 
     # 测试输入：无穷 ODE，含两个有序通信中断分支且 safety/domain 均为 true。
     # 预期行为：无需外部 dL 后端即可检查 InfiniteDelayType 与多元 AngelicType。
@@ -207,7 +279,7 @@ class TypeDirectedRuleTests(unittest.TestCase):
 
         source = """gamma(x: Real, motion: continuous(x))
 theta()
-process {{ode(flow(dot x = 0), domain(t < 1), safety(true), delay(1))}}
+process {{ode(flow(dot x = 0), domain(t < 1), safety(true), delay(1)); skip}}
 type delay(2) then empty"""
         parsed = parse_typechecking_source(source)
         request = TypeCheckingRequest(
@@ -243,7 +315,7 @@ type delay(2) then empty"""
 
         source = """gamma(x: Real, motion: continuous(x))
 theta()
-process {{ode(flow(dot x = 0), domain(t < 1), safety(true), delay(1))}}
+process {{ode(flow(dot x = 0), domain(t < 1), safety(true), delay(1)); skip}}
 type delay(1) then empty"""
         parsed = parse_typechecking_source(source)
         request = TypeCheckingRequest(
@@ -255,26 +327,114 @@ type delay(1) then empty"""
         )
         calls: list[object] = []
 
-        # 测试输入：有限 ODE 的 safety 与 boundary dL 公式。
-        # 预期行为：两项均由后端判真，使 Checker 可以继续检查 A/T 子判断。
+        # 测试输入：有限 ODE 后显式书写 skip，产生 safety 与 boundary dL 公式。
+        # 预期行为：两项均由后端判真，使 Checker 可以继续检查 A/T 子判断；
+        #           skip 虽构造 EmptyType，仍作为 T-\unrhd' 的真实后继被检查。
         # 检查内容：保存公式调用次数并避免依赖本机 KeYmaera X。
-        # 论文对应：有限 T-ODE 横线上方的两项动态逻辑 premise。
+        # 论文对应：带显式空后继的有限 T-\unrhd' 规则。
         def prove(formula: object) -> Verdict:
-            """记录有限 ODE 义务并模拟可信后端证明成功。"""
+            """否证 domain、证明 boundary，使 prime 规则成为唯一候选。"""
 
             calls.append(formula)
-            return Verdict.TRUE
+            role = getattr(getattr(formula, "formula", None), "role", "")
+            return Verdict.FALSE if role == "domain" else Verdict.TRUE
 
         report = TypeChecker(dl_checker=prove).check(request)
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(report.structurally_matched)
-        # safety(true) 仍登记为一条已证明义务，但由本地恒真快捷路径完成；
-        # 只有非平凡 boundary 需要调用注入的 dL 后端。
+        # 给定 Type 的 empty 后继已经排除 T-unrhd；只有 prime 候选进入证明，
+        # 因而后端只接收 boundary，避免证明一个结构上不可能匹配的候选。
         self.assertEqual(len(calls), 1)
         self.assertEqual(
             {item.rule for item in report.evidence.obligations},
+            {
+                "T-ODE-safety",
+                "T-ODE-boundary",
+                "T-sigma",
+            },
+        )
+        self.assertEqual(
+            {
+                item.rule
+                for item in report.evidence.obligations
+                if item.active
+            },
             {"T-ODE-safety", "T-ODE-boundary", "T-sigma"},
         )
+
+    # 测试输入：同一 ODE;skip，但给定 Type 的 deadline 后继显式写 bottom。
+    # 预期行为：Checker 只尝试 T-unrhd，并由 domain 证明接受该 Type。
+    # 检查内容：bottom 直接排除带真实超时后继的 prime 规则。
+    # 论文对应：T-unrhd 的 deadline 后继不可达，必须是 bottom。
+    def test_bottom_continuation_selects_communication_rule(self) -> None:
+        """给定 bottom 后继时应唯一匹配纯通信 ODE 规则。"""
+
+        source = """gamma(x: Real, motion: continuous(x))
+theta()
+process {{ode(flow(dot x = 0), domain(t < 1), safety(true), delay(1)); skip}}
+type delay(1) then bottom"""
+        parsed = parse_typechecking_source(source)
+        request = TypeCheckingRequest(
+            parsed.program.gamma,
+            parsed.program.theta,
+            (Configuration({}, parsed.program.process_components[0], name="K1"),),
+            parsed.expected_type,
+            parameters=parsed.program.parameters,
+        )
+
+        def prove(formula: object) -> Verdict:
+            """证明唯一需要检查的 domain 义务。"""
+
+            role = getattr(getattr(formula, "formula", None), "role", "")
+            return Verdict.TRUE
+
+        report = TypeChecker(dl_checker=prove).check(request)
+
+        self.assertEqual(report.verdict, Verdict.TRUE)
+        self.assertTrue(report.structurally_matched)
+        domain = next(
+            item
+            for item in report.evidence.obligations
+            if item.rule == "T-ODE-domain"
+        )
+        self.assertEqual(domain.verdict, Verdict.TRUE)
+        self.assertTrue(domain.active)
+        self.assertNotIn(
+            "T-ODE-boundary",
+            {item.rule for item in report.evidence.obligations},
+        )
+
+    # 测试输入：set?(x,y) 假设 x=0 and y>0，有限 ODE 只演化 x，后继断言 y>0；
+    #           用户给出与该通信、delay 和空后继对应的 Type。
+    # 预期行为：Checker 拒绝；ODE 后继按 Table 2 只获得 not B and safety，
+    #           不能使用先前输入 refinement 中的 y>0。
+    # 检查内容：确认 Checker 与 Constructor 共用严格的 ODE 后继上下文。
+    # 论文对应：自然后继判断的路径条件是 ``not B∧phi``。
+    def test_checker_drops_unevolved_fact_across_ode(self) -> None:
+        """TypeChecker 不得在 ODE 后继中保留入口状态约束。"""
+
+        source = """gamma(x: Real, ode_x: continuous(x))
+theta(set: channel(first: Real, second: Real) where(first == 0 and second > 0))
+process {{
+    set?(x, y);
+    ode(flow(dot x = 1), domain(t < 1), safety(true), delay(1));
+    assert(y > 0)
+}}
+type forever interrupt angelic {
+    set? -> delay(1) then empty
+}"""
+        parsed = parse_typechecking_source(source)
+        request = TypeCheckingRequest(
+            parsed.program.gamma,
+            parsed.program.theta,
+            (Configuration({}, parsed.program.process_components[0], name="K1"),),
+            parsed.expected_type,
+            parameters=parsed.program.parameters,
+        )
+        report = TypeChecker(dl_checker=lambda _formula: Verdict.TRUE).check(request)
+
+        self.assertEqual(report.verdict, Verdict.FALSE, report.format_detailed())
+        self.assertFalse(report.structurally_matched)
 
     # 测试输入：assert(false) 配上结构上看似正确的 empty Type。
     # 预期行为：Type 结构匹配仍不足以通过；FOL premise 的反例使检查失败。
@@ -288,6 +448,45 @@ type delay(1) then empty"""
             check_hcsp_type(source)
         self.assertEqual(caught.exception.verdict, "false")
         self.assertIn("counterexample", caught.exception.reason)
+
+    # 测试输入：用户 Type 外形正确，但 Process 把 Real 通道值接收到 Int 变量。
+    # 预期行为：Checker 在递归检查给定 InputType 前由 T-In 静态前提拒绝。
+    # 检查内容：确认共享规则修复不仅约束 Constructor，也约束 TypeChecker。
+    # 论文对应：通道槽位 B 的任意输入值都必须能存入 Gamma 中目标变量的类型。
+    def test_checker_rejects_real_input_into_existing_int_target(self) -> None:
+        """给定 Type 的正确外形不能掩盖不安全的输入赋值方向。"""
+
+        source = """gamma(x: Int)
+theta(ch: channel(v: Real))
+process {{ch?(x)}}
+type forever interrupt angelic {
+    ch? -> empty
+}"""
+
+        with self.assertRaises(HCSPTypeCheckingError) as caught:
+            check_hcsp_type(source)
+        self.assertEqual(caught.exception.verdict, "false")
+        self.assertIn(
+            "has type Int, channel slot carries Real",
+            caught.exception.reason,
+        )
+
+    # 测试输入：Process/type 均为空行为，Theta 中未使用通道的 refinement 却是 Real。
+    # 预期行为：Checker 在开始匹配 T-End 前拒绝整个 Theta 环境。
+    # 检查内容：确认 Checker 和 Constructor 共享 eager refinement 良构检查。
+    # 论文对应：给定 Type 只能在良构的 Gamma/Theta 判断上下文中接受。
+    def test_checker_rejects_invalid_refinement_on_unused_channel(self) -> None:
+        """未使用通道的非法 refinement 不能被空 Process/type 绕过。"""
+
+        source = """gamma()
+theta(bad: channel(value: Real) where(value + 1))
+process {{skip}}
+type empty"""
+
+        with self.assertRaises(HCSPTypeCheckingError) as caught:
+            check_hcsp_type(source)
+        self.assertEqual(caught.exception.verdict, "false")
+        self.assertIn("Expected Bool formula", caught.exception.reason)
 
     # 测试输入：最小 skip/type empty，并监视旧的完整类型构造入口。
     # 预期行为：检查成功且 TypeConstructor.construct 从未被调用。

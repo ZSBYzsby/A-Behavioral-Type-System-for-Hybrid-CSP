@@ -16,6 +16,10 @@ r"""用多个并行 Type AST 演示 Table 3 状态迁移图构造器。
 ``GRAPH_OUTPUT_MODE="full"`` 会打印完整图；改成 ``"result"`` 时只打印图规模
 和初始规范 Type。这里导入具体 Type AST 节点是为了演示内部数据结构；普通用户
 取得 Type AST 后只需调用包根的 ``build_type_transition_graph``。
+
+本脚本不解析 HCSP，也不调用 TypeConstructor/TypeChecker，因此不会产生这两套
+业务的结构化异常；图规模受限时由返回图的 ``complete/truncation_reason`` 表达，
+而手工 Type AST 的 Python 类型错误仍作为调用契约错误直接抛出。
 """
 
 from __future__ import annotations

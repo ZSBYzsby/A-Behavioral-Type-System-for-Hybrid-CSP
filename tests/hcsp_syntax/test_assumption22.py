@@ -191,12 +191,13 @@ class Assumption22ConstructionTests(unittest.TestCase):
     def test_all_communicating_if_exits_guard_a_common_tail(self) -> None:
         """所有条件分支都通信时，可以保护汇合后的递归回边。"""
 
-        prefix = If(
+        body = If(
             True,
             InputChannel("left", "v"),
             OutputChannel("right", 1),
+            continuation=Var("X"),
         )
-        self.assertIsInstance(Mu("X", Sequence(prefix, Var("X"))), Mu)
+        self.assertIsInstance(Mu("X", body), Mu)
 
     # 测试输入：If 的 then 分支输入，else 分支 skip，公共后继为 X。
     # 预期行为：构造失败，因为 else 路径未通信便能到达公共后继。
@@ -205,13 +206,16 @@ class Assumption22ConstructionTests(unittest.TestCase):
     def test_one_silent_if_exit_does_not_guard_a_common_tail(self) -> None:
         """只在部分条件路径通信不能保护汇合后的递归回边。"""
 
-        prefix = If(
-            True,
-            InputChannel("left", "v"),
-            Skip(),
-        )
-        with self.assertRaisesRegex(ValueError, r"body\.second"):
-            Mu("X", Sequence(prefix, Var("X")))
+        with self.assertRaisesRegex(ValueError, r"body\.continuation"):
+            Mu(
+                "X",
+                If(
+                    True,
+                    InputChannel("left", "v"),
+                    Skip(),
+                    continuation=Var("X"),
+                ),
+            )
 
     # 测试输入：ODE 的两个事件分支分别输入/输出，continuation 都是 X。
     # 预期行为：Mu 成功构造，因为事件分支语法保证先通信再执行 continuation。
@@ -240,14 +244,17 @@ class Assumption22ConstructionTests(unittest.TestCase):
         """ODE 中存在事件分支也不能保护其自然结束后的公共后继。"""
 
         events = EventChoice((InputChannel("stop", "v"), Skip()))
-        flow = ODE(
-            [("x", 1)],
-            "x <= 1",
-            events,
-            annotation=ODEAnnotation(delay=1),
-        )
-        with self.assertRaisesRegex(ValueError, r"body\.second"):
-            Mu("X", Sequence(flow, Var("X")))
+        with self.assertRaisesRegex(ValueError, r"body\.continuation"):
+            Mu(
+                "X",
+                ODE(
+                    [("x", 1)],
+                    "x <= 1",
+                    events,
+                    annotation=ODEAnnotation(delay=1),
+                    continuation=Var("X"),
+                ),
+            )
 
     # 测试输入：外层和内层均绑定 X；另构造内层绑定 Y、体内引用外层 X。
     # 预期行为：同名内层遮蔽使外层真空通过；不同名内层不能遮蔽并被拒绝。

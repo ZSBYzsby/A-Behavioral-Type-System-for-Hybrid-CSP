@@ -13,15 +13,22 @@ judgment 和证明请求只在接口内部流转；其余子包不承诺稳定�
 
 TypeChecker 以给定 Type 为规则结论逐层递归，不通过先运行 TypeConstructor 再
 比较完整类型实现。
+
+两套业务异常分别使用 ``TypeConstructionErrorKind`` 与
+``TypeCheckingErrorKind`` 分类；共同的 ``HCSPErrorDetail`` 保存规则、判断位置、
+证明公式和后端说明，调用者无需解析展示文本即可处理错误。
 """
 
 from .api import (
+    HCSPErrorDetail,
     HCSPInputError,
     HCSPTypeConstructionError,
     HCSPTypeCheckingError,
     HCSPUntrustedTypeConstructionError,
     OutputMode,
     TypeAST,
+    TypeCheckingErrorKind,
+    TypeConstructionErrorKind,
     TypeTransitionGraph,
     build_type_transition_graph,
     construct_hcsp_type,
@@ -30,12 +37,15 @@ from .api import (
 
 
 __all__ = [
+    "HCSPErrorDetail",
     "HCSPInputError",
     "HCSPTypeConstructionError",
     "HCSPTypeCheckingError",
     "HCSPUntrustedTypeConstructionError",
     "OutputMode",
     "TypeAST",
+    "TypeCheckingErrorKind",
+    "TypeConstructionErrorKind",
     "TypeTransitionGraph",
     "build_type_transition_graph",
     "construct_hcsp_type",

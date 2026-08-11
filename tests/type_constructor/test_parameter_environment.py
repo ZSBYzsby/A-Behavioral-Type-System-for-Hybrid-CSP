@@ -30,6 +30,7 @@ from hcsp_typechecker._internal import (
     ParameterEnvironment,
     Mu,
     Sequence,
+    Skip,
     Var,
     Verdict,
     construct_type,
@@ -118,10 +119,10 @@ class ParameterEnvironmentTests(unittest.TestCase):
 
     # 测试输入：两个并行配置读取同一个 limit 参数。
     # 预期行为：两个配置均推导成功，得到并行类型。
-    # 检查内容：参数跨配置共享，但不进入局部 Gamma 划分。
+    # 检查内容：参数跨配置共享且保持只读，不属于可变状态所有权集合。
     # 论文对应：并行规则共享 H，仅状态环境互斥。
-    def test_parameters_are_shared_without_entering_gamma_partition(self) -> None:
-        """两个配置可以读取同一参数，同时保持局部状态 Gamma 不相交。"""
+    def test_parameters_are_shared_without_becoming_mutable_state(self) -> None:
+        """两个配置可以读取同一参数，但都不能把它当作可变状态。"""
 
         left = Sequence.of(Assert("limit >= 0"), OutputChannel("left", 0))
         right = Sequence.of(Assert("limit >= 0"), OutputChannel("right", 0))
@@ -132,8 +133,8 @@ class ParameterEnvironmentTests(unittest.TestCase):
                 "right": ChannelType(BasicType.INT),
             },
             configurations=(
-                Configuration({}, left, gamma={}, name="Left"),
-                Configuration({}, right, gamma={}, name="Right"),
+                Configuration({}, left, name="Left"),
+                Configuration({}, right, name="Right"),
             ),
             parameters=ParameterEnvironment(
                 {"limit": BasicType.REAL},
@@ -170,10 +171,13 @@ class ParameterEnvironmentTests(unittest.TestCase):
             ),
             (
                 "ode",
-                ODE(
-                    [("limit", 0)],
-                    True,
-                    annotation=ODEAnnotation(delay=1),
+                Sequence.of(
+                    ODE(
+                        [("limit", 0)],
+                        True,
+                        annotation=ODEAnnotation(delay=1),
+                    ),
+                    Skip(),
                 ),
                 {},
                 {},
@@ -221,7 +225,9 @@ class ParameterEnvironmentTests(unittest.TestCase):
             """记录 dL 证明义务并在本测试中批准它。"""
 
             captured.append(obligation)
-            return DLCheckResult(Verdict.TRUE, "captured")
+            role = getattr(getattr(obligation, "formula", None), "role", "")
+            verdict = Verdict.FALSE if role == "boundary" else Verdict.TRUE
+            return DLCheckResult(verdict, "captured")
 
         report = construct_type(
             gamma={
@@ -232,13 +238,16 @@ class ParameterEnvironmentTests(unittest.TestCase):
             configurations=[
                 Configuration(
                     {"x": 0},
-                    ODE(
-                        [("x", 1)],
-                        True,
-                        annotation=ODEAnnotation(
-                            safety="x <= limit",
-                            delay=1,
+                    Sequence.of(
+                        ODE(
+                            [("x", 1)],
+                            True,
+                            annotation=ODEAnnotation(
+                                safety="x <= limit",
+                                delay=1,
+                            ),
                         ),
+                        Skip(),
                     ),
                 )
             ],

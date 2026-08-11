@@ -1,8 +1,8 @@
-"""用户输入前端共享的源码位置和诊断异常。
+"""所有用户输入前端共用的源码位置和诊断异常。
 
-词法器、语法分析器以及 Process AST lowering 都通过 :class:`HCSPInputError`
-报告失败。异常保留稳定的阶段、文件名和一基行列号，既能生成带源码插入符的
-用户诊断，也允许调用方读取结构化位置，而不必解析整段错误文本。
+带批注 HCSP、运行上下文和用户 Type 的词法器、语法分析器及 lowering 都通过
+:class:`HCSPInputError` 报告失败。该异常独立于 TypeConstructor 和 TypeChecker，
+两个业务入口只负责使用各自标题渲染它，不复制前端诊断实现。
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ class SourcePosition:
 
 
 class HCSPInputError(ValueError):
-    """带源码位置的 HCSP 用户输入错误。"""
+    """带源码位置和机器可读阶段的统一用户输入错误。"""
 
     def __init__(
         self,
@@ -68,10 +68,11 @@ class HCSPInputError(ValueError):
         found: str | None = None,
         expected: tuple[str, ...] = (),
     ) -> None:
-        """保存机器可读字段，同时初始化普通 ``ValueError`` 文本。"""
+        """保存结构化字段，同时初始化普通 ``ValueError`` 文本。"""
 
         self.message = message
         self.phase = phase
+        self.kind = f"input-{phase}"
         self.source_name = source_name
         self.source = source
         self.offset = position.offset
@@ -88,8 +89,8 @@ class HCSPInputError(ValueError):
             f"{self.source_name}:{self.line}:{self.column}: "
             f"{self.phase} error: {self.message}"
         )
-        # re.split 会保留末尾换行之后的空字符串，因此 ``line`` 指向 EOF 空行时，
-        # 诊断不会错误地把插入符画到上一行。
+        # re.split 会保留末尾换行之后的空字符串，因此 EOF 位于空行时不会把
+        # 插入符错误画到上一行。
         lines = re.split(r"\r\n|\r|\n", self.source)
         if not lines:
             return header
@@ -103,3 +104,6 @@ class HCSPInputError(ValueError):
         """返回稳定的用户可读诊断。"""
 
         return self.format_diagnostic()
+
+
+__all__ = ["HCSPInputError", "InputPhase", "SourcePosition"]

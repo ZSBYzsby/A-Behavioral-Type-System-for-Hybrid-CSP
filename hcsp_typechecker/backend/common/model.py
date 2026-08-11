@@ -77,7 +77,8 @@ class Verdict(str, Enum):
 #                            verdict=UNKNOWN, detail="", proof_formula=None)。
 # 构造检查：本类只冻结公式和元数据，不调用 Z3/KeYmaera X；共享规则引擎的
 #           顺序 premise 求解器在规则当前位置立即化简、判定并写回不可变
-#           副本。当前规则确定性地产生义务，不保存已经废弃的 ODE 候选状态。
+#           副本。ODE;skip 会隔离试用两条规则；candidate 标识来源，active
+#           表示该义务是否属于最终选中的推导。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class ProofObligation:
@@ -86,6 +87,7 @@ class ProofObligation:
     ``kind`` 为 ``fol`` 时交给 Z3 一阶逻辑后端；``dl`` 表示动态逻辑公式，需要
     外部证明器、注解结果或保守地返回 ``UNKNOWN``。``formula`` 永远保留规则
     最初生成的公式；判定完成后，``proof_formula`` 保存实际交给后端的化简式。
+    ``location`` 保存产生该 premise 的判断路径，供两套业务错误直接定位。
     """
 
     rule: str
@@ -95,6 +97,9 @@ class ProofObligation:
     verdict: Verdict = Verdict.UNKNOWN
     detail: str = ""
     proof_formula: Any | None = None
+    active: bool = True
+    candidate: str = ""
+    location: str = ""
 
     # 功能：保留规则原始公式和来源信息，写入证明器实际输入、结论及说明。
     # 构造/模型关系：formula 始终对应规则生成的 premise；proof_formula 对应
@@ -241,13 +246,16 @@ class RuleDerivationReport:
     def summary(self) -> str:
         """生成紧凑的单行统计，适合测试失败信息和命令行输出。"""
         proved = sum(
-            item.verdict == Verdict.TRUE for item in self.obligations
+            item.active and item.verdict == Verdict.TRUE
+            for item in self.obligations
         )
         disproved = sum(
-            item.verdict == Verdict.FALSE for item in self.obligations
+            item.active and item.verdict == Verdict.FALSE
+            for item in self.obligations
         )
         unknown = sum(
-            item.verdict == Verdict.UNKNOWN for item in self.obligations
+            item.active and item.verdict == Verdict.UNKNOWN
+            for item in self.obligations
         )
         if self.constructed_type is None:
             type_summary = "(none)"
@@ -380,7 +388,11 @@ class RuleDerivationReport:
                     f"[{formula_reference}] 对应 O{source_index:02d} | "
                     f"{status_labels[obligation.verdict]} | "
                     f"{obligation.rule} | {obligation.kind.upper()}",
+                    "     候选归属 : "
+                    + (obligation.candidate or "确定性规则")
+                    + ("（参与最终结论）" if obligation.active else "（未选中）"),
                     f"     公式用途 : {obligation.description}",
+                    "     判断位置 : " + (obligation.location or "-"),
                     f"     判定后端 : {self._proof_backend(obligation.kind)}",
                 )
             )
@@ -409,8 +421,22 @@ class RuleDerivationReport:
     # 功能：把结构化轨迹、证明义务和诊断统一渲染为可直接阅读的中文报告。
     # 构造/模型关系：只读取已经冻结的证据，不重新运行规则或证明器，也不会
     #                把候选类型生成成功误写成全部证明义务为真。
-    def format_detailed(self) -> str:
-        """生成包含 FOL/dL 清单、原始公式、证明器输入和遗留义务的报告。"""
+    def format_detailed(
+        self,
+        *,
+        purpose: str = "construction",
+        displayed_type: _ConfigurationType | None = None,
+    ) -> str:
+        """生成包含 FOL/dL 清单、规则轨迹和诊断的业务化报告。
+
+        ``purpose`` 只能是 ``construction`` 或 ``checking``。两套后端共享同一份
+        证据布局，但在标题、完成状态和 Type 含义上分别使用准确术语，不再由
+        Checker 对 Constructor 文本做脆弱的事后字符串替换。
+        """
+
+        if purpose not in {"construction", "checking"}:
+            raise ValueError("purpose must be 'construction' or 'checking'")
+        is_checking = purpose == "checking"
 
         derivation_complete = self.constructed_type is not None
         type_trusted = self.verdict is Verdict.TRUE and derivation_complete
@@ -422,33 +448,56 @@ class RuleDerivationReport:
             trust_status = "不可信（存在未验证义务）"
         else:
             trust_status = "不可信（存在未通过义务）"
-        verdict_explanations = {
-            Verdict.TRUE: "全部结构检查、静态类型前提和证明义务均已通过",
-            Verdict.FALSE: "至少发现结构/静态类型错误或未满足的证明义务",
-            Verdict.UNKNOWN: (
-                "规则推导已完成，但至少一条必要证明义务仍未决；"
-                "构造类型是完整候选，但尚未验证、不可信"
-                if derivation_complete
-                else "规则推导未能形成唯一完整类型，且存在未决前提或诊断"
-            ),
-        }
+        if is_checking:
+            verdict_explanations = {
+                Verdict.TRUE: "给定 Type 与全部规则结论匹配，且所有证明义务均已通过",
+                Verdict.FALSE: "至少发现环境错误、Type 结构不匹配或未满足的证明义务",
+                Verdict.UNKNOWN: (
+                    "给定 Type 已被全部规则结构消费，但至少一条必要证明义务仍未决"
+                    if derivation_complete
+                    else "Type 检查未完成，且存在未决前提或诊断"
+                ),
+            }
+            report_title = "=== 给定 Type 检查与证明详细报告 ==="
+            progress_label = "规则检查"
+            result_label = "Type 匹配"
+            type_label = "给定 Type 源码"
+            rendered_type = displayed_type
+        else:
+            verdict_explanations = {
+                Verdict.TRUE: "全部结构检查、静态类型前提和证明义务均已通过",
+                Verdict.FALSE: "至少发现结构/静态类型错误或未满足的证明义务",
+                Verdict.UNKNOWN: (
+                    "规则推导已完成，但至少一条必要证明义务仍未决；"
+                    "构造类型是完整候选，但尚未验证、不可信"
+                    if derivation_complete
+                    else "规则推导未能形成唯一完整类型，且存在未决前提或诊断"
+                ),
+            }
+            report_title = "=== 类型构造与证明详细报告 ==="
+            progress_label = "规则推导"
+            result_label = "类型构造"
+            type_label = "构造 Type 源码"
+            rendered_type = self.constructed_type
         lines = [
-            "=== 类型构造与证明详细报告 ===",
+            report_title,
             f"总体结论 : {self.verdict.value}",
             f"结论说明 : {verdict_explanations[self.verdict]}",
-            "规则推导 : " + ("已完成" if derivation_complete else "未完成"),
-            "类型构造 : " + ("成功" if derivation_complete else "失败"),
+            f"{progress_label} : " + ("已完成" if derivation_complete else "未完成"),
+            f"{result_label} : " + ("成功" if derivation_complete else "失败"),
             f"类型可信性 : {trust_status}",
-            "构造 Type 源码 : "
+            f"{type_label} : "
             + (
-                format_type_source(self.constructed_type)
-                if derivation_complete
+                format_type_source(rendered_type)
+                if rendered_type is not None
                 else "(none)"
             ),
         ]
 
         if len(self.constructed_component_types) > 1:
-            if type_trusted:
+            if is_checking:
+                component_heading = "=== 配置分量给定类型 ==="
+            elif type_trusted:
                 component_heading = "=== 配置分量类型 ==="
             elif self.verdict is Verdict.UNKNOWN:
                 component_heading = "=== 配置分量候选类型（未验证） ==="
@@ -467,13 +516,16 @@ class RuleDerivationReport:
                 lines.append(f"K{index}: {rendered_component}")
 
         proved = sum(
-            item.verdict == Verdict.TRUE for item in self.obligations
+            item.active and item.verdict == Verdict.TRUE
+            for item in self.obligations
         )
         disproved = sum(
-            item.verdict == Verdict.FALSE for item in self.obligations
+            item.active and item.verdict == Verdict.FALSE
+            for item in self.obligations
         )
         unknown = sum(
-            item.verdict == Verdict.UNKNOWN for item in self.obligations
+            item.active and item.verdict == Verdict.UNKNOWN
+            for item in self.obligations
         )
 
         # 先按逻辑类别给出完整公式清单，使用户无需在混合的顺序证据中逐条
@@ -481,14 +533,22 @@ class RuleDerivationReport:
         # 引用这里唯一展开的证明器输入，避免完整日志重复打印同一正文。
         formula_references = self._append_formula_inventory(
             lines,
-            title="=== 本次类型构造的一阶逻辑（FOL）证明公式 ===",
+            title=(
+                "=== 本次类型检查的一阶逻辑（FOL）证明公式 ==="
+                if is_checking
+                else "=== 本次类型构造的一阶逻辑（FOL）证明公式 ==="
+            ),
             kinds=frozenset({"state", "fol"}),
             label="FOL",
             empty_message="(无一阶逻辑公式)",
         )
         formula_references.update(self._append_formula_inventory(
             lines,
-            title="=== 本次类型构造的微分动态逻辑（dL）证明公式 ===",
+            title=(
+                "=== 本次类型检查的微分动态逻辑（dL）证明公式 ==="
+                if is_checking
+                else "=== 本次类型构造的微分动态逻辑（dL）证明公式 ==="
+            ),
             kinds=frozenset({"dl"}),
             label="DL",
             empty_message="(无 dL 公式)",
@@ -522,8 +582,12 @@ class RuleDerivationReport:
                     "",
                     f"[O{index:02d}] {status_labels[obligation.verdict]} | "
                     f"{obligation.rule} | {obligation.kind.upper()}",
+                    "     候选归属 : "
+                    + (obligation.candidate or "确定性规则")
+                    + ("（参与最终结论）" if obligation.active else "（未选中）"),
                     f"     论文前提 : {self._paper_premise(obligation)}",
                     f"     证明目标 : {obligation.description}",
+                    "     判断位置 : " + (obligation.location or "-"),
                     f"     判定后端 : {self._proof_backend(obligation.kind)}",
                 )
             )
@@ -572,7 +636,7 @@ class RuleDerivationReport:
         unresolved = tuple(
             (index, obligation)
             for index, obligation in enumerate(self.obligations, start=1)
-            if obligation.verdict != Verdict.TRUE
+            if obligation.active and obligation.verdict != Verdict.TRUE
         )
         lines.extend(("", "=== 未解决或未通过的证明义务 ==="))
         if not unresolved:

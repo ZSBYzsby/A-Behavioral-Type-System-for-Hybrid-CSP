@@ -77,15 +77,27 @@ def main() -> int:
             output=OUTPUT_MODE,
             keymaerax_timeout_seconds=KEYMAERAX_TIMEOUT_SECONDS,
         )
-    except HCSPInputError:
-        # 接口已按 result/full 模式打印精确输入诊断。
+    except HCSPInputError as error:
+        # 接口已按 result/full 模式打印精确输入诊断；这里只标记失败阶段。
+        print(
+            "阶段 1 终止：输入无效 "
+            f"[{error.kind}]，位置 {error.source_name}:{error.line}:{error.column}。"
+        )
         return 1
-    except HCSPUntrustedTypeConstructionError:
+    except HCSPUntrustedTypeConstructionError as error:
         # 本演示要求得到可信类型；unknown 候选不能继续冒充正确输入。
-        print("阶段 1 未通过：只得到了尚未验证的不可信候选 Type。")
+        print(
+            "阶段 1 未通过：只得到尚未验证的不可信候选 Type "
+            f"[{error.kind.value}]，规则 {error.rule or '-'}，"
+            f"判断位置 {error.location or '-'}。"
+        )
         return 1
-    except HCSPTypeConstructionError:
-        print("阶段 1 未通过：TypeConstructor 没有得到可信 Type。")
+    except HCSPTypeConstructionError as error:
+        print(
+            "阶段 1 未通过：TypeConstructor 没有得到可信 Type "
+            f"[{error.kind.value}/{error.phase}]，规则 {error.rule or '-'}，"
+            f"判断位置 {error.location or '-'}。"
+        )
         return 1
 
     type_source = format_type_source(constructed_type)
@@ -103,10 +115,18 @@ def main() -> int:
             output=OUTPUT_MODE,
             keymaerax_timeout_seconds=KEYMAERAX_TIMEOUT_SECONDS,
         )
-    except HCSPInputError:
+    except HCSPInputError as error:
+        print(
+            "阶段 2 终止：带 Type 的输入无效 "
+            f"[{error.kind}]，位置 {error.source_name}:{error.line}:{error.column}。"
+        )
         return 1
-    except HCSPTypeCheckingError:
-        print("阶段 2 未通过：TypeChecker 拒绝了 Constructor 生成的 Type。")
+    except HCSPTypeCheckingError as error:
+        print(
+            "阶段 2 未通过：TypeChecker 拒绝了 Constructor 生成的 Type "
+            f"[{error.kind.value}/{error.phase}]，规则 {error.rule or '-'}，"
+            f"判断位置 {error.location or '-'}。"
+        )
         return 1
 
     if checked_type != constructed_type:

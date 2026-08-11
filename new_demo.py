@@ -20,6 +20,7 @@ from textwrap import dedent
 from hcsp_typechecker import (
     HCSPInputError,
     HCSPTypeCheckingError,
+    TypeCheckingErrorKind,
     check_hcsp_type,
 )
 
@@ -77,23 +78,34 @@ def _run_case(
     print("\n[TypeChecker] 检查用户 Type 是否符合 Process 和环境")
 
     try:
-        checked_type = check_hcsp_type(
+        check_hcsp_type(
             source,
             source_name=f"new_demo:{title}",
             output=OUTPUT_MODE,
         )
-    except HCSPInputError:
-        # result/full 已经打印带源码位置的输入诊断，不重复输出。
+    except HCSPInputError as error:
+        # 接口已打印完整诊断；脚本仅记录可由程序判断的输入错误类别与位置。
+        print(
+            "脚本结论：输入无效 "
+            f"[{error.kind}]，位置 {error.source_name}:{error.line}:{error.column}。"
+        )
         return False
-    except HCSPTypeCheckingError:
-        # 对错误示例，拒绝给定 Type 正是预期结果。
-        return not should_pass
+    except HCSPTypeCheckingError as error:
+        print(
+            "脚本结论：TypeChecker 拒绝给定 Type "
+            f"[{error.kind.value}/{error.phase}]，"
+            f"规则 {error.rule or '-'}，判断位置 {error.location or '-'}。"
+        )
+        if should_pass:
+            return False
+        # 本例专门演示 Type 结构不匹配；若因环境或证明失败而被拒绝，说明演示
+        # 没有命中预期故障，不能笼统地当成“测试通过”。
+        return error.kind is TypeCheckingErrorKind.TYPE_MISMATCH
 
     # 成功时接口返回已经解析并通过规则检查的正式 Type AST。
     if not should_pass:
         print("演示异常：这个故意写错的 Type 居然通过了检查。")
         return False
-    print(f"Python 返回对象：{type(checked_type).__name__}")
     return True
 
 

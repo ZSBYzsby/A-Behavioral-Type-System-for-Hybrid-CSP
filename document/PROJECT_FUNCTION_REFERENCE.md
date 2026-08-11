@@ -177,17 +177,24 @@ python demo.py
 以下关于具体 Process/Expr 节点和 Python 构造器的内容用于维护者审计内部表示，
 不是普通用户的调用方式，也不属于包根稳定接口。
 
-其中 `If`、`Sequence` 和 `Parallel` 是二元节点，`InternalChoice` 是带公共
-后继的多元节点，`E` 只能
+其中 `Sequence` 和 `Parallel` 是二元节点；`If`、`InternalChoice` 和 `ODE`
+是自持公共后继的顺序末端节点，`InternalChoice` 同时是多元节点；`E` 只能
 出现在 ODE 的中断字段中。`Sequence.of(...)`、`InternalChoice.of(...)`、
 `EventChoice.of(...)`、`Parallel.of(...)` 是生成上述规范递归 AST 的类方法。
 
-`(P_1 |~| ... |~| P_n); Q` 的唯一规范表示是
+`(if B then P else P');Q`、`(P_1 |~| ... |~| P_n);Q` 和 `ODE;Q` 的
+唯一规范表示分别由 `If.continuation`、`InternalChoice.continuation` 和
+`ODE.continuation` 保存。其中内部选择写成
 `InternalChoice(P_1, ..., P_n, continuation=Q)`。
 `InternalChoice(P_1, ..., P_n)` 是允许缺省公共后继的便捷写法，构造后的
 `continuation` 字段仍实际保存 `Skip()`。直接写
-`Sequence(InternalChoice(...), Q)` 会被拒绝；`Sequence.of(...)` 若遇到这种
-便捷输入，会立即把 Q 吸收进多元选择节点。
+`Sequence(If(...), Q)`、`Sequence(InternalChoice(...), Q)` 和
+`Sequence(ODE(...), Q)` 都会被拒绝；`Sequence.of(...)` 若遇到这些便捷输入，
+会立即把 Q 吸收进相应控制节点。
+
+缺省 `Skip()` 是无行为的结构占位。递归尾位置检查会忽略递归调用之后的全部
+`skip`，所以选择分支末尾的 `X` 不会因为缺省公共后继而被误判为非尾递归；如果
+忽略 `skip` 后仍有其他 Process，T-X 仍会拒绝该回边。
 
 Table 2 的 T-sqcup 在这个 AST 上分别推导 `P; Q` 和 `P'; Q`，再把结果
 组成内部选择类型。因此无需引入通用的类型级 `T-Seq`。
@@ -222,7 +229,8 @@ assert ode.local_clock.derivative == Literal(1)
 `ode_x: ContinuousType(("x",))`，不需要声明或初始化 `t`。核对 Gamma 中的 ODE
 向量时只读取用户写在 `ODE.eqs` 左侧的变量，自动添加的 `t` 不属于该向量。
 这个默认例子的 domain/safety 都是 `true`，所以纯通信中断、无自然后继的
-ODE 可直接生成 type `delay(5).(\bot)`。若 ODE 后还有顺序后继，则会按论文
+ODE 的公共后继保存在节点自己的 `continuation` 字段。若它不是占位 `Skip`，
+则会按论文
 生成精确 boundary 义务，未配置 KeYmaera X 时总体判定保守显示 `unknown`；规则
 推导仍会尽量形成完整候选，但该候选保持未验证状态。
 也可以把 domain/safety 改成例如 `t < 5 and x < 20` 与 `x >= t`；它们分别
@@ -253,7 +261,7 @@ Table 2 额外验证恰好到达该边界。ODE 若需要在 `d` 时自然结束
 
 项目对复合顺序前缀采用已确认的作用域约定：前缀某个分支中出现的
 `ch?(x1,...,xn)` 可绑定该复合前缀的公共顺序后继。因此
-`Sequence.of(If(B, InputChannel("ch", ("x",)), Skip()), P_using_x)` 按项目约定合法；
+`If(B, InputChannel("ch", ("x",)), Skip(), continuation=P_using_x)` 按项目约定合法；
 实现不要求 `x` 在前缀的每个分支上都被绑定。
 
 构造 `Parallel(S1, S2)` 时还会检查两个分量的变量全集
@@ -270,7 +278,7 @@ Table 2 额外验证恰好到达该边界。ODE 若需要在 `d` 时自然结束
 
 检查覆盖顺序、条件、内部选择和 ODE 事件 continuation，并遵守词法作用域：
 内层同名 `Mu("X", ...)` 会遮蔽外层绑定。ODE 的事件 continuation 由对应
-事件通信保护，但 ODE 自然结束后的外层顺序后继不会继承该保护。
+事件通信保护，但 ODE 的自然结束路径不会借用中断通信来保护公共后继。
 实现按这些 AST 产生式直接递归，便于逐项对照论文规则；项目不再额外保证
 超过 Python 递归上限的人工超深语法树仍可处理。
 
@@ -412,6 +420,8 @@ type_ast = construct_hcsp_type(source, output="full")
   `HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`。其中
   `HCSPUntrustedTypeConstructionError` 是
   `HCSPTypeConstructionError` 的子类。
+- 两套错误分类和统一明细：`TypeConstructionErrorKind`、
+  `TypeCheckingErrorKind`、`HCSPErrorDetail`。
 
 Constructor 接口的签名为：
 
@@ -465,8 +475,10 @@ check_hcsp_type(
 它并继续构造；若最终形成完整候选类型，接口抛出
 `HCSPUntrustedTypeConstructionError`，其 `untrusted_type` 属性保存该候选。候选适合
 审计或交给其他工具补证，但在未决义务消除前不可信。若仍未形成完整类型，则抛出
-普通 `HCSPTypeConstructionError`。类型构造异常公开 `verdict`、`reason`、
-`partial_types`，并提供 `format_result()` 与 `format_full()`。词法、语法或 source
+普通 `HCSPTypeConstructionError`。类型构造异常公开 `verdict`、`kind`、`phase`、
+`reason`、`rule`、`location`、`details`、`partial_types`，并提供
+`format_result()` 与 `format_full()`。Checker 异常使用自己的错误分类，另外提供
+`type_mismatch_detected` 与三值 `type_structure_matched`。词法、语法或 source
 结构错误会在类型构造
 开始前终止并抛出 `HCSPInputError`：
 
@@ -544,7 +556,9 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
 交付可信 Type AST；确定失败通过 `HCSPTypeConstructionError` 报告，构造完整但
 证明未决则通过 `HCSPUntrustedTypeConstructionError` 报告并保留
 `untrusted_type`。论文中的 `BottomType`（`\bot`）是正式的不可达错误行为；它不被
-复用为“构造器内部失败”或“尚未构造”的恢复占位符。
+复用为“构造器内部失败”或“尚未构造”的恢复占位符。Constructor 在有限
+`T-\unrhd` 结论中用它标记不可达 deadline 后继；`T-\unrhd'` 的真实空后继则是
+`EmptyType`。
 
 ## 项目架构与自有 AST
 
@@ -587,8 +601,9 @@ Table 3 操作语义层：
   Configuration，以及基础类型、连续向量和通道 refinement 的运行上下文定义；
 - `hcsp_typechecker.backend.common`：Constructor 与 Checker 共享的内部基础层；
   `rule_engine.py` 保存四类 conclusion judgment、两类 premise 和 Table 2 规则展开，
-  `model.py` 保存证明义务、诊断、推导步骤与共享规则证据，`logic.py`、`dl.py`
-  与 `keymaerax.py` 负责逻辑公式和证明后端；
+  并统一执行 Gamma、Theta、参数环境的规范化与良构检查；`environment.py` 保存
+  两个业务后端共同消费的规范环境结果，`model.py` 保存证明义务、诊断、推导
+  步骤与共享规则证据，`logic.py`、`dl.py` 与 `keymaerax.py` 负责逻辑公式和证明后端；
 - `hcsp_typechecker.backend.type_constructor`：TypeConstructor 的独立业务后端，
   其 `model.py` 定义构造请求和报告名称，`constructor.py` 从规则子结论组合出
   Type AST；
@@ -606,8 +621,9 @@ Table 3 操作语义层：
 包根 `hcsp_typechecker` 的 `__all__` 是明确的公开白名单：
 
 ```text
-HCSPInputError, HCSPTypeConstructionError, HCSPTypeCheckingError,
-HCSPUntrustedTypeConstructionError, OutputMode, TypeAST,
+HCSPErrorDetail, HCSPInputError, HCSPTypeConstructionError,
+HCSPTypeCheckingError, HCSPUntrustedTypeConstructionError, OutputMode,
+TypeAST, TypeCheckingErrorKind, TypeConstructionErrorKind,
 TypeTransitionGraph, construct_hcsp_type, check_hcsp_type,
 build_type_transition_graph
 ```
@@ -624,7 +640,9 @@ build_type_transition_graph
 
 行为类型 AST 将有限连续行为统一保存为
 ``FiniteDelayType(d, A, T)``；它仅在打印时按 ``A``、``T`` 是否为空采用
-``delay(d).T``、``delay(d) \unrhd A`` 或完整形式的论文缩写。
+``delay(d).T``、``delay(d) \unrhd A`` 或完整形式的论文缩写。其中省略自然后继的
+``delay(d) \unrhd A`` 内部保存 `BottomType`，而可达的正常空后继保存
+`EmptyType`，二者不是同一类型。
 ``d=infinity`` 时超时永远不会发生，因此 process→type 转换使用显式
 ``InfiniteDelayType(A)``；其 timeout fallback 固定为不可达的 ``bottom``，而顺序后继
 只会保留在实际发生的通信中断分支 continuation 中。``EmptyType`` 是过程空通信行为
@@ -679,7 +697,7 @@ TypeConstructor 使用 `isinstance` 分派。不是 `HCSP` 子类的对象会产
 求值得到的 tuple 值。每个载荷表达式都独立产生一个标量值，refinement 可以同时引用
 全部槽位的 binder。
 表达式级 `a if B else b` 不受支持；条件控制流统一使用进程节点
-`If(B, P, P')`。
+`If(B, P, P', continuation=Q)`；省略 `Q` 时规范为 `Skip()`。
 
 表达式翻译结果同时保存 Z3 项、`BasicType` 和求值有定义条件。`/` 始终按实数
 除法处理，整数操作数会先显式提升；除数非零、`sqrt` 参数非负等条件由相应
@@ -726,6 +744,14 @@ type_ast = construct_hcsp_type(
 - 有限 ODE 具有自然顺序后继时的准确边界：在无域动力学
   `{ODE,t'=1}` 上证明 `(t<d → B) ∧ (t=d → ¬B)`。纯通信中断形式没有
   自然超时迁移，因此不生成这条义务。
+
+用户输入中的每个 ODE 都必须显式写出顺序后继；没有实际后继时写
+`ODE; skip`。前端把它规范为 `ODE(..., continuation=Skip())`，不会保留外置
+`Sequence(ODE, Skip)`。这个重叠形状会隔离试用纯通信规则与自然后继规则，再根据
+domain/boundary 的即时证明结果选择；未选候选只作为审计证据保存。后继为
+非 skip 程序时唯一使用自然后继规则。两种解释可以在统一 Type AST 中都以
+不同后继结束：纯通信规则使用不可达 `BottomType`，自然后继规则若后继是 skip
+则使用可达的 `EmptyType`。证明前提和子 judgment 也不同。
 
 后继 judgment 也严格按新版 Table 2 区分：纯通信规则的事件分支在
 `B ∧ safety` 下检查；带自然超时规则的通信分支只使用 `safety`；其自然后继

@@ -132,8 +132,11 @@ delay(1) interrupt angelic {} then empty
 二者都得到 `FiniteDelayType(1, NoInterruptType(), EmptyType())`；格式化时一律输出
 第一种省略中断的形式。
 
-`bottom` 被保留以无损表达正式 `BottomType` 节点。`FiniteDelayType` 不允许把它作为
-自然到时后继；无穷时延的不可达 bottom 后继由 `InfiniteDelayType` 固定隐含。
+`bottom` 无损表达正式 `BottomType` 节点。有限
+`delay(d) interrupt A then bottom` 对应 `T-\unrhd`：deadline 后继不可达；
+`delay(d) interrupt A then empty` 则对应具有真实空后继的 `T-\unrhd'`。无穷时延
+的不可达 bottom 后继仍由 `InfiniteDelayType` 固定隐含。格式化与重新解析会保持
+finite bottom/empty 的区别。
 
 ## 4. 语法范畴边界
 

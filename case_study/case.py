@@ -14,8 +14,9 @@ r"""通过新版公共接口复现论文 Section 5 原始 case study 的 ``unkno
     python -B case_study/case.py
     python -B case_study/case.py --d 3/2
 
-脚本只使用项目承诺兼容的单一公共接口。接口负责一次性打印 source、规则轨迹、
-FOL/dL 义务、完整候选类型及其可信性，脚本自身只补充案例结论。
+脚本只使用项目承诺兼容的单一公共接口。默认 ``result`` 模式打印结构化摘要；
+把 ``OUTPUT_MODE`` 改成 ``"full"`` 后，接口会进一步打印 source、规则轨迹、
+FOL/dL 义务、完整候选类型及其可信性。脚本自身只补充案例结论。
 对本问题复现脚本而言，预期结果是：证明义务得到 ``unknown`` 后继续完成规则
 构造，并通过 ``HCSPUntrustedTypeConstructionError.untrusted_type`` 给出完整但
 不可信的候选 Type AST。解析错误、确定的 ``false``、未能完成类型结构，或者意外
@@ -43,6 +44,7 @@ from hcsp_typechecker import (  # noqa: E402 - 搜索路径必须先指向源码
     HCSPInputError,
     HCSPTypeConstructionError,
     HCSPUntrustedTypeConstructionError,
+    TypeConstructionErrorKind,
     construct_hcsp_type,
 )
 
@@ -54,6 +56,9 @@ _KEYMAERAX_HOME = _CASE_STUDY_DIRECTORY / "tmp" / "paper-case-unknown-home"
 _KEYMAERAX_ARTIFACTS = (
     _CASE_STUDY_DIRECTORY / "tmp" / "paper-case-unknown-artifacts"
 )
+
+# 设为 "full" 可查看每条公式、证明器说明和完整规则轨迹。
+OUTPUT_MODE = "result"
 
 
 def _number_text(value: Fraction) -> str:
@@ -208,10 +213,12 @@ process {{
                                     skip
                                 }}
                             )
-                        )
-                    }}
+                            );
+                            skip
+                        }}
                 )
-            )
+            );
+            skip
         }}
     }},
     {{
@@ -285,28 +292,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         construct_hcsp_type(
             source,
             source_name=f"case_study/case.py (--d={period})",
-            output="full",
+            output=OUTPUT_MODE,
             keymaerax_timeout_seconds=180.0,
         )
-    except HCSPInputError:
-        # full 模式已经输出带源码位置的解析诊断。
+    except HCSPInputError as error:
+        # 接口已经打印源码诊断；这里只给出案例脚本的最终分类。
+        print(
+            "案例终止：输入无效 "
+            f"[{error.kind}]，位置 {error.source_name}:{error.line}:{error.column}。"
+        )
         return 1
     except HCSPUntrustedTypeConstructionError as error:
+        if error.kind is not TypeConstructionErrorKind.PROOF_UNKNOWN:
+            print("案例终止：收到不符合异常契约的不可信类型错误。")
+            return 1
+        unresolved = sum(
+            detail.category == "proof-unknown" for detail in error.details
+        )
         print()
         print("=== 原始 case study 结论 ===")
         print(
             "已复现预期结果：unknown 义务没有中断类型构造；"
             "接口形成了完整但尚未验证的候选 Type AST。"
         )
+        print(
+            f"结构化类别：{error.kind.value}；未决证明明细：{unresolved} 条；"
+            f"首要规则：{error.rule or '-'}；位置：{error.location or '-'}。"
+        )
         print("不可信候选 Type 已按上方的规范 Type 源码显示。")
-        print("具体 dL 公式、未决原因和后续推导轨迹见上方完整日志。")
+        print("把 OUTPUT_MODE 改为 'full' 可查看每条 dL 公式和完整推导轨迹。")
         return 0
     except HCSPTypeConstructionError as error:
         print()
         print("=== 原始 case study 结论 ===")
         print(
-            f"未复现预期结果：构造过程得到 {error.verdict!r}，"
+            f"未复现预期结果：构造失败类别为 {error.kind.value!r}，"
             "但没有形成原案例预期的完整不可信候选类型。"
+        )
+        print(
+            f"失败阶段：{error.phase}；规则：{error.rule or '-'}；"
+            f"位置：{error.location or '-'}。"
         )
         return 1
 

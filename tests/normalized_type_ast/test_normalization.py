@@ -22,6 +22,7 @@ import unittest
 import hcsp_typechecker.data_structures.normalized_type_ast as normalized_api
 from hcsp_typechecker.data_structures.normalized_type_ast import (
     NormalizedBoundTypeVar,
+    NormalizedBottomType,
     NormalizedConfigurationType,
     NormalizedEmptyType,
     NormalizedExternalChoiceType,
@@ -35,6 +36,7 @@ from hcsp_typechecker.data_structures.normalized_type_ast import (
     normalize_type_ast,
 )
 from hcsp_typechecker.data_structures.type_ast import (
+    BottomType,
     EmptyType,
     ExternalChoiceType,
     FiniteDelayType,
@@ -153,6 +155,26 @@ class NormalizedTypeConversionTests(unittest.TestCase):
         self.assertIsInstance(delay, NormalizedFiniteDelayType)
         self.assertEqual(delay.duration, Fraction(0))
         self.assertFalse(hasattr(normalized_api, "denormalize_type_ast"))
+
+    # 测试输入：具有相同时长和中断集合、但后继分别为 bottom/empty 的有限 delay。
+    # 预期行为：两者均能规范化，且继续保持为两个不相等的规范状态。
+    # 检查内容：状态图输入层不会重新混淆不可达 deadline 与可达空行为。
+    # 论文对应：T-unrhd 与 T-unrhd-prime 的后继语义必须穿过规范化边界。
+    def test_finite_bottom_and_empty_remain_distinct(self) -> None:
+        """规范化必须保留有限 delay 后继的 bottom/empty 区别。"""
+
+        bottom = normalize_type_ast(
+            FiniteDelayType(1, NoInterruptType(), BottomType())
+        ).components[0]
+        empty = normalize_type_ast(
+            FiniteDelayType(1, NoInterruptType(), EmptyType())
+        ).components[0]
+
+        self.assertIsInstance(bottom, NormalizedFiniteDelayType)
+        self.assertIsInstance(bottom.continuation, NormalizedBottomType)
+        self.assertIsInstance(empty, NormalizedFiniteDelayType)
+        self.assertIsInstance(empty.continuation, NormalizedEmptyType)
+        self.assertNotEqual(bottom, empty)
 
 
 if __name__ == "__main__":

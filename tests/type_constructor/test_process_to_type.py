@@ -40,6 +40,7 @@ from hcsp_typechecker._internal import (
     Assert,
     Assign,
     BasicType,
+    BottomType,
     ChannelType,
     TypeConstructionReport,
     Configuration,
@@ -90,6 +91,17 @@ def _select_natural_timeout(obligation: object) -> Verdict:
     return (
         Verdict.FALSE
         if getattr(formula, "role", "") == "domain"
+        else Verdict.TRUE
+    )
+
+
+def _select_communication_only(obligation: object) -> Verdict:
+    """用角色感知的 mock 否证 boundary，唯一选中 T-unrhd。"""
+
+    formula = getattr(obligation, "formula", None)
+    return (
+        Verdict.FALSE
+        if getattr(formula, "role", "") == "boundary"
         else Verdict.TRUE
     )
 
@@ -248,7 +260,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ConversionScenario(
             "P07_ODE_EVENT_REACTION",
             "无限时延 ODE 显式保留不可达 bottom 后继的 delay 结构",
-            event_ode,
+            Sequence.of(event_ode, Skip()),
             Verdict.TRUE,
             InfiniteDelayType(ExternalChoiceType(
                 (
@@ -408,14 +420,14 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C04_FINITE_COMMUNICATION_TIMEOUT",
-            "有限 d、非空 A、空通信边界后继仍使用统一有限时延节点",
-            timeout_ode,
+            "有限 d、非空 A、显式 skip 经候选选择形成有限时延节点",
+            Sequence.of(timeout_ode, Skip()),
             Verdict.TRUE,
-            FiniteDelayType(2, OutputType("tick", EmptyType()), EmptyType()),
+            FiniteDelayType(2, OutputType("tick", EmptyType()), BottomType()),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"tick": integer},
-            dl_checker=_true_dl,
-            obligation_rules=("T-ODE-boundary",),
+            dl_checker=_select_communication_only,
+            obligation_rules=("T-ODE-domain",),
         ),
         ConversionScenario(
             "C05_TIMED_EXTERNAL_CHOICE_WITH_FALLBACK",
@@ -590,10 +602,13 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ConversionScenario(
             "N11_ODE_DERIVATIVE_NOT_NUMERIC",
             "ODE 导数不是数值表达式时不生成时延类型",
-            ODE(
-                [("x", True)],
-                True,
-                annotation=ODEAnnotation(delay=inf),
+            Sequence.of(
+                ODE(
+                    [("x", True)],
+                    True,
+                    annotation=ODEAnnotation(delay=inf),
+                ),
+                Skip(),
             ),
             Verdict.FALSE,
             None,
@@ -741,14 +756,14 @@ class ProcessToTypeCoverageTests(unittest.TestCase):
 
 
 class ConstructionFailureSeparationTests(unittest.TestCase):
-    """验证内部推导失败与有限 ODE 正常终止候选的边界。"""
+    """验证内部推导失败与有限 ODE 不可达 deadline 后继的边界。"""
 
     # 测试输入：合法 skip 与非法输入的并行报告，以及有限、无中断、无后继的 ODE。
-    # 预期行为：前者按位置报告 (EmptyType(), None)，后者隐式接续 Skip 并正常终止。
-    # 检查内容：失败不伪造类型，有限 ODE 的构造结果也不含 BottomType。
-    # 论文对应：本项目将有限 ODE 的省略末尾解释为正常过程终止。
-    def test_failure_is_none_and_terminal_ode_uses_normal_end(self) -> None:
-        """同时确认构造失败与有限 ODE 的正常终止均不使用 bottom 占位。"""
+    # 预期行为：前者按位置报告 (EmptyType(), None)，后者由 domain 规则形成 bottom。
+    # 检查内容：失败使用 None；正式不可达 deadline 使用 BottomType，两者不混淆。
+    # 论文对应：T-unrhd 不建立自然后继 judgment，其 deadline 位置写作 bottom。
+    def test_failure_is_none_and_terminal_ode_uses_bottom(self) -> None:
+        """同时确认构造失败和正式 BottomType 拥有不同表示。"""
 
         report = construct_type(
             gamma={},
@@ -768,19 +783,22 @@ class ConstructionFailureSeparationTests(unittest.TestCase):
             configurations=[
                 Configuration(
                     {"x": 0},
-                    ODE(
-                        [("x", 0)],
-                        True,
-                        annotation=ODEAnnotation(delay=1),
+                    Sequence.of(
+                        ODE(
+                            [("x", 0)],
+                            True,
+                            annotation=ODEAnnotation(delay=1),
+                        ),
+                        Skip(),
                     ),
                 )
             ],
-            dl_checker=_true_dl,
+            dl_checker=_select_communication_only,
         )
         self.assertEqual(terminal_ode_report.verdict, Verdict.TRUE)
         self.assertEqual(
             terminal_ode_report.constructed_type,
-            FiniteDelayType(1, NoInterruptType(), EmptyType()),
+            FiniteDelayType(1, NoInterruptType(), BottomType()),
         )
 
 
@@ -812,41 +830,27 @@ class ConstructionLayerAnnotationTests(unittest.TestCase):
 class TypingEnvironmentBoundaryTests(unittest.TestCase):
     """验证 Gamma/Theta 环境入口遵守基础类型和通道命名边界。"""
 
-    # 测试输入：全局 Gamma 和 Configuration 局部 Gamma 分别使用 tuple/list 类型说明。
-    # 预期行为：两种入口都返回 false、无候选类型，并报告 Gamma 项类型要求。
-    # 检查内容：确认局部环境失败也产生推导失败，而不是退化为空 Gamma 后继续。
+    # 测试输入：统一 Gamma 使用 tuple 类型说明。
+    # 预期行为：返回 false、无候选类型，并报告 Gamma 项类型要求。
+    # 检查内容：确认环境失败产生推导失败，而不是退化为空 Gamma 后继续。
     # 论文对应：Definition 4.1 的 Gamma 把每个状态变量映射到一个基础类型 B。
-    def test_global_and_local_gamma_reject_container_type_specs(self) -> None:
-        """全局和分量局部 Gamma 都不能使用 tuple/list 类型说明。"""
+    def test_gamma_rejects_container_type_specs(self) -> None:
+        """统一 Gamma 不能使用 tuple/list 类型说明。"""
 
         global_report = construct_type(
             gamma={"state": (BasicType.INT, BasicType.REAL)},  # type: ignore[dict-item]
             theta={},
             configurations=[Configuration({}, Skip())],
         )
-        local_report = construct_type(
-            gamma={},
-            theta={},
-            configurations=[
-                Configuration(
-                    {},
-                    Skip(),
-                    gamma={"state": [BasicType.INT, BasicType.REAL]},  # type: ignore[dict-item]
-                )
-            ],
+        self.assertEqual(global_report.verdict, Verdict.FALSE)
+        self.assertIsNone(global_report.constructed_type)
+        self.assertTrue(
+            any(
+                "Gamma entry must be a BasicType or ContinuousType"
+                in item.message
+                for item in global_report.diagnostics
+            )
         )
-
-        for report in (global_report, local_report):
-            with self.subTest(report=report):
-                self.assertEqual(report.verdict, Verdict.FALSE)
-                self.assertIsNone(report.constructed_type)
-                self.assertTrue(
-                    any(
-                        "Gamma entry must be a BasicType or ContinuousType"
-                        in item.message
-                        for item in report.diagnostics
-                    )
-                )
 
     # 测试输入：Theta 使用带首尾空格的字符串键，配置本身只含 Skip。
     # 预期行为：内部构造入口返回 false，并报告 Invalid typing environment。
@@ -871,40 +875,26 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
             )
         )
 
-    # 测试输入：全局/局部 Gamma 分别使用 Unicode 与非字符串声明键。
-    # 预期行为：两者在任何规则执行前作为非法环境返回 false。
+    # 测试输入：Gamma 使用 Unicode 声明键。
+    # 预期行为：在任何规则执行前作为非法环境返回 false。
     # 检查内容：确认环境入口不再把键经 str() 静默改名或接受 Python Unicode 名称。
     # 论文对应：Definition 4.1 的 Gamma 定义域与 Process 状态变量使用同一 IDENT。
     def test_gamma_names_use_the_same_ascii_ident_rule(self) -> None:
-        """全局和局部 Gamma 的键必须是原生 ASCII IDENT 字符串。"""
+        """Gamma 的键必须是原生 ASCII IDENT 字符串。"""
 
         global_report = construct_type(
             gamma={"变量": BasicType.INT},
             theta={},
             configurations=[Configuration({}, Skip())],
         )
-        local_report = construct_type(
-            gamma={},
-            theta={},
-            configurations=[
-                Configuration(
-                    {},
-                    Skip(),
-                    gamma={1: BasicType.INT},  # type: ignore[dict-item]
-                )
-            ],
+        self.assertEqual(global_report.verdict, Verdict.FALSE)
+        self.assertIsNone(global_report.constructed_type)
+        self.assertTrue(
+            any(
+                "Gamma names" in diagnostic.message
+                for diagnostic in global_report.diagnostics
+            )
         )
-
-        for report in (global_report, local_report):
-            with self.subTest(report=report):
-                self.assertEqual(report.verdict, Verdict.FALSE)
-                self.assertIsNone(report.constructed_type)
-                self.assertTrue(
-                    any(
-                        "Gamma names" in diagnostic.message
-                        for diagnostic in report.diagnostics
-                    )
-                )
 
 
 if __name__ == "__main__":

@@ -17,8 +17,9 @@ r"""通过新版 TypeConstructor 接口构造改良后的 Section 5 Vehicle/Cont
 
 本例使用加强后的 ``phi_a``：除了周期终点的 ``phi_p``、``phi_v``，还检查区间
 内部可能出现的速度转向点。Vehicle 收到新加速度后检查该性质，不安全时回退到
-共享参数 ``amin``。完整接口日志会显示实际 source、环境摘要、FOL/dL 公式、
-证明结果、规则轨迹和最终 Type AST 的可信性；内部 Process AST 不会暴露。
+共享参数 ``amin``。默认 ``result`` 模式只显示最终摘要；把 ``OUTPUT_MODE`` 改为
+``"full"`` 后，接口会显示实际 source、环境摘要、FOL/dL 公式、证明结果、规则
+轨迹和最终 Type AST 的可信性；内部 Process AST 不会暴露。
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from hcsp_typechecker import (
     HCSPInputError,
     HCSPTypeConstructionError,
+    HCSPUntrustedTypeConstructionError,
     construct_hcsp_type,
 )
 
@@ -53,6 +55,9 @@ ARTIFACTS_DIRECTORY = (
 KEYMAERAX_HOME_DIRECTORY = (
     CASE_DIRECTORY / "tmp" / "general-case-keymaerax-home"
 )
+
+# 设为 "full" 可查看每条公式、证明器说明和完整规则轨迹。
+OUTPUT_MODE = "result"
 
 
 def _number_text(value: Fraction) -> str:
@@ -199,10 +204,12 @@ process {{
                                     skip
                                 }}
                             )
-                        )
-                    }}
+                            );
+                            skip
+                        }}
                 )
-            )
+            );
+            skip
         }}
     }},
     {{
@@ -278,16 +285,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             source_name=(
                 f"case_study/new_case.py --d {_number_text(period)}"
             ),
-            output="full",
+            output=OUTPUT_MODE,
             keymaerax_timeout_seconds=180.0,
         )
-    except HCSPInputError:
-        # full 模式已经输出带源码位置的解析诊断。
+    except HCSPInputError as error:
+        print(
+            "案例终止：输入无效 "
+            f"[{error.kind}]，位置 {error.source_name}:{error.line}:{error.column}。"
+        )
         return 1
-    except HCSPTypeConstructionError:
-        # 包括确定失败，以及构造完整但证明仍未决的不可信候选。full 模式已经
-        # 打印类型可信性和完整审计证据；这里只返回非零状态，避免重复输出。
+    except HCSPUntrustedTypeConstructionError as error:
+        print(
+            "案例未通过：Type 已完整构造，但仍有未决证明义务 "
+            f"[{error.kind.value}]，规则 {error.rule or '-'}，"
+            f"位置 {error.location or '-'}。"
+        )
         return 1
+    except HCSPTypeConstructionError as error:
+        print(
+            "案例未通过：TypeConstructor 失败 "
+            f"[{error.kind.value}/{error.phase}]，规则 {error.rule or '-'}，"
+            f"位置 {error.location or '-'}。"
+        )
+        return 1
+    print("案例通过：Type 构造完成，全部证明义务均已验证。")
     return 0
 
 

@@ -24,6 +24,7 @@ import unittest
 
 import hcsp_typechecker
 from hcsp_typechecker.backend.common.rule_engine import Table2RuleEngine
+from hcsp_typechecker.backend.common.environment import PreparedTypingEnvironment
 from hcsp_typechecker.backend.type_checker import TypeChecker
 from hcsp_typechecker.backend.type_constructor import TypeConstructor
 
@@ -42,6 +43,21 @@ class BackendBoundaryTests(unittest.TestCase):
         self.assertTrue(issubclass(TypeChecker, Table2RuleEngine))
         self.assertFalse(issubclass(TypeChecker, TypeConstructor))
         self.assertFalse(issubclass(TypeConstructor, TypeChecker))
+
+    # 测试输入：共享规则引擎、两个业务类及公共环境准备结果的定义位置。
+    # 预期行为：环境准备算法只由 common 引擎定义，Constructor/Checker 不再各存副本。
+    # 检查内容：方法归属和结果类模块路径，防止后续修改重新制造两套环境规则。
+    # 论文对应：Gamma、Theta 与参数是两种 Table 2 业务共同的判断前提。
+    def test_typing_environment_preparation_has_one_common_implementation(self) -> None:
+        """环境规范化与良构检查只能存在于共享后端。"""
+
+        self.assertIn("_prepare_typing_environment", Table2RuleEngine.__dict__)
+        self.assertNotIn("_prepare_typing_environment", TypeConstructor.__dict__)
+        self.assertNotIn("_prepare_typing_environment", TypeChecker.__dict__)
+        self.assertEqual(
+            PreparedTypingEnvironment.__module__,
+            "hcsp_typechecker.backend.common.environment",
+        )
 
     # 测试输入：backend/common 下所有 Python 源文件的导入文本。
     # 预期行为：common 不得反向导入 type_constructor 或 type_checker。

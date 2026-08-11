@@ -13,6 +13,7 @@
 
 - `hcsp_typechecker/data_structures/process_ast/ast.py`：Process、Event、System AST；
 - `hcsp_typechecker/backend/type_constructor/constructor.py`：TypeConstructor 业务入口；
+- `hcsp_typechecker/backend/common/environment.py`：Constructor/Checker 共用的规范环境结果；
 - `hcsp_typechecker/backend/common/rule_engine.py`：judgment、premise 与 Table 2 规则展开；
 - `hcsp_typechecker/backend/common/logic.py`：表达式到 Z3 项的翻译及 FOL/state 判定；
 - `hcsp_typechecker/backend/common/dl.py`：ODE 证明义务到 dL 公式的翻译；
@@ -54,7 +55,8 @@
 
 `None` 只表示没有形成完整类型结构。非空类型是否可信必须同时查看 verdict：
 `true` 表示可信，`unknown` 表示仍有必要义务未验证。两种情况都与用户 Type AST
-中表示不可达错误行为的 `BottomType()` 完全不同；当前构造器不会输出它。
+中表示不可达行为的 `BottomType()` 完全不同。Constructor 会在 `T-\unrhd` 的
+正式结论中输出 BottomType，但绝不把它当成推导失败或错误恢复值。
 
 ---
 
@@ -294,8 +296,9 @@ TypeConstructor 每次处理列表头，并把剩余列表作为 continuation �
 没有通用的 `SequenceType`，也没有“先得到 P 的类型，再把 Q 的类型接到所有
 终点”的后处理算法。后继是在推导 P 时就沿控制流传下去的。
 
-`InternalChoice` 是例外：它自己保存公共 `continuation`，构造时把该后继分别
-交给左右两个子 judgment。
+`If`、`InternalChoice` 和 `ODE` 是 Table 2 规范形：源码公共后继直接保存在
+节点自己的 `continuation` 字段中，它们不会作为外置 `Sequence` 的前项。
+`nodes[1:]` 只在规则递归时保存上层临时附加的推导尾部。
 
 ---
 
@@ -311,29 +314,17 @@ TypeConstructor 每次处理列表头，并把剩余列表作为 continuation �
 
 即使只有一个 configuration，代码也统一经过 `rule_t_parallel`。
 
-单 configuration 未提供局部 Gamma 时，直接使用完整全局 Gamma。
+Gamma 是整个判断统一使用的类型声明环境。每个 configuration 子判断都直接读取
+同一份完整 Gamma，不再构造或接收局部 Gamma。Gamma 可以是各分量实际使用声明
+的超集；没有被当前分量引用的项只是可见但未使用，不影响推导。
 
-多个 configuration 未提供局部 Gamma 时，代码按下式自动投影：
+共享 Gamma 不表示共享可变状态。Process AST 的 Assumption 2.1 已检查并行进程
+变量集合不交；低层多个 Configuration 入口还会把 `process.get_vars()` 与
+`dom(state)` 合并为各分量的状态所有权集合，并拒绝集合重叠。输入绑定目标可以
+不预先出现在 Gamma；除此之外，实际使用却未声明的变量仍会报错。
 
-\[
-\Gamma_i=\Gamma\restriction
-((vars(P_i)\cup dom(\sigma_i))\setminus dom(\Delta)).
-\]
-
-输入动作绑定的目标允许不预先出现在 Gamma；除此之外，进程使用但 Gamma 未
-声明的变量会报错。
-
-若显式提供局部 Gamma，则代码要求：
-
-1. 局部名称必须来自全局 Gamma；
-2. 同名项必须与全局项完全相等，包括值变量项与 ODE 向量声明项的区别；
-3. 任意两个分量的 Gamma 定义域不相交；
-4. 全部局部 Gamma 的定义域并集精确覆盖全局 Gamma。
-
-自动并行分区先按各配置实际使用的值变量分配 `BasicType` 项；只有某个配置的
-process 真正包含已登记 ODE 时，匹配的独立 `ContinuousType` 声明项才归该配置。
-普通 Real 的读写不会凭空拖入一个未出现的 ODE 向量声明。
-参数环境不做局部投影：每个分量都读取同一个完整 \(\Delta,H\)。
+每个分量同样读取完整共享参数环境 \(\Delta,H\)，参数始终只读，不属于可变
+状态所有权集合。
 
 局部路径条件要么所有 configuration 都提供，要么都不提供。若使用局部路径，
 外层路径必须是默认 `true`。
@@ -380,7 +371,8 @@ state 通过后，才进入 system/process 子 judgment。
 时使用。代码递归推导左右系统并构造 `ParallelType`。
 
 有状态并行或带非平凡参数约束的并行不能通过这一入口处理，必须拆成
-多个显式 `Configuration`，使 T-|| 对局部 Gamma 和共享参数分别建模。
+多个显式 `Configuration`，使 T-|| 分别建立状态和路径前提；这些叶子仍共享
+同一份 Gamma、Theta 和参数环境。
 
 ---
 
@@ -480,7 +472,7 @@ existing_i <: B_i\quad\lor\quad B_i <: existing_i.
 \]
 
    这是一项双向“可比较性”检查，不是单向赋值检查；
-3. 新目标加入局部 Gamma，类型取对应的 \(B_i\)；
+3. 新目标加入当前分支的后继 Gamma，类型取对应的 \(B_i\)；
 4. 已存在目标保留原 `BasicType` 项；独立 ODE 向量声明不受通信更新影响；
 5. 为每个槽建立新鲜接收符号 \(r_i\)，并更新
 
@@ -536,7 +528,7 @@ InfiniteDelayType(InputType(channel, continuation_type))
 InfiniteDelayType(OutputType(channel, continuation_type))
 ```
 
-### 7.7 `If(B,P1,P2); Q`
+### 7.7 `If(B,P1,P2, continuation=Q)`
 
 代码先要求 `B` 为 Bool。若 `B` 是偏表达式，还单独证明：
 
@@ -552,7 +544,7 @@ C_{then}.path=\Phi\land B,
 C_{else}.path=\Phi\land\neg B.
 \]
 
-外层顺序后继 `Q` 被附加到两个分支：
+节点自持的公共后继 `Q` 被附加到两个分支：
 
 \[
 T_1=type(P_1;Q,C_{then}),
@@ -585,7 +577,11 @@ T_2=type(P_2;Q;tail,C_2).
 分支。两边成功后生成 `InternalChoiceType((T1,T2))`。
 
 若构造时省略 `Q`，AST 中实际保存 `Skip()`。外层再写
-`Sequence(InternalChoice(...),Q)` 的非规范形状会在 Process AST 阶段被拒绝。
+`Sequence(InternalChoice(...),Q)` 的非规范形状会在 Process AST 阶段被拒绝；
+`If` 和 `ODE` 采用相同约束。
+这个缺省 `Skip()` 只用于保持 AST 字段完整，不产生通信或状态动作；如果某个
+分支以递归调用 `X` 结束，规则引擎会在尾位置判断中忽略该 `skip`，因此不会把
+内部的 `X;skip` 错误判成非尾递归。
 
 ---
 
@@ -728,7 +724,8 @@ KeYmaera X；这一步的捷径判断没有包含 \(D_B\)。只有未走捷径�
 
 ### 9.4 纯通信规则的 domain 义务
 
-当代码选择“只有通信中断、没有自然 timeout 后继”的 ODE 规则时，生成：
+当 ``ODE(..., continuation=Skip())`` 的候选选择最终采用“只有通信中断、没有实际 timeout 后继”
+的 ODE 规则时，生成：
 
 \[
 Pre\Rightarrow[F^*](D_F\land D_B\land B^*).
@@ -739,7 +736,7 @@ Pre\Rightarrow[F^*](D_F\land D_B\land B^*).
 
 ### 9.5 自然 timeout 规则的 boundary 义务
 
-有限 delay 且存在自然顺序后继时，代码生成：
+有限 delay 且采用具有自然公共后继的规则时，代码生成：
 
 \[
 Pre\Rightarrow[F^*]
@@ -818,14 +815,15 @@ make_delay_type(d, A, T)
 
 | `A` | `T` | 实际 Type AST |
 |---|---|---|
-| `NoInterruptType()` | 任意 `T` | `FiniteDelayType(d,A,T)`，打印为 `delay(d).T` |
-| 非空通信选择 | `EmptyType()` | `FiniteDelayType(d,A,T)`，打印为 `delay(d) \unrhd A` |
-| 非空通信选择 | 非空通信后继 `T` | `FiniteDelayType(d,A,T)`，打印为完整式 |
+| 任意 `A` | `BottomType()` | `FiniteDelayType(d,A,bottom)`，对应无 timeout 的 `T-\unrhd` |
+| `NoInterruptType()` | 非 bottom 的 `T` | `FiniteDelayType(d,A,T)`，打印为 `delay(d).T` |
+| 非空通信选择 | 非 bottom 的 `T` | `FiniteDelayType(d,A,T)`，打印为完整式 |
 
-特别地，位于语句块末尾、无事件的有限 ODE 隐式以正常 `skip` 结束，得到：
+特别地，用户必须把“没有实际后继”的有限 ODE 写成 ``ode(...); skip``。
+当候选选择采用纯通信规则时，统一 AST 用 `BottomType` 表示 deadline 后继不可达：
 
 ```python
-FiniteDelayType(d, NoInterruptType(), EmptyType())
+FiniteDelayType(d, A, BottomType())
 ```
 
 正无穷 delay 构造 `InfiniteDelayType(A)`；其自然到时后继固定为不可达的
@@ -837,21 +835,27 @@ FiniteDelayType(d, NoInterruptType(), EmptyType())
 无限 ODE 即使具有外层 tail，自然 timeout 也不会进入 tail；但通信提前中断的
 每个事件分支仍会在自己的 continuation 后执行该 tail。
 
-### 9.8 末尾有限 ODE 的空边界后继
+### 9.8 源码 `skip` 与两种不同 Type 后继
 
-有限 ODE 总是采用带自然到时后继的规则。若它位于语句块末尾，构造器不会补造
-`Skip()`；而是让空的后继节点序列直接经过 `[T-End]`，得到 `EmptyType()`。
-
-因此以下两种源码位置在行为类型的通信抽象上得到相同的边界后继：
+用户输入不允许以裸 `ode(...)` 结束语句块。没有实际后继时，也必须显式写成：
 
 ```text
-ode(..., delay(d))
 ode(..., delay(d)); skip
 ```
 
-前者不会因为缺少显式语法节点而丢失 `T`，也不会把正常自然结束写成
-`BottomType()`。无穷时延则没有自然到时迁移，使用上一节的
-`InfiniteDelayType(A)` 规则。
+这个形状有两种规则解释：
+
+- `skip` 是“无实际后继”的占位：试用 `T-\unrhd`，证明 safety/domain，事件
+  后继不附加该占位语句，deadline continuation 构造为 `BottomType()`；
+- `skip` 是真实空后继：试用 `T-\unrhd'`，证明 safety/boundary，并检查
+  `skip :: EmptyType()`。
+
+Constructor 隔离执行两次试推，再依据证明结果选择唯一可行规则。两边的公式
+都会保留并标记候选来源，但只有选中候选参与最终 verdict。若证明器返回
+unknown，仍按项目统一策略形成不可信临时候选。有限 `ODE; Q` 且 `Q` 非 skip
+时没有重叠，只使用 `T-\unrhd'`。两个候选现在生成不同的 Type AST 后继，因此
+即使 Process 源码都写 `skip`，结果也不会再混淆。无穷时延没有自然
+到时迁移，仍使用上一节的 `InfiniteDelayType(A)` 规则。
 
 ---
 
@@ -859,9 +863,11 @@ ode(..., delay(d)); skip
 
 ### 10.1 `Mu(X,P,invariant=I)`
 
-当前实现只支持没有外层顺序 tail 的递归节点。若出现 `Mu(...); Q`，会因该结构
-超出当前递归构造能力而产生 `unknown` 诊断且无法形成父类型。这里是缺少结构推导
-规则，不是“证明器对一条已生成公式返回 unknown”，因此没有可继续构造的递归类型。
+当前实现只支持没有实际外层顺序 tail 的递归节点。仅由一个或多个 `skip` 组成的
+tail 不产生行为，会被尾位置判断忽略；若 `Mu(...); Q` 中仍存在任何非 `skip`
+进程，则该结构超出当前递归构造能力，产生 `unknown` 诊断且无法形成父类型。这里
+是缺少结构推导规则，不是“证明器对一条已生成公式返回 unknown”，因此没有可继续
+构造的递归类型。
 
 递归入口先证明：
 
@@ -890,7 +896,8 @@ H\land I\land Def(I)\land TypeDomain(\Gamma).
 遇到递归回边时，代码要求：
 
 1. `X` 已在 `rec_env` 绑定；
-2. `Var(X)` 后没有顺序 tail；
+2. `Var(X)` 后没有非 `skip` 的顺序 tail；显式 `X;skip` 和内部选择缺省后继
+   形成的 `X;skip` 都仍视为尾位置；
 3. 当前路径重新建立不变量：
 
 \[
@@ -918,7 +925,8 @@ Delay、内部选择和并行本身不算通信守卫；只有输入/输出类�
 类型构造规则不会任意构造多个等价形状，而是通过 Type AST 构造器保持以下规范：
 
 1. 正常终止只有 `EmptyType()`；
-2. `BottomType()` 仅保留为 Type AST 的论文节点，当前 TypeConstructor 不生成它；
+2. `BottomType()` 表示不可达行为；有限 `T-\unrhd` 和无限 delay 会使用它，
+   但推导失败仍以 `None`/失败结果表示；
 3. 外部选择：零分支为 `NoInterruptType`，单分支直接使用通信类型，多分支才使用
    `ExternalChoiceType`；
 4. 嵌套 `InternalChoiceType` 保留分块和顺序，不压平、不排序；
@@ -991,12 +999,29 @@ false > unknown > true.
 - 某个公式 premise 为 `unknown` 时继续推导；若所有结构步骤仍可完成，最终同时
   得到 `verdict=unknown` 与非空 `constructed_type`，后者是完整但不可信的候选；
 - 结构规则本身无法展开时也可能得到 `unknown` 且 `constructed_type=None`；
-- 当前 TypeConstructor 的合法结果不包含 `BottomType`；
+- 合法 Type 可以包含 `BottomType`，但仅表示规则中的不可达行为，绝不表示构造失败；
 
 公共单入口不会把 `verdict=unknown` 的候选伪装成正常返回值。推导完整时它抛出
 `HCSPUntrustedTypeConstructionError`，并将候选放在 `error.untrusted_type`；未形成
 完整类型时抛出普通 `HCSPTypeConstructionError`。两者的详细日志均保留实际证明
 公式和三值结论。
+
+### 13.1 结构化错误信息
+
+`HCSPTypeConstructionError` 不仅保存展示文本，还提供稳定字段：
+
+- `kind`：`TypeConstructionErrorKind`，区分 `environment`、`derivation`、
+  `proof-failed` 和 `proof-unknown`；
+- `phase`：对应 `environment`、`rule-derivation` 或 `proof`；
+- `rule`、`location`：首要失败所属规则和判断位置；
+- `partial_types`：停止前已经形成的各配置分量类型；
+- `details`：全部参与最终结论的 `HCSPErrorDetail`。证明明细保存 FOL/dL 类别、
+  实际证明公式和证明后端说明。
+
+完整候选已经形成但证明仍为 unknown 时，异常仍使用专门的
+`HCSPUntrustedTypeConstructionError`，且 `kind` 固定为 `proof-unknown`；候选只从
+`untrusted_type` 读取。输入词法、语法或 validation 错误不进入上述分类，而由
+带源码行列和插入符的 `HCSPInputError` 立即终止前端。
 
 ---
 
@@ -1077,12 +1102,15 @@ FiniteDelayType(d, NoInterruptType(), T)
 3. 当前 `T-Assign-post` 的实际证明公式是 \(\Phi\Rightarrow\Phi\)；
 4. 输入已有变量的类型检查使用双向“可比较”关系，而输出使用单向子类型关系；
 5. 输入 refinement 被加入路径作为假设，输出 refinement 必须证明；
-6. If 和 InternalChoice 的兄弟子 judgment 按顺序求解；第一个因 `false` 或结构
+6. If 和 InternalChoice 的兄弟子 judgment 按顺序求解；三个控制节点 If、
+   InternalChoice、ODE 都在 AST 中自持公共 continuation；第一个兄弟因 `false` 或结构
    错误而无法形成类型时会阻止第二个，但公式 `unknown` 不会；
 7. ODE 后状态不计算解析解，而用新鲜变量和 `B/safety` 条件抽象；
 8. ODE 的三类后继分别使用 `B∧safety`、`safety`、`¬B∧safety`；
 9. safety/domain/boundary 的 dL 程序均使用不带演化域的动力系统；
-10. 有限末尾 ODE 的空后继直接经 `[T-End]` 构造为 `EmptyType()`，不补造 `Skip()`；
+10. 用户源码中的裸末尾 ODE 非法；显式 `ODE; skip` 被 lowering 为
+    `ODE(..., continuation=Skip())`，并隔离试用 `T-\unrhd` 与
+    `T-\unrhd'`，非 skip 后继唯一使用 prime 规则；
 11. 正无穷 delay 由 `InfiniteDelayType` 保存；不可达的 bottom 后继不作为可改写字段；
 12. 递归体从仅满足不变量的新鲜抽象状态开始，不继承进入 `Mu` 前的具体符号项；
 13. Type 等价只忽略递归绑定变量改名，选择和并行的次序仍参与比较。

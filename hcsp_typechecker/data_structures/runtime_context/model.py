@@ -209,7 +209,8 @@ def is_subtype(actual: BasicType, expected: BasicType) -> bool:
 # 构造方式：ChannelType((B1,...,Bn), refinement=True, binders=("eta1",...,"etan"))；
 #           单个 B 会规范化为一槽签名。
 # 构造检查：至少一个槽位且每项都是 BasicType；binder 数量必须匹配、名称合法
-#           且互异。refinement 的语法和替换由 ExpressionTranslator/T-In/T-Out 检查。
+#           且互异。完整环境入口先检查 refinement 是作用域闭合的 Bool 公式，
+#           T-In/T-Out 再用实际通信值完成替换和证明。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ChannelType:
@@ -354,21 +355,21 @@ class ParameterEnvironment:
 #           [T-sigma] 由 ``Gamma·Theta·phi |- P :: T`` 和 ``|= phi[sigma]``
 #           得到 ``Gamma·Theta·phi |- (sigma, P) :: T``。
 # 判断对应：并行规则输入中的单个 <sigma, P> configuration。
-# 构造方式：Configuration(state, process, gamma=None, path_condition=None, name=None)。
+# 构造方式：Configuration(state, process, path_condition=None, name=None)。
 # 构造检查：复制 state 以隔离调用方修改，但暂不验证 process 属于 HCSP；
-#           局部 Gamma、路径条件和结构合法性由当前业务后端统一诊断。
+#           路径条件和结构合法性由当前业务后端统一诊断。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Configuration:
     """并行判断中的单个 ``<state, process>`` 配置。
 
-    ``gamma`` 和 ``path_condition`` 可以为不同并行叶子声明独立局部环境，
-    但不是不受约束的“覆盖”：Constructor/Checker 要求局部 Gamma 两两不交、与全局
-    Gamma 同型且并集恰为全局 Gamma。若使用局部路径，则所有并行叶子都必须
-    提供，外层默认 ``true`` 仅表示最终路径由这些局部路径的合取产生。
+    Gamma 是整个类型判断统一提供的声明环境，不存放在单个 Configuration 中。
+    ``path_condition`` 可以为不同并行叶子声明独立局部路径；若使用局部路径，
+    则所有并行叶子都必须提供，外层默认 ``true`` 仅表示最终路径由这些局部
+    路径的合取产生。
 
     ``state`` 是 Gamma 中 ``BasicType`` 值变量上的部分赋值：允许
-    ``dom(state)`` 是局部值变量定义域的真子集，未赋值变量留给
+    ``dom(state)`` 是值变量定义域的真子集，未赋值变量留给
     ``|= phi[state]`` 的有效性检查；独立 ``ContinuousType`` 声明没有状态值，
     不能作为 state 键。
 
@@ -379,25 +380,22 @@ class Configuration:
 
     state: Mapping[str, Any]
     process: Any
-    gamma: Mapping[str, GammaType] | None = None
     path_condition: Any | None = None
     name: str | None = None
 
-    # 功能：保存一个配置及其可选局部环境声明，并复制可变初始状态。
-    # 构造/模型关系：state=None 规范化为空状态；gamma/path/process 保持输入，
+    # 功能：保存一个配置及其可选局部路径，并复制可变初始状态。
+    # 构造/模型关系：state=None 规范化为空状态；path/process 保持输入，
     #                后续 T-|| 展开及 configuration/system/process judgment 求解器验证。
     def __init__(
         self,
         state: Mapping[str, Any] | None,
         process: Any,
-        gamma: Mapping[str, GammaType] | None = None,
         path_condition: Any | None = None,
         name: str | None = None,
     ):
         """复制可变映射，避免调用方后续修改影响正在进行的类型构造。"""
         object.__setattr__(self, "state", {} if state is None else dict(state))
         object.__setattr__(self, "process", process)
-        object.__setattr__(self, "gamma", gamma)
         object.__setattr__(self, "path_condition", path_condition)
         object.__setattr__(self, "name", name)
 

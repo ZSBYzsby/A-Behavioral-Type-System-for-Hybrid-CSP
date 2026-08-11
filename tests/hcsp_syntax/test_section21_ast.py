@@ -4,8 +4,8 @@ r"""HCSP Section 2.1 抽象语法树逐产生式测试。
 
 测试内容
 --------
-1. 节点种类必须恰好等于论文的 ``E / P / S`` 产生式，其中内部
-   选择使用与论文二元选择+顺序组合等价的多元规范形；
+1. 节点种类必须恰好等于论文的 ``E / P / S`` 产生式，其中 If、内部选择和
+   ODE 使用与表面顺序组合等价的自持公共后继规范形；
 2. 每个节点的子项必须属于正确语法范畴；
 3. E、P、S 的继承关系和跨层拒绝边界；
 4. 便捷类方法只能展开成项目规范节点，不能引入新的 AST 种类；
@@ -16,7 +16,8 @@ r"""HCSP Section 2.1 抽象语法树逐产生式测试。
 论文对应
 --------
 逐项对应 Section 2.1 的事件反应 ``E``、顺序进程 ``P`` 和系统 ``S`` 文法；
-``InternalChoice(P_1, ..., P_n, continuation=Q)`` 是多元内部选择的唯一规范 AST；
+``If``、多元 ``InternalChoice`` 和 ``ODE`` 的 ``continuation=Q`` 是公共后继的
+唯一规范 AST；
 ``ODEAnnotation`` 与 ``RecursionAnnotation`` 对应 Section 4.2/4.3 的批注扩展。
 """
 
@@ -119,6 +120,7 @@ def assert_process(test: unittest.TestCase, process: Process) -> None:
         test.assertIsInstance(process.condition, Expr)
         assert_process(test, process.then_branch)
         assert_process(test, process.else_branch)
+        assert_process(test, process.continuation)
         return
     if isinstance(process, ODE):
         for variable, derivative in process.eqs:
@@ -134,6 +136,7 @@ def assert_process(test: unittest.TestCase, process: Process) -> None:
         test.assertEqual(process.local_clock.initial_value, Literal(0))
         test.assertEqual(process.local_clock.derivative, Literal(1))
         assert_event_reaction(test, process.interrupts)
+        assert_process(test, process.continuation)
         return
     if isinstance(process, Sequence):
         assert_process(test, process.first)
@@ -428,10 +431,13 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         node = If(True, Skip(), Assign("x", 1))
         self.assertIsInstance(node.then_branch, Process)
         self.assertIsInstance(node.else_branch, Process)
+        self.assertIsInstance(node.continuation, Skip)
         with self.assertRaises(TypeError):
             If(True, Skip())  # type: ignore[call-arg]
         with self.assertRaises(TypeError):
             If(True, Skip(), Skip(), Skip())  # type: ignore[call-arg]
+        with self.assertRaises(TypeError):
+            If(True, Skip(), Skip(), continuation=EmptyEvent())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             If(True, Skip(), EmptyEvent())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
@@ -451,6 +457,7 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         )
         self.assertIsInstance(without_interrupt.interrupts, EmptyEvent)
         self.assertIsInstance(without_interrupt.annotation, ODEAnnotation)
+        self.assertIsInstance(without_interrupt.continuation, Skip)
         with self.assertRaises(ValueError):
             ODE([("x", 1)], True)
         with self.assertRaises(TypeError):
@@ -486,6 +493,27 @@ class Section21ProcessGrammarTests(unittest.TestCase):
             Sequence(Parallel(Skip(), Skip()), Skip())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             Sequence(Skip(), EmptyEvent())  # type: ignore[arg-type]
+        for terminal in (
+            If(True, Skip(), Skip()),
+            InternalChoice(Skip(), Skip()),
+            ODE([], True, annotation=ODEAnnotation(delay=1)),
+        ):
+            with self.subTest(terminal=type(terminal).__name__):
+                with self.assertRaisesRegex(ValueError, "owns its common continuation"):
+                    Sequence(terminal, Assert(True))
+
+        normalized_if = Sequence.of(
+            If(True, Skip(), Skip()),
+            Assert(True),
+        )
+        normalized_ode = Sequence.of(
+            ODE([], True, annotation=ODEAnnotation(delay=1)),
+            Assert(True),
+        )
+        self.assertIsInstance(normalized_if, If)
+        self.assertIsInstance(normalized_if.continuation, Assert)
+        self.assertIsInstance(normalized_ode, ODE)
+        self.assertIsInstance(normalized_ode.continuation, Assert)
 
     # 测试输入：显式多分支选择、缺省后继以及 E/Parallel 混入的非法情况。
     # 预期行为：分支以 tuple 保存，公共后继独立字段；省略时自动补 Skip。
@@ -588,7 +616,13 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         self.assertEqual(first.local_clock.derivative, Literal(1))
         self.assertIsNot(first.local_clock, second.local_clock)
         self.assertEqual(
-            Sequence(first, Assert("t >= 0")).get_vars(),
+            ODE(
+                first.eqs,
+                first.constraint,
+                first.interrupts,
+                annotation=first.annotation,
+                continuation=Assert("t >= 0"),
+            ).get_vars(),
             {"x", "t"},
         )
         with self.assertRaisesRegex(ValueError, "reserved.*local clock"):

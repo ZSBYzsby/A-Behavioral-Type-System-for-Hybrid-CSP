@@ -29,12 +29,15 @@ from unittest.mock import patch
 
 import hcsp_typechecker
 from hcsp_typechecker import (
+    HCSPErrorDetail,
     HCSPInputError,
     HCSPTypeConstructionError,
     HCSPTypeCheckingError,
     HCSPUntrustedTypeConstructionError,
     OutputMode,
     TypeAST,
+    TypeCheckingErrorKind,
+    TypeConstructionErrorKind,
     TypeTransitionGraph,
     build_type_transition_graph,
     construct_hcsp_type,
@@ -71,12 +74,15 @@ class PublicFacadeTests(unittest.TestCase):
         """普通调用者应只看到已承诺稳定的业务与展示接口。"""
 
         expected = {
+            "HCSPErrorDetail",
             "HCSPInputError",
             "HCSPTypeConstructionError",
             "HCSPTypeCheckingError",
             "HCSPUntrustedTypeConstructionError",
             "OutputMode",
             "TypeAST",
+            "TypeCheckingErrorKind",
+            "TypeConstructionErrorKind",
             "TypeTransitionGraph",
             "build_type_transition_graph",
             "construct_hcsp_type",
@@ -207,6 +213,16 @@ class PublicFacadeTests(unittest.TestCase):
         with self.assertRaises(HCSPTypeCheckingError) as caught:
             check_hcsp_type(_SKIP_SOURCE + "\ntype bottom")
         self.assertEqual(caught.exception.verdict, "false")
+        self.assertIs(
+            caught.exception.kind,
+            TypeCheckingErrorKind.TYPE_MISMATCH,
+        )
+        self.assertEqual(caught.exception.phase, "type-matching")
+        self.assertEqual(caught.exception.rule, "T-End")
+        self.assertTrue(caught.exception.type_mismatch_detected)
+        self.assertIs(caught.exception.type_structure_matched, False)
+        self.assertTrue(caught.exception.details)
+        self.assertIsInstance(caught.exception.details[0], HCSPErrorDetail)
         self.assertIn(
             "给定 Type 源码 : type bottom",
             caught.exception.format_result(),
@@ -376,6 +392,14 @@ class PublicFacadeTests(unittest.TestCase):
 
         error = captured.exception
         self.assertEqual(error.verdict, "false")
+        self.assertIs(error.kind, TypeConstructionErrorKind.PROOF_FAILED)
+        self.assertEqual(error.phase, "proof")
+        self.assertEqual(error.rule, "T-Assert")
+        self.assertEqual(error.location, "K1")
+        self.assertTrue(error.details)
+        self.assertEqual(error.details[0].proof_kind, "fol")
+        self.assertTrue(error.details[0].formula)
+        self.assertIn("counterexample", error.details[0].backend_detail)
         self.assertEqual(error.partial_types, (None,))
         self.assertTrue(error.reason)
         self.assertFalse(hasattr(error, "program"))
@@ -405,7 +429,8 @@ class PublicFacadeTests(unittest.TestCase):
         ):
             with self.assertRaises(HCSPUntrustedTypeConstructionError) as captured:
                 construct_hcsp_type(
-                    "gamma()\ntheta()\nprocess {{ode(flow(), domain(t < 1), delay(1))}}",
+                "gamma()\ntheta()\nprocess {{ode(flow(), domain(t < 1), "
+                "delay(1)); skip}}",
                     source_name="unknown-ode.hcsp",
                     output="full",
                     stream=output,
@@ -414,6 +439,8 @@ class PublicFacadeTests(unittest.TestCase):
         error = captured.exception
         self.assertIsInstance(error, HCSPTypeConstructionError)
         self.assertEqual(error.verdict, "unknown")
+        self.assertIs(error.kind, TypeConstructionErrorKind.PROOF_UNKNOWN)
+        self.assertEqual(error.phase, "proof")
         self.assertIsInstance(error.untrusted_type, TypeAST)
         self.assertEqual(str(error.untrusted_type), "delay(1).(0)")
         self.assertEqual(error.partial_types, (error.untrusted_type,))
@@ -489,8 +516,130 @@ class PublicFacadeTests(unittest.TestCase):
             captured.exception.source_name,
             "path-demo.hcsp:path_condition",
         )
+        self.assertEqual(captured.exception.kind, "input-syntax")
         self.assertIn("路径条件解析失败", error_output.getvalue())
         self.assertIn("path-demo.hcsp:path_condition", error_output.getvalue())
+
+    # 测试输入：TypeChecker 输入末尾只有 type 关键字，缺少具体 Type。
+    # 预期行为：result/full 都抛同一 HCSPInputError；full 使用 TypeChecker 自己的
+    #           标题并显示原始输入、精确位置和插入符，绝不误称“类型构造”。
+    # 检查内容：锁定两套业务各自的输入错误渲染，同时复用同一结构化前端异常。
+    # 论文对应：尚未形成右侧 Type 时，Table 2 检查判断不能启动。
+    def test_type_checker_input_error_uses_checker_specific_output(self) -> None:
+        """Checker 的输入错误不得再复用 Constructor 的错误标题。"""
+
+        source = _SKIP_SOURCE + "\ntype"
+        result_output = StringIO()
+        full_output = StringIO()
+        with self.assertRaises(HCSPInputError):
+            check_hcsp_type(
+                source,
+                source_name="bad-type.hcsp",
+                output="result",
+                stream=result_output,
+            )
+        with self.assertRaises(HCSPInputError):
+            check_hcsp_type(
+                source,
+                source_name="bad-type.hcsp",
+                output="full",
+                stream=full_output,
+            )
+
+        self.assertIn("HCSP 类型检查输入错误", result_output.getvalue())
+        self.assertIn("错误类别 : input-syntax", result_output.getvalue())
+        self.assertNotIn("类型构造", result_output.getvalue())
+        self.assertIn("HCSP 类型检查完整错误日志", full_output.getvalue())
+        self.assertIn(source, full_output.getvalue())
+        self.assertIn("syntax error", full_output.getvalue())
+        self.assertIn("^", full_output.getvalue())
+        self.assertNotIn("类型构造", full_output.getvalue())
+
+    # 测试输入：Checker 分别遇到非法 Theta、assert(false) 和证明后端 unknown。
+    # 预期行为：三个失败都保持 HCSPTypeCheckingError 兼容基类，但 kind 分别为
+    #           environment、proof-failed、proof-unknown，并携带规则和证明证据。
+    # 检查内容：验证调用者无需解析中文日志即可程序化区分失败种类。
+    # 论文对应：良构环境、被否证前提和未决前提是三种不同的判断失败来源。
+    def test_type_checker_errors_have_machine_readable_categories(self) -> None:
+        """Checker 应结构化区分环境、证明失败和证明未决。"""
+
+        invalid_environment = (
+            "gamma() theta(bad: channel(v: Real) where(v + 1)) "
+            "process {{skip}} type empty"
+        )
+        with self.assertRaises(HCSPTypeCheckingError) as environment_error:
+            check_hcsp_type(invalid_environment)
+        self.assertIs(
+            environment_error.exception.kind,
+            TypeCheckingErrorKind.ENVIRONMENT,
+        )
+        self.assertEqual(environment_error.exception.phase, "environment")
+        self.assertEqual(environment_error.exception.rule, "environment")
+        self.assertFalse(environment_error.exception.type_mismatch_detected)
+
+        with self.assertRaises(HCSPTypeCheckingError) as proof_error:
+            check_hcsp_type(
+                "gamma() theta() process {{assert(false)}} type empty"
+            )
+        self.assertIs(
+            proof_error.exception.kind,
+            TypeCheckingErrorKind.PROOF_FAILED,
+        )
+        self.assertEqual(proof_error.exception.rule, "T-Assert")
+        self.assertIn("counterexample", proof_error.exception.reason)
+        self.assertTrue(proof_error.exception.details[0].formula)
+
+        unknown_source = (
+            "gamma() theta() process {{ode(flow(), domain(t < 1), "
+            "delay(1)); skip}} type delay(1) then empty"
+        )
+        with patch(
+            "hcsp_typechecker.backend.common.keymaerax."
+            "KeYmaeraXBackend.__call__",
+            return_value=None,
+        ):
+            with self.assertRaises(HCSPTypeCheckingError) as unknown_error:
+                check_hcsp_type(unknown_source)
+        self.assertIs(
+            unknown_error.exception.kind,
+            TypeCheckingErrorKind.PROOF_UNKNOWN,
+        )
+        self.assertEqual(unknown_error.exception.verdict, "unknown")
+        self.assertEqual(unknown_error.exception.phase, "proof")
+        self.assertIs(unknown_error.exception.type_structure_matched, True)
+        self.assertIn("no decision", unknown_error.exception.reason)
+
+    # 测试输入：Constructor 分别遇到非法未使用通道 refinement 与 Bool 变量的
+    #           数值赋值；两者都明确失败，但前者属于环境，后者属于规则推导。
+    # 预期行为：异常 kind/phase/rule 精确区分 environment 和 derivation。
+    # 检查内容：验证 Constructor 的非证明类错误也有稳定的机器可读类别和明细。
+    # 论文对应：判断环境良构性先于 Table 2；T-Assign 的静态类型错误发生在规则内。
+    def test_constructor_separates_environment_and_derivation_errors(self) -> None:
+        """Constructor 不应把所有非证明错误压成一个通用失败。"""
+
+        invalid_environment = (
+            "gamma() theta(bad: channel(v: Real) where(v + 1)) "
+            "process {{skip}}"
+        )
+        with self.assertRaises(HCSPTypeConstructionError) as environment_error:
+            construct_hcsp_type(invalid_environment)
+        self.assertIs(
+            environment_error.exception.kind,
+            TypeConstructionErrorKind.ENVIRONMENT,
+        )
+        self.assertEqual(environment_error.exception.phase, "environment")
+        self.assertEqual(environment_error.exception.rule, "environment")
+
+        invalid_assignment = "gamma(x: Bool) theta() process {{x := 1}}"
+        with self.assertRaises(HCSPTypeConstructionError) as derivation_error:
+            construct_hcsp_type(invalid_assignment)
+        self.assertIs(
+            derivation_error.exception.kind,
+            TypeConstructionErrorKind.DERIVATION,
+        )
+        self.assertEqual(derivation_error.exception.phase, "rule-derivation")
+        self.assertEqual(derivation_error.exception.rule, "T-Assign")
+        self.assertTrue(derivation_error.exception.details)
 
     # 测试输入：给单入口传入不存在的输出级别。
     # 预期行为：在解析和推导前以稳定 ValueError 拒绝，错误列出三种可用模式。

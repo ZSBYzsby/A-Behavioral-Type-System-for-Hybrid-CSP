@@ -100,6 +100,7 @@ def _obligation_signature(report: object) -> tuple[tuple[str, str], ...]:
     return tuple(
         (obligation.rule, obligation.kind)
         for obligation in report.obligations  # type: ignore[attr-defined]
+        if obligation.active
     )
 
 
@@ -270,14 +271,17 @@ class Table2RuleContractTests(unittest.TestCase):
         """通信型 ODE 必须恰好生成 domain 与 safety 两类连续义务。"""
 
         integer_channel = ChannelType(BasicType.INT)
-        process = ODE(
-            [("x", 0)],
-            True,
-            EventChoice.of(
-                (OutputChannel("left", 0), Skip()),
-                (OutputChannel("right", 1), Skip()),
+        process = Sequence.of(
+            ODE(
+                [("x", 0)],
+                True,
+                EventChoice.of(
+                    (OutputChannel("left", 0), Skip()),
+                    (OutputChannel("right", 1), Skip()),
+                ),
+                annotation=ODEAnnotation(safety=True, delay=inf),
             ),
-            annotation=ODEAnnotation(safety=True, delay=inf),
+            Skip(),
         )
         report = _construct_one(
             process,
@@ -301,7 +305,7 @@ class Table2RuleContractTests(unittest.TestCase):
         ode_roles = tuple(
             obligation.formula.role
             for obligation in report.obligations
-            if obligation.kind == "dl"
+            if obligation.kind == "dl" and obligation.active
         )
         self.assertEqual(ode_roles, ("safety", "domain"))
 
@@ -341,20 +345,24 @@ class Table2RuleContractTests(unittest.TestCase):
         ode_roles = tuple(
             obligation.formula.role
             for obligation in report.obligations
-            if obligation.kind == "dl"
+            if obligation.kind == "dl" and obligation.active
         )
         self.assertEqual(
             ode_roles,
             ("safety", "boundary"),
         )
-        boundary_source = report.obligations[2].formula.source
+        boundary_source = next(
+            item.formula.source
+            for item in report.obligations
+            if item.active and item.rule == "T-ODE-boundary"
+        )
         # KeYmaera X 打印器把 ``t < 1`` 规范成等价的 ``1 > t``，而
         # ``t = 1`` 可能打印成 ``1 = t``；两部分必须同时保留。
         self.assertIn("1 >", boundary_source)
         self.assertIn("1 =", boundary_source)
         self.assertIn("-> !(", boundary_source)
 
-    # 测试输入：通信保护递归 mu X.(tick?u # X)，以及两个局部 Gamma 不相交的
+    # 测试输入：通信保护递归 mu X.(tick?u # X)，以及两个状态所有权不相交的
     #           顶层配置。递归 invariant 使用默认 true。
     # 预期行为：递归产生 T-mu、T-X 两条蕴含；每个 configuration 各产生一条
     #           T-sigma 状态义务；T-parallel 本身不额外产生逻辑公式。
@@ -393,14 +401,12 @@ class Table2RuleContractTests(unittest.TestCase):
                     Configuration(
                         {"left": 0},
                         Skip(),
-                        gamma={"left": BasicType.INT},
                         path_condition="left == 0",
                         name="left",
                     ),
                     Configuration(
                         {"right": 1},
                         Skip(),
-                        gamma={"right": BasicType.INT},
                         path_condition="right == 1",
                         name="right",
                     ),

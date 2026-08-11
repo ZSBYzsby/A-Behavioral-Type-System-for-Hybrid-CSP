@@ -5,12 +5,12 @@
 1. skip、赋值、断言、输入、输出和 call 的精确 Process AST。
 2. 语句块分号的唯一顺序组合含义和非法空项/尾分号边界。
 3. if、内部选择及递归的块结构、规范 AST 和构造期良构失败。
-4. 内部选择之后的块内语句直接进入多元节点公共 continuation。
+4. If、内部选择之后的块内语句直接进入控制节点的公共 continuation。
 
 论文对应
 --------
 这些测试覆盖 Section 2.1 的离散 Process 产生式以及项目的多标量通信和多元
-内部选择规范形；递归批注与通信保护对应 Section 4.2/4.3 和 Assumption 2.2。
+控制节点规范形；递归批注与通信保护对应 Section 4.2/4.3 和 Assumption 2.2。
 """
 
 from __future__ import annotations
@@ -162,8 +162,8 @@ class CompoundControlInputTests(unittest.TestCase):
     """验证 if、内部选择和带批注递归的 lowering。"""
 
     # 测试输入：二元 if 及其后一个块内公共顺序语句。
-    # 预期行为：if 构造 If，后继通过普通 Sequence 连接到完整条件节点。
-    # 检查内容：比较条件、两个分支及外部 done 输出的精确嵌套关系。
+    # 预期行为：if 构造终端 If，后继直接保存在其 continuation 字段。
+    # 检查内容：比较条件、两个分支及公共 done 后继的精确规范形。
     # 论文对应：覆盖 Section 2.1 的 if B then P else P' 与顺序组合。
     def test_if_statement_and_following_continuation(self) -> None:
         """if 必须有两个块分支，并可作为一条语句接续后继。"""
@@ -172,13 +172,11 @@ class CompoundControlInputTests(unittest.TestCase):
             if (x >= 0) {positive!(x)} else {negative!(x)};
             done!(x)
         }}"""
-        expected = Sequence.of(
-            If(
-                CompareExpr((Variable("x"), Literal(0)), (">=",)),
-                OutputChannel("positive", "x"),
-                OutputChannel("negative", "x"),
-            ),
-            OutputChannel("done", "x"),
+        expected = If(
+            CompareExpr((Variable("x"), Literal(0)), (">=",)),
+            OutputChannel("positive", "x"),
+            OutputChannel("negative", "x"),
+            continuation=OutputChannel("done", "x"),
         )
         self.assertEqual(parse_hcsp(source), expected)
 

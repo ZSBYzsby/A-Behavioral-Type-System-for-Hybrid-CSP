@@ -3,16 +3,16 @@
 测试内容
 --------
 1. ``ParsedHCSPSource`` 的只读 Gamma/Theta 可直接交给现有构造入口；
-2. 前端保留的 refinement 类型/自由名错误在通道实际使用时由构造器拒绝；
-3. 参数约束作为共享背景进入顺序及多配置推导，且不参与局部 Gamma 分区；
+2. 前端保留的 refinement 类型/自由名错误在环境准备阶段由构造器统一拒绝；
+3. 参数约束作为共享背景进入顺序及多配置推导，且不属于可变状态所有权；
 4. 赋值、输入和 ODE 左端均不能修改统一 source 声明的只读参数。
 
 论文对应
 --------
 本文件连接 concrete syntax lowering 与 Table 2 推导入口，但不改变任何推导规则：
-解析器产生 Definition 4.1 环境和正式 Process AST，构造器继续负责 T-In/T-Out 的
-refinement 公式类型与实例化。共享参数作为独立背景 H 传入各子 judgment，不属于
-并行分量的状态 Gamma。
+解析器产生 Definition 4.1 环境和正式 Process AST，构造器先检查全部 Theta
+refinement 的公式类型与作用域，再由 T-In/T-Out 完成实际通信值替换。共享参数
+作为独立背景 H 传入各子 judgment，不属于并行分量的状态 Gamma。
 """
 
 from __future__ import annotations
@@ -57,11 +57,11 @@ process {{ch?(x); ch!(x)}}"""
         )
 
     # 测试输入：通道 refinement 是数值表达式 value+1，Process 实际在该通道输出。
-    # 预期行为：前端成功保存 Expr；T-Out 使用声明时因非 Bool refinement 返回 false。
+    # 预期行为：前端成功保存 Expr；构造器准备 Theta 时因非 Bool refinement 返回 false。
     # 检查内容：核对无正式类型，并在诊断中看到 Expected Bool formula。
-    # 论文对应：refinement 的公式判断属于通信类型规则，不在 concrete parser 中猜测。
-    def test_used_non_boolean_refinement_is_rejected_by_constructor(self) -> None:
-        """语法转换成功不能掩盖后续 Theta refinement 的静态类型错误。"""
+    # 论文对应：refinement 必须先是良构公式，T-Out 随后才实例化其通信载荷。
+    def test_non_boolean_refinement_is_rejected_by_constructor(self) -> None:
+        """语法转换成功不能掩盖 Theta refinement 的静态类型错误。"""
 
         parsed = parse_hcsp_source(
             """gamma()
@@ -83,6 +83,66 @@ process {{ch!(0)}}"""
                 for item in report.diagnostics
             )
         )
+
+    # 测试输入：Process 只有 skip，但 Theta 分别含数值 refinement 和未绑定自由名。
+    # 预期行为：即使两个通道均未使用，完整 Theta 环境仍在规则推导前被拒绝。
+    # 检查内容：覆盖非 Bool 与 unbound 两类静态错误，确认没有候选类型产生。
+    # 论文对应：Theta(ch) 的 refinement 是环境中的公式，不因 ch 未出现在 P 中
+    #           就可以成为非公式或引用环境外变量。
+    def test_unused_invalid_refinement_is_rejected_by_constructor(self) -> None:
+        """未使用通道也必须具有良构且作用域闭合的 refinement。"""
+
+        sources_and_fragments = (
+            (
+                """gamma()
+theta(bad: channel(value: Real) where(value + 1))
+process {{skip}}""",
+                "Expected Bool formula",
+            ),
+            (
+                """gamma()
+theta(bad: channel(value: Real) where(value >= missing))
+process {{skip}}""",
+                "Unbound variable 'missing'",
+            ),
+        )
+
+        for source, fragment in sources_and_fragments:
+            with self.subTest(fragment=fragment):
+                parsed = parse_hcsp_source(source)
+                report = construct_type(
+                    gamma=parsed.gamma,
+                    theta=parsed.theta,
+                    configurations=(parsed.process,),
+                )
+                self.assertEqual(report.verdict, Verdict.FALSE)
+                self.assertIsNone(report.constructed_type)
+                self.assertTrue(
+                    any(fragment in item.message for item in report.diagnostics)
+                )
+
+    # 测试输入：未使用通道的 Bool refinement 同时引用自身 binder 和共享参数 limit。
+    # 预期行为：环境检查接受它，skip 仍构造 EmptyType。
+    # 检查内容：确认提前检查保留合法 binder/参数作用域，而非要求通道必须出现。
+    # 论文对应：共享背景 H 可出现在 Theta refinement 中，binder 只在本通道局部绑定。
+    def test_unused_well_formed_refinement_can_reference_parameter(self) -> None:
+        """合法的未使用 refinement 应通过环境良构检查。"""
+
+        parsed = parse_hcsp_source(
+            """gamma()
+parameters(limit: Real) where(limit >= 0)
+theta(unused: channel(value: Real) where(value >= limit))
+process {{skip}}"""
+        )
+        report = construct_type(
+            gamma=parsed.gamma,
+            theta=parsed.theta,
+            parameters=parsed.parameters,
+            configurations=(parsed.process,),
+        )
+
+        self.assertEqual(report.verdict, Verdict.TRUE, report.format_detailed())
+        self.assertIsNotNone(report.constructed_type)
 
     # 测试输入：共享 Real 参数 limit 的约束为 limit>=0，程序断言同一公式并输出 limit。
     # 预期行为：parsed.parameters 直接进入 constructor，背景约束证明断言和输出 refinement。
@@ -112,11 +172,11 @@ process {{assert(limit >= 0); out!(limit)}}"""
         self.assertIn("参数约束", detailed)
 
     # 测试输入：两个并行块分别更新 left_state/right_state，却共同读取参数 limit。
-    # 预期行为：process_components 形成两个 Configuration；参数跨分量共享，状态分区互斥。
-    # 检查内容：核对 ParallelType、两个 T-sigma 的局部 Gamma 及无 false 诊断。
-    # 论文对应：T-parallel 的子判断共享 Theta/H，但 Gamma 是各私有状态域的不交并集。
-    def test_parallel_components_share_parameter_but_partition_state_gamma(self) -> None:
-        """顶层 Parallel 必须按叶子交给 constructor，参数不应污染 Gamma 分区。"""
+    # 预期行为：process_components 形成两个 Configuration；参数和 Gamma 跨分量共享。
+    # 检查内容：核对 ParallelType、两个 T-sigma 的完整 Gamma 及无 false 诊断。
+    # 论文对应：项目统一环境约定下，状态所有权由 Process/Configuration 单独检查。
+    def test_parallel_components_share_gamma_and_parameters(self) -> None:
+        """顶层 Parallel 各叶子共享声明环境，参数仍不属于可变状态。"""
 
         parsed = parse_hcsp_source(
             """gamma(left_state: Real, right_state: Real)
@@ -155,7 +215,10 @@ process {
         ]
         self.assertEqual(
             t_sigma_gammas,
-            [{"left_state"}, {"right_state"}],
+            [
+                {"left_state", "right_state"},
+                {"left_state", "right_state"},
+            ],
         )
         self.assertTrue(
             all("limit" not in gamma for gamma in t_sigma_gammas)

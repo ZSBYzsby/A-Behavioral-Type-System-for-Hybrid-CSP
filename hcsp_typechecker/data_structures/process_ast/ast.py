@@ -19,8 +19,8 @@ Assumption 2.2、并行系统及 Assumption 2.1。类型构造不在本文件执
 
 除通信参数表和内部选择的规范 AST 形状外，下面的 E/P/S 结构对应论文
 Section 2.1。项目把论文的单值通信扩展为一次传递一个或多个独立标量；
-同时把论文可通过顺序组合写出的 ``(P_1 \sqcup ... \sqcup P_n); Q`` 规范化为
-唯一多元 ``InternalChoice(P_1, ..., P_n, continuation=Q)``。省略公共后继时，
+同时把 Table 2 直接处理的条件、内部选择和 ODE 公共后继规范地保存在对应
+控制节点中。它们只能作为当前二元 ``Sequence`` 主干的末端；省略公共后继时，
 AST 对象仍会保存 ``Skip()``。
 不易用 ASCII 准确表示的运算符写成未渲染的 LaTeX 命令。字符串表达式会立即通过
 ``ensure_expr`` 转为项目自己的 ``Expr``。
@@ -52,9 +52,10 @@ AST 对象仍会保存 ``Skip()``。
     assert(B)                     Assert(B)
     ch?(x1,...,xn)                InputChannel("ch", ("x1", ..., "xn"))
     ch!(e1,...,en)                OutputChannel("ch", (e1, ..., en))
-    if B then P else P'           If(B, P, P_prime)
-    <dot(v)=e & B> \unrhd E       ODE([("v", e)], B, E,
-                                      annotation=ODEAnnotation(...))
+    (if B then P else P'); Q      If(B, P, P_prime, continuation=Q)
+    (<dot(v)=e & B> \unrhd E); Q  ODE([("v", e)], B, E,
+                                      annotation=ODEAnnotation(...),
+                                      continuation=Q)
     P; P'                         Sequence(P, P_prime)
     (P_1 \sqcup ... \sqcup P_n); Q
                                     InternalChoice(P_1, ..., P_n, continuation=Q)
@@ -84,7 +85,7 @@ AST 对象仍会保存 ``Skip()``。
 出现，构造器会立即拒绝该 AST。
 
 本项目约定，复合顺序前缀中出现的输入绑定可作用于该前缀的公共
-顺序后继。因此 ``If(B, InputChannel("ch", ("x",)), Skip()); P(x)``
+顺序后继。因此 ``If(B, InputChannel("ch", ("x",)), Skip(), continuation=P(x))``
 按这一已确认的作用域约定处理，不会因为某个分支没有执行输入而被
 额外拒绝。这是本项目对顺序绑定范围的明确规定，并非实现遗漏。
 
@@ -101,7 +102,7 @@ AST 对象仍会保存 ``Skip()``。
 检查遵守词法作用域；内层同名 ``Mu("X", ...)`` 会遮蔽外层绑定。对于顺序
 组合，只有此前所有可能路径都已经通信，后继中的 ``X`` 才算受保护；对于
 ``If`` 和内部选择，则逐分支检查。ODE 的事件 continuation 由其事件通信保护，
-但 ODE 的自然结束路径不会把通信保护传给外层顺序后继。
+但 ODE 的自然结束路径不会凭借某个中断分支的通信来保护公共后继。
 
 ────────────────── 节点变量收集接口 ────────────────────────────────────────
 
@@ -170,10 +171,16 @@ Section 4.2/4.3 不增加新的 ``P`` 节点，而是在既有 ODE/Mu 节点上�
       = Skip()
 
     Sequence.of(P1, ..., Pn)
-      = Sequence(P1, ... Sequence(Pn-1, Pn) ...)
+      = 线性前缀保持右结合；If/InternalChoice/ODE 末项自持剩余 continuation
+
+    If(B, P1, P2, continuation=Q)
+      = (if B then P1 else P2); Q
 
     InternalChoice.of(P1, ..., Pn, continuation=Q)
       = InternalChoice(P1, ..., Pn, continuation=Q)
+
+    ODE(..., continuation=Q)
+      = ODE(...); Q
 
     EventChoice.of()
       = EmptyEvent()
@@ -200,10 +207,10 @@ TypeConstructor 在构造 dL 义务时才把这个抽象时钟实体化为新鲜
 使用另一个普通状态变量并在 Gamma 中显式声明。
 
 AST 节点类别仍与论文 Section 2.1 的 E/P/S 构造类别一致；项目差异是通信
-参数表的多标量扩展、既有 ODE/Mu 节点上的批注字段，以及内部选择将论文中
-等价的 ``Sequence(InternalChoice(P_1, ..., P_n), Q)`` 规范保存为多元
-``InternalChoice(P_1, ..., P_n, continuation=Q)``。这只改变 AST 的唯一表示，
-不改变 HCSP 运行语义。
+参数表的多标量扩展、既有 ODE/Mu 节点上的批注字段，以及把 Table 2 直接
+处理的 ``If``、多元 ``InternalChoice`` 和 ``ODE`` 规范为自持公共
+``continuation`` 的顺序末端节点。这只改变 AST 的唯一表示，不改变 HCSP
+运行语义。
 
 ────────────────────────────────────────────────────────────────────────────
 
@@ -253,9 +260,9 @@ class HCSP(ABC):
 
     # 功能：从 get_vars 的值变量中单独标出多标量输入引入的全部目标变量。
     # 检查/论文关系：并行 Gamma 自动分区时，这些名称允许在输入发生前没有
-    #                外部声明；T-In 随后按 Theta 各槽类型把 xi 加入局部 Gamma。
+    #                外部声明；T-In 随后按 Theta 各槽类型把 xi 加入当前 Gamma。
     def get_input_bound_vars(self) -> set[str]:
-        """返回可由 T-In 在局部 Gamma 中新引入的输入目标变量。"""
+        """返回可由 T-In 在当前 Gamma 中新引入的输入目标变量。"""
         return set()
 
 
@@ -545,17 +552,19 @@ class OutputChannel(Process):
 
 # --------------------------------------------------------------------------
 # 论文对应：Section 2.1 的 P ::= if B then P else P'；Table 2 的 T-If。
-# 构造方式：If(B, then_process, else_process)，必须显式给出两个分支。
-# 构造检查：立即解析 B 并要求两分支都是 Process；
-#           合并分支后检查 Assumption 2.1；B 的 Bool 类型由 T-If 检查。
+# 构造方式：If(B, then_process, else_process, continuation=Q)。
+# 构造检查：立即解析 B 并要求两个分支及公共后继都是 Process；省略 Q 时
+#           规范为 Skip；合并分支后检查 Assumption 2.1；B 的 Bool 类型由
+#           T-If 检查。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class If(Process):
-    """二元条件进程 ``if B then P else P'``。"""
+    """带公共后继的条件进程 ``(if B then P else P'); Q``。"""
 
     condition: Expr
     then_branch: Process
     else_branch: Process
+    continuation: Process
 
     # 功能：建立严格二元条件节点并规范化条件表达式。
     # 检查/论文关系：拒绝 E、Parallel 或缺失分支，保持论文的二元 P 产生式。
@@ -564,25 +573,31 @@ class If(Process):
         condition: ExprLike,
         then_branch: Process,
         else_branch: Process,
+        *,
+        continuation: Process | None = None,
     ):
-        """规范化条件，并要求两个分支都是论文顺序进程 ``P``。"""
+        """规范化条件，并验证两个分支及其公共顺序后继。"""
         if not isinstance(then_branch, Process) or not isinstance(else_branch, Process):
             raise TypeError("If branches must be Process nodes")
+        common_tail = Skip() if continuation is None else continuation
+        if not isinstance(common_tail, Process):
+            raise TypeError("If continuation must be a Process node")
         object.__setattr__(self, "condition", ensure_expr(condition))
         object.__setattr__(self, "then_branch", then_branch)
         object.__setattr__(self, "else_branch", else_branch)
+        object.__setattr__(self, "continuation", common_tail)
         _validate_assumption21(self)
 
-    # 功能：合并条件、then 分支和 else 分支的用户值变量。
+    # 功能：合并条件、then/else 分支和公共后继的用户值变量。
     # 检查/论文关系：只做静态收集；分支分别在 phi∧B、phi∧¬B 下检查。
     def get_vars(self) -> set[str]:
-        """合并条件和两个分支使用的变量。"""
+        """合并条件、两个分支及公共后继使用的变量。"""
         return set(_assumption21_info(self).value_variables)
 
-    # 功能：合并两个条件分支内由输入动作绑定的变量。
+    # 功能：合并两个条件分支及公共后继内由输入动作绑定的变量。
     # 检查/论文关系：不把条件 B 中的普通自由变量误认为输入绑定变量。
     def get_input_bound_vars(self) -> set[str]:
-        """合并两个分支引入的输入变量。"""
+        """合并两个分支及公共后继引入的输入变量。"""
         return set(_assumption21_info(self).bound_value_variables)
 
 
@@ -674,8 +689,9 @@ class EventChoice(EventReaction):
 # 论文对应：Section 2.1 的二元顺序组合 P ::= P; P'。
 # 构造方式：Sequence(first, second)。
 # 构造检查：立即要求两个操作数都是 Process，并按 first 的输入作用域计算
-#           second 的 fv，随后检查 Assumption 2.1。为保持内部选择的多元规范形，
-#           first 的顺序末端不能是 InternalChoice；其公共后继应直接写入该节点。
+#           second 的 fv，随后检查 Assumption 2.1。为保持 Table 2 规范形，
+#           first 的顺序末端不能是 If、InternalChoice 或 ODE；其公共后继应直接
+#           写入对应控制节点。
 #           若 first 是其他复合进程，项目采用各分支输入绑定集合的并集处理公共
 #           second，详见文件头约定。
 # --------------------------------------------------------------------------
@@ -689,7 +705,7 @@ class Sequence(Process):
     # 功能：保存论文规定的两个顺序操作数，不引入多元 Sequence 节点。
     # 检查/论文关系：左右两项必须属于 P，保持 E、P、S 三个范畴的边界。
     def __init__(self, first: Process, second: Process):
-        """验证两个 ``P`` 操作数，并拒绝外置的内部选择公共后继。"""
+        """验证两个 ``P`` 操作数，并拒绝控制节点的外置公共后继。"""
         if not isinstance(first, Process):
             raise TypeError("Sequence first operand must be a Process")
         if not isinstance(second, Process):
@@ -697,11 +713,11 @@ class Sequence(Process):
         trailing = first
         while isinstance(trailing, Sequence):
             trailing = trailing.second
-        if isinstance(trailing, InternalChoice):
+        if isinstance(trailing, (If, InternalChoice, ODE)):
             raise ValueError(
-                "InternalChoice owns its common continuation; use "
-                "InternalChoice(*branches, continuation=...) instead of "
-                "placing an InternalChoice before a later Sequence continuation"
+                f"{type(trailing).__name__} owns its common continuation; "
+                "store the later process in that node's continuation field "
+                "instead of placing the control node before an outer Sequence"
             )
         object.__setattr__(self, "first", first)
         object.__setattr__(self, "second", second)
@@ -742,7 +758,8 @@ class Sequence(Process):
 #           ``(P_1 \sqcup ... \sqcup P_n); Q``。
 # 构造方式：InternalChoice(P_1, ..., P_n, continuation=Q)。
 # 构造检查：分支表至少两个元素，所有分支与公共后继均为 Process；完整节点
-#           立即检查 Assumption 2.1。省略 continuation 时规范为 Skip()。
+#           立即检查 Assumption 2.1。省略 continuation 时规范为 Skip()；该空操作
+#           在 T-mu/T-X 的尾位置判断中不算实际顺序后继。
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class InternalChoice(Process):
@@ -797,16 +814,27 @@ class InternalChoice(Process):
         return cls(*branches, continuation=continuation)
 
 
-# 功能：把一个顺序后继追加到已有进程，同时保持内部选择多元规范形。
-# 检查/论文关系：普通顺序树按结合律向右追加；若执行前缀最后是
-#                InternalChoice，后继必须进入其 continuation 字段，不产生被禁止的
-#                外置 ``Sequence(InternalChoice(...), Q)`` 形状。
+# 功能：把顺序后继追加到已有进程，同时保持 Table 2 控制节点规范形。
+# 检查/论文关系：普通顺序树按结合律向右追加；若执行前缀最后是 If、
+#                InternalChoice 或 ODE，后继必须进入其 continuation 字段。
 def _append_sequence_continuation(
     prefix: Process,
     continuation: Process,
 ) -> Process:
-    """为 ``Sequence.of`` 生成不含外置选择后继的唯一规范 AST。"""
+    """为 ``Sequence.of`` 生成不含控制节点外置后继的唯一规范 AST。"""
 
+    if isinstance(prefix, If):
+        combined = (
+            continuation
+            if isinstance(prefix.continuation, Skip)
+            else _append_sequence_continuation(prefix.continuation, continuation)
+        )
+        return If(
+            prefix.condition,
+            prefix.then_branch,
+            prefix.else_branch,
+            continuation=combined,
+        )
     if isinstance(prefix, InternalChoice):
         combined = (
             continuation
@@ -817,6 +845,19 @@ def _append_sequence_continuation(
             )
         )
         return InternalChoice(*prefix.branches, continuation=combined)
+    if isinstance(prefix, ODE):
+        combined = (
+            continuation
+            if isinstance(prefix.continuation, Skip)
+            else _append_sequence_continuation(prefix.continuation, continuation)
+        )
+        return ODE(
+            prefix.eqs,
+            prefix.constraint,
+            prefix.interrupts,
+            annotation=prefix.annotation,
+            continuation=combined,
+        )
     if isinstance(prefix, Sequence):
         return Sequence(
             prefix.first,
@@ -1034,7 +1075,7 @@ class ODELocalClock:
 # 论文对应：Section 2.1 的连续演化
 #           <dot(v)=e & B> \unrhd E；Section 4.3 附加安全性质 phi，
 #           Remark 4.1 提供类型规则需要的外部精确时长 d。
-# 构造方式：ODE(eqs, B, E, annotation=ODEAnnotation(...))。
+# 构造方式：ODE(eqs, B, E, annotation=ODEAnnotation(...), continuation=Q)。
 # 构造检查：立即规范化方程和 B，要求中断属于 E 且批注存在、类型正确；
 #           自动建立名为 t、初值 0、导数 1 的局部时钟，并禁止用户方程覆盖它；
 #           隐藏局部时钟不是用户参数；
@@ -1043,12 +1084,13 @@ class ODELocalClock:
 # --------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ODE(Process):
-    r"""带批注连续演化 ``<dot(v)=e & B>_phi \unrhd[d] E``。"""
+    r"""带公共后继的连续演化 ``(<dot(v)=e & B>_phi \unrhd[d] E); Q``。"""
 
     eqs: tuple[tuple[str, Expr], ...]
     constraint: Expr
     interrupts: EventReaction
     annotation: ODEAnnotation
+    continuation: Process
     # 局部时钟按对象身份保持新鲜，但不参与 ODE 的源语法结构相等性；否则两个
     # 文字完全相同的 ODE 会仅因内部行政变量不同而比较为不等。
     local_clock: ODELocalClock = field(compare=False, init=False)
@@ -1062,6 +1104,7 @@ class ODE(Process):
         interrupts: EventReaction | None = None,
         *,
         annotation: ODEAnnotation | None = None,
+        continuation: Process | None = None,
     ):
         """规范化原始 ODE，并附加安全性质/外部时长批注与自动局部时钟。"""
 
@@ -1070,6 +1113,7 @@ class ODE(Process):
             constraint,
             interrupts,
             annotation,
+            continuation,
         )
 
     # 功能：以单一原子路径写入 ODE 全部字段，再执行构造期检查。
@@ -1081,6 +1125,7 @@ class ODE(Process):
         constraint: ExprLike,
         interrupts: EventReaction | None,
         annotation: ODEAnnotation | None,
+        continuation: Process | None,
     ) -> None:
         """原子初始化带批注和隐藏局部时钟的 ODE。"""
 
@@ -1092,6 +1137,9 @@ class ODE(Process):
             )
         if not isinstance(annotation, ODEAnnotation):
             raise TypeError("ODE annotation must be an ODEAnnotation")
+        common_tail = Skip() if continuation is None else continuation
+        if not isinstance(common_tail, Process):
+            raise TypeError("ODE continuation must be a Process node")
         object.__setattr__(self, "eqs", _normalize_equations(eqs))
         object.__setattr__(self, "constraint", ensure_expr(constraint))
         object.__setattr__(
@@ -1104,20 +1152,21 @@ class ODE(Process):
             "annotation",
             annotation,
         )
+        object.__setattr__(self, "continuation", common_tail)
         object.__setattr__(self, "local_clock", ODELocalClock())
         _validate_assumption21(self)
 
-    # 功能：收集演化左端、导数、演化域、批注和中断分支的用户值变量。
+    # 功能：收集演化左端、导数、演化域、批注、中断分支和公共后继的用户值变量。
     # 检查/论文关系：为 Gamma 和 dL 声明提供源变量域；隐藏 local_clock 具有
     #                独立局部作用域，刻意不进入返回集合。
     def get_vars(self) -> set[str]:
-        """收集方程、演化域、安全批注和事件反应中的用户值变量。"""
+        """收集方程、公式、事件反应和公共后继中的用户值变量。"""
         return set(_assumption21_info(self).value_variables)
 
-    # 功能：返回 ODE 外部事件选择中由多标量输入绑定的全部变量。
+    # 功能：返回 ODE 事件选择及公共后继中由多标量输入绑定的全部变量。
     # 检查/论文关系：连续方程本身不绑定输入变量，只有中断 E 的 T-In 会绑定。
     def get_input_bound_vars(self) -> set[str]:
-        """返回 ODE 事件反应引入的输入变量。"""
+        """返回 ODE 事件反应和公共后继引入的输入变量。"""
         return set(_assumption21_info(self).bound_value_variables)
 
 
@@ -1241,7 +1290,7 @@ def _assumption22_exit_states(
         return frozenset({True})
 
     if isinstance(node, If):
-        # 两个分支从相同入口状态出发；并集保留各自可能的出口状态。
+        # 两个分支从相同入口状态出发；每种分支出口状态随后进入公共后继。
         then_states = _assumption22_exit_states(
             node.then_branch,
             variable,
@@ -1254,7 +1303,17 @@ def _assumption22_exit_states(
             guarded,
             f"{location}.else",
         )
-        return then_states | else_states
+        result: set[bool] = set()
+        for state in sorted(then_states | else_states):
+            result.update(
+                _assumption22_exit_states(
+                    node.continuation,
+                    variable,
+                    state,
+                    f"{location}.continuation",
+                )
+            )
+        return frozenset(result)
 
     if isinstance(node, Sequence):
         # first 的每种正常出口状态都必须分别传入公共 second；因此只要存在
@@ -1305,14 +1364,21 @@ def _assumption22_exit_states(
 
     if isinstance(node, ODE):
         # 每个事件 continuation 先由自己的事件通信保护；ODE 自然结束则不
-        # 发生通信，所以外层顺序后继只能继承 ODE 的入口状态。
+        # 发生通信。公共后继既要在自然路径上继承入口状态，也要在每条已发生
+        # 通信的中断路径上以 guarded=True 检查。
         _validate_assumption22_event(
             node.interrupts,
             variable,
             guarded,
             f"{location}.interrupts",
+            common_continuation=node.continuation,
         )
-        return frozenset({guarded})
+        return _assumption22_exit_states(
+            node.continuation,
+            variable,
+            guarded,
+            f"{location}.continuation",
+        )
 
     if isinstance(node, Mu):
         # 同名内层 mu 遮蔽外层目标；不同名内层 mu 不遮蔽，仍检查其中的
@@ -1339,6 +1405,8 @@ def _validate_assumption22_event(
     variable: str | None,
     guarded: bool,
     location: str,
+    *,
+    common_continuation: Process | None = None,
 ) -> None:
     """验证每个 ODE 事件分支，不把事件出口混入 ODE 的自然结束路径。
 
@@ -1351,12 +1419,20 @@ def _validate_assumption22_event(
         return
     if isinstance(reaction, EventChoice):
         for index, (_communication, continuation) in enumerate(reaction.branches):
-            _assumption22_exit_states(
+            branch_states = _assumption22_exit_states(
                 continuation,
                 variable,
                 True,
                 f"{location}.branches[{index}].continuation",
             )
+            if common_continuation is not None:
+                for state in sorted(branch_states):
+                    _assumption22_exit_states(
+                        common_continuation,
+                        variable,
+                        state,
+                        f"{location}.branches[{index}].common_continuation",
+                    )
         return
     raise TypeError(
         "Assumption 2.2 analysis received an unsupported EventReaction: "
@@ -1616,14 +1692,18 @@ def _assumption21_info(
             output_channels=frozenset({node.channel.name}),
         )
     if isinstance(node, If):
-        # B 只贡献自由值变量；两个并列分支逐字段合并。
+        # B 只贡献自由值变量；两个并列分支合并后作为复合顺序前缀绑定公共后继。
         condition = _Assumption21Info(
             free_value_variables=frozenset(node.condition.get_vars()),
         )
-        return _merge_assumption21_info(
+        branches = _merge_assumption21_info(
             condition,
             _assumption21_info(node.then_branch),
             _assumption21_info(node.else_branch),
+        )
+        return _sequence_assumption21_info(
+            branches,
+            _assumption21_info(node.continuation),
         )
     if isinstance(node, EmptyEvent):
         return _Assumption21Info()
@@ -1647,7 +1727,7 @@ def _assumption21_info(
         )
     if isinstance(node, InternalChoice):
         # 全部分支先并列合并，之后作为一个复合顺序前缀绑定公共
-        # continuation；这与原 ``Sequence(InternalChoice(...), Q)`` 形状一致。
+        # continuation；这与表面语法中的 ``InternalChoice(...); Q`` 一致。
         branches = _merge_assumption21_info(
             *(_assumption21_info(branch) for branch in node.branches),
         )
@@ -1668,9 +1748,13 @@ def _assumption21_info(
         continuous = _Assumption21Info(
             free_value_variables=frozenset(free_value_variables),
         )
-        return _merge_assumption21_info(
+        ode_prefix = _merge_assumption21_info(
             continuous,
             _assumption21_info(node.interrupts),
+        )
+        return _sequence_assumption21_info(
+            ode_prefix,
+            _assumption21_info(node.continuation),
         )
     if isinstance(node, Mu):
         # 仅从 body 的自由进程变量中消去本次绑定名；边界不变量中的名称都是

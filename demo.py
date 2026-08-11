@@ -146,7 +146,8 @@ EXAMPLES = (
                         skip
                     }
                 )
-            )
+            );
+            skip
         }}
         """,
     ),
@@ -178,16 +179,34 @@ def _run_example(index: int, title: str, purpose: str, source: str) -> str:
             output=OUTPUT_MODE,
             keymaerax_timeout_seconds=KEYMAERAX_TIMEOUT_SECONDS,
         )
-    except HCSPInputError:
-        # result/full 模式已经输出解析诊断；这里只记录该示例失败，避免重复打印。
+    except HCSPInputError as error:
+        # result/full 已打印带插入符的诊断；这里只给出脚本层的结构化结论。
+        print(
+            "脚本结论：输入无效 "
+            f"[{error.kind}]，位置 {error.source_name}:{error.line}:{error.column}。"
+        )
         return "failed"
-    except HCSPUntrustedTypeConstructionError:
-        # 类型结构已构造完成，但 result/full 已把候选明确标为未验证、不可信。
+    except HCSPUntrustedTypeConstructionError as error:
+        # 不解析日志文本，直接读取新版异常的机器可读分类和首要规则位置。
+        print(
+            "脚本结论：类型结构已完成，但证明尚未确定 "
+            f"[{error.kind.value}]，{_error_site(error.rule, error.location)}。"
+        )
         return "untrusted"
-    except HCSPTypeConstructionError:
-        # 确定失败或无法形成完整类型；接口已经打印原因与实际部分构造过程。
+    except HCSPTypeConstructionError as error:
+        print(
+            "脚本结论：类型构造失败 "
+            f"[{error.kind.value}/{error.phase}]，"
+            f"{_error_site(error.rule, error.location)}。"
+        )
         return "failed"
     return "trusted"
+
+
+def _error_site(rule: str, location: str) -> str:
+    """把结构化异常中的规则和判断位置压缩成一段脚本结论。"""
+
+    return f"规则 {rule or '-'}，判断位置 {location or '-'}"
 
 
 def main() -> int:

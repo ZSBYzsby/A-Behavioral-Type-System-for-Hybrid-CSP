@@ -8,6 +8,7 @@
 3. 输入、输出参数数量必须与 ``Theta(ch)`` 的槽位元数完全一致；
 4. 每个槽位独立报告类型错误，不把整组通信载荷当作 TupleType；
 5. 并行的一入一出共享同一多槽签名，但行为类型仍只记录一次 ch?/ch!。
+6. 已声明输入目标只接受其可容纳的通道槽位类型，不允许把 Real 写入 Int。
 
 论文对应
 --------
@@ -165,6 +166,41 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         messages = tuple(item.message for item in report.diagnostics)
         self.assertTrue(any("slot 1 expects Int, got Bool" in text for text in messages))
         self.assertTrue(any("slot 2 expects Bool, got Nat" in text for text in messages))
+
+    # 测试输入：分别把 Real 通道输入 Int 变量，以及把 Int 通道输入 Real 变量。
+    # 预期行为：前者因可能丢失非整数值而失败；后者按数值子类型提升成功。
+    # 检查内容：锁定 T-In 的唯一安全方向是 channel slot type <: target type。
+    # 论文对应：输入动作把通道本次携带的 B 类型值写入目标变量，目标声明必须
+    #           能容纳 B 的全部取值，不能仅因两个数值类型可比较便双向接受。
+    def test_existing_input_target_uses_safe_subtype_direction(self) -> None:
+        """已声明目标只能接收其自身类型能够容纳的通道值。"""
+
+        unsafe = construct_type(
+            gamma={"x": BasicType.INT},
+            theta={"ch": ChannelType(BasicType.REAL)},
+            configurations=[Configuration({}, InputChannel("ch", "x"))],
+        )
+        safe = construct_type(
+            gamma={"x": BasicType.REAL},
+            theta={"ch": ChannelType(BasicType.INT)},
+            configurations=[Configuration({}, InputChannel("ch", "x"))],
+        )
+
+        self.assertEqual(unsafe.verdict, Verdict.FALSE)
+        self.assertIsNone(unsafe.constructed_type)
+        self.assertTrue(
+            any(
+                "has type Int, channel slot carries Real" in item.message
+                for item in unsafe.diagnostics
+            )
+        )
+        self.assertEqual(safe.verdict, Verdict.TRUE)
+        self.assertTrue(
+            types_equivalent(
+                safe.constructed_type,
+                InfiniteDelayType(InputType("ch", EmptyType())),
+            )
+        )
 
     # 测试输入：同一 pair 通道上的 pair?(x,y) 与 pair!(1,2) 并行。
     # 预期行为：共享二槽 Theta 签名后整体 true，类型为一个输入和一个输出分量。

@@ -27,7 +27,7 @@ from enum import Enum
 import sys
 from typing import Any, TextIO, TypeAlias
 
-from .frontend.type_constructor_frontend.errors import HCSPInputError
+from .frontend.errors import HCSPInputError
 from .frontend.type_constructor_frontend.parser import (
     parse_expression,
     parse_hcsp_source,
@@ -43,8 +43,18 @@ from .frontend.type_transition_graph_syntax import (
 from .data_structures.process_ast.ast import HCSP, Process
 from .data_structures.type_ast.ast import ConfigurationType
 from .data_structures.type_ast.render import format_type_source
-from .backend.type_constructor import TypeConstructionReport, construct_type
-from .backend.type_checker import TypeChecker, TypeCheckingRequest
+from .backend.type_constructor import (
+    TypeConstructionErrorKind,
+    TypeConstructionReport,
+    classify_construction_error,
+    construct_type,
+)
+from .backend.type_checker import (
+    TypeChecker,
+    TypeCheckingErrorKind,
+    TypeCheckingRequest,
+    classify_checking_error,
+)
 from .backend.type_operational_semantics import (
     build_type_transition_graph as _build_type_transition_graph,
 )
@@ -69,6 +79,20 @@ class OutputMode(str, Enum):
     NONE = "none"
     RESULT = "result"
     FULL = "full"
+
+
+@dataclass(frozen=True, slots=True)
+class HCSPErrorDetail:
+    """一条可由程序读取、也可直接展示给用户的错误证据。"""
+
+    category: str
+    verdict: str
+    message: str
+    rule: str = ""
+    location: str = ""
+    proof_kind: str = ""
+    formula: str = ""
+    backend_detail: str = ""
 
 
 def _normalize_output_mode(value: OutputMode | str) -> OutputMode:
@@ -214,6 +238,125 @@ def _first_report_reason(report: TypeConstructionReport) -> str:
     return "TypeConstructor 没有生成可信的正式 Type AST"
 
 
+_ENVIRONMENT_RULES = frozenset({"environment", "parameters"})
+
+
+def _report_error_details(
+    report: TypeConstructionReport,
+    *,
+    mismatch: str = "",
+    rule_category: str = "derivation",
+) -> tuple[HCSPErrorDetail, ...]:
+    """把诊断和未通过证明义务转换为稳定的公共错误明细。"""
+
+    details: list[HCSPErrorDetail] = []
+    for diagnostic in report.diagnostics:
+        if diagnostic.verdict is Verdict.TRUE:
+            continue
+        if diagnostic.rule in _ENVIRONMENT_RULES:
+            category = "environment"
+        elif mismatch and diagnostic.message == mismatch:
+            category = "type-mismatch"
+        else:
+            category = rule_category
+        details.append(
+            HCSPErrorDetail(
+                category=category,
+                verdict=diagnostic.verdict.value,
+                message=diagnostic.message,
+                rule=diagnostic.rule,
+                location=diagnostic.location,
+            )
+        )
+    for obligation in report.obligations:
+        if not obligation.active or obligation.verdict is Verdict.TRUE:
+            continue
+        details.append(
+            HCSPErrorDetail(
+                category=(
+                    "proof-failed"
+                    if obligation.verdict is Verdict.FALSE
+                    else "proof-unknown"
+                ),
+                verdict=obligation.verdict.value,
+                message=obligation.description,
+                rule=obligation.rule,
+                location=obligation.location,
+                proof_kind=obligation.kind,
+                formula=str(
+                    obligation.formula
+                    if obligation.proof_formula is None
+                    else obligation.proof_formula
+                ),
+                backend_detail=obligation.detail,
+            )
+        )
+    return tuple(details)
+
+
+def _primary_error_detail(
+    details: tuple[HCSPErrorDetail, ...],
+    category: str,
+    fallback: str,
+) -> HCSPErrorDetail:
+    """选择与总体失败类别一致的首要证据，避免摘要和 verdict 错位。"""
+
+    for detail in details:
+        if detail.category == category:
+            return detail
+    if details:
+        return details[0]
+    return HCSPErrorDetail(category, "false", fallback)
+
+
+def _error_phase(category: str) -> str:
+    """把细分类别归并成用户可读的处理阶段。"""
+
+    if category == "environment":
+        return "environment"
+    if category.startswith("proof-"):
+        return "proof"
+    if category == "type-mismatch":
+        return "type-matching"
+    return "rule-derivation"
+
+
+def _error_category_explanation(category: str) -> str:
+    """返回每个稳定错误类别对应的简明中文含义。"""
+
+    return {
+        "environment": "Gamma、Theta、共享参数或路径条件不满足良构要求",
+        "derivation": "Table 2 规则无法为当前 Process 形成完整类型结论",
+        "type-mismatch": "用户给定 Type 的当前结构与规则结论不一致",
+        "rule-application": "当前 Process 或运行上下文不满足规则的静态前提",
+        "proof-failed": "必要证明公式已被证明器否证或发现反例",
+        "proof-unknown": "必要证明公式尚未被可信证明器判定",
+    }.get(category, "处理过程未能得到可信结论")
+
+
+def _render_primary_detail(detail: HCSPErrorDetail) -> tuple[str, ...]:
+    """渲染 result 日志中的规则、位置和证明器说明。"""
+
+    lines = [f"原因     : {detail.message}"]
+    if detail.rule:
+        lines.append(f"相关规则 : {detail.rule}")
+    if detail.location:
+        lines.append(f"判断位置 : {detail.location}")
+    if detail.proof_kind:
+        lines.append(f"证明类别 : {detail.proof_kind.upper()}")
+    if detail.backend_detail:
+        lines.append(f"证明器说明: {detail.backend_detail}")
+    return tuple(lines)
+
+
+def _detail_reason(detail: HCSPErrorDetail) -> str:
+    """返回兼容旧 ``reason`` 字段且同时保留证明器解释的单行原因。"""
+
+    if detail.backend_detail:
+        return f"{detail.message}: {detail.backend_detail}"
+    return detail.message
+
+
 def _format_partial_types(report: TypeConstructionReport) -> str:
     """把停止前已经正式形成的分量类型显示为一行。"""
 
@@ -262,7 +405,12 @@ def _format_partial_progress(
     return tuple(lines)
 
 
-def _format_type_result(report: TypeConstructionReport) -> str:
+def _format_type_result(
+    report: TypeConstructionReport,
+    *,
+    failure_kind: TypeConstructionErrorKind | None = None,
+    primary_detail: HCSPErrorDetail | None = None,
+) -> str:
     """把内部类型构造报告渲染成稳定的单入口结果摘要。"""
 
     constructed_type = report.constructed_type
@@ -309,6 +457,15 @@ def _format_type_result(report: TypeConstructionReport) -> str:
         f"证明状态 : {proof_status}",
         f"类型可信性 : {trust_status}",
     ]
+    if failure_kind is not None:
+        lines.extend(
+            (
+                f"错误类别 : {failure_kind.value}",
+                f"错误阶段 : {_error_phase(failure_kind.value)}",
+                "类别说明 : "
+                + _error_category_explanation(failure_kind.value),
+            )
+        )
     if is_untrusted:
         lines.extend(
             (
@@ -317,7 +474,6 @@ def _format_type_result(report: TypeConstructionReport) -> str:
                 "处理结果 : 候选类型仅通过异常的 untrusted_type 属性提供，"
                 "未作为可信 Type AST 返回",
                 f"证明义务 : {proof_summary}",
-                f"未验证原因 : {_first_report_reason(report)}",
             )
         )
     elif constructed_type is not None and report.verdict is Verdict.TRUE:
@@ -328,28 +484,33 @@ def _format_type_result(report: TypeConstructionReport) -> str:
                 "完整候选 Type 源码 : "
                 + format_type_source(constructed_type),
                 "处理结果 : 候选类型没有作为可信 Type AST 返回",
-                f"原因     : {_first_report_reason(report)}",
             )
         )
     else:
         lines.append("Type 源码 : (none)")
-        lines.append(f"原因     : {_first_report_reason(report)}")
         lines.extend(_format_partial_progress(report))
+    if primary_detail is not None:
+        lines.extend(_render_primary_detail(primary_detail))
     return "\n".join(lines)
 
 
-def _format_input_error_result(error: HCSPInputError) -> str:
-    """把解析错误显示成不含内部 AST 的紧凑结果。"""
+def _format_input_error_result(
+    error: HCSPInputError,
+    *,
+    operation: str,
+) -> str:
+    """把解析错误显示成带业务名称和机器可读分类的紧凑结果。"""
 
     return "\n".join(
         (
-            "=== HCSP 类型构造结果 ===",
+            f"=== HCSP {operation}输入错误 ===",
             "Verdict : input-error",
-            "Type AST 生成 : 失败",
-            "Type 源码 : (none)",
+            "结果     : 失败",
+            f"错误类别 : input-{error.phase}",
+            "错误阶段 : input",
             f"原因     : {error.message}",
             f"位置     : {error.source_name}:{error.line}:{error.column}",
-            "构造进度 : 未启动（输入解析阶段已终止）",
+            f"{operation}进度 : 未启动（输入解析阶段已终止）",
         )
     )
 
@@ -358,13 +519,18 @@ def _format_input_error_full(
     source: Any,
     source_name: str,
     error: HCSPInputError,
+    *,
+    operation: str,
 ) -> str:
-    """显示原始输入、精确定位和“构造未启动”的完整解析失败日志。"""
+    """显示原始输入、精确定位和后端未启动的完整解析失败日志。"""
 
     return "\n".join(
         (
-            "=== HCSP 类型构造完整日志 ===",
+            f"=== HCSP {operation}完整错误日志 ===",
             f"来源 : {source_name}",
+            "Verdict : input-error",
+            f"错误类别 : input-{error.phase}",
+            "错误阶段 : input",
             "",
             "--- 原始用户输入 ---",
             source if isinstance(source, str) else repr(source),
@@ -372,8 +538,8 @@ def _format_input_error_full(
             "--- 输入解析失败 ---",
             error.format_diagnostic(),
             "",
-            "--- 类型构造 ---",
-            "未启动：输入尚未形成合法的内部 Process AST 与环境。",
+            f"--- {operation} ---",
+            "未启动：输入尚未形成合法的内部 AST 与环境。",
         )
     )
 
@@ -382,9 +548,10 @@ class HCSPTypeConstructionError(RuntimeError):
     """TypeConstructor 未能得到可信 Type AST 时抛出的公共异常。
 
     ``verdict`` 是 ``false`` 或 ``unknown``；``reason`` 给出首要失败原因；
-    ``partial_types`` 保留各配置已经形成的分量类型。``format_full()`` 可用于
-    在捕获异常后再次读取全部规则、FOL/dL 公式和证明器证据。内部 Process AST
-    与内部构造报告没有公共属性。
+    ``kind/phase/rule/location`` 给出机器可读分类与首要位置；``details`` 保存
+    全部有效错误证据；``partial_types`` 保留各配置已经形成的分量类型。
+    ``format_full()`` 可用于在捕获异常后再次读取全部规则、FOL/dL 公式和证明器
+    证据。内部 Process AST 与内部构造报告没有公共属性。
     """
 
     def __init__(
@@ -397,7 +564,17 @@ class HCSPTypeConstructionError(RuntimeError):
         self.source_name = context.source_name
         self.verdict = report.verdict.value
         self.partial_types = report.constructed_component_types
-        self.reason = _first_report_reason(report)
+        self.kind = classify_construction_error(report)
+        self.phase = _error_phase(self.kind.value)
+        self.details = _report_error_details(report)
+        self.primary_detail = _primary_error_detail(
+            self.details,
+            self.kind.value,
+            _first_report_reason(report),
+        )
+        self.reason = _detail_reason(self.primary_detail)
+        self.rule = self.primary_detail.rule
+        self.location = self.primary_detail.location
         self._context = context
         self._report = report
         super().__init__(self.format_result())
@@ -405,13 +582,23 @@ class HCSPTypeConstructionError(RuntimeError):
     def format_result(self) -> str:
         """返回失败原因、部分类型和停止进度的紧凑文本。"""
 
-        return _format_type_result(self._report)
+        return _format_type_result(
+            self._report,
+            failure_kind=self.kind,
+            primary_detail=self.primary_detail,
+        )
 
     def format_full(self) -> str:
         """返回原始输入及停止点以前的完整类型构造审计日志。"""
 
+        result_lines = self.format_result().splitlines()
         return "\n\n".join(
-            (self._context.format_full(), self._report.format_detailed())
+            (
+                self._context.format_full(),
+                self._report.format_detailed(),
+                "=== 类型构造失败摘要 ===\n"
+                + "\n".join(result_lines[1:]),
+            )
         )
 
 
@@ -445,7 +632,11 @@ class HCSPUntrustedTypeConstructionError(HCSPTypeConstructionError):
 
 
 class HCSPTypeCheckingError(RuntimeError):
-    """用户给定 Type 未能被 HCSP 的 Table 2 规则验证时抛出的公共异常。"""
+    """用户给定 Type 未被 Table 2 规则验证时抛出的结构化公共异常。
+
+    ``kind`` 和 ``phase`` 可供程序区分环境错误、Type 结构不匹配、规则应用
+    错误、证明反例与证明未决；``details`` 保留所有参与最终结论的错误证据。
+    """
 
     def __init__(
         self,
@@ -460,23 +651,54 @@ class HCSPTypeCheckingError(RuntimeError):
         self._report = report
         self.verdict = report.verdict.value
         self.expected_type = report.expected_type
-        self.reason = report.mismatch or _first_report_reason(
-            report.evidence
+        self.kind = classify_checking_error(report)
+        self.phase = _error_phase(self.kind.value)
+        self.details = _report_error_details(
+            report.evidence,
+            mismatch=report.mismatch,
+            rule_category="rule-application",
+        )
+        self.primary_detail = _primary_error_detail(
+            self.details,
+            self.kind.value,
+            report.mismatch
+            or report.failure_reason
+            or _first_report_reason(report.evidence),
+        )
+        self.reason = _detail_reason(self.primary_detail)
+        self.rule = self.primary_detail.rule
+        self.location = self.primary_detail.location
+        self.type_mismatch_detected = bool(report.mismatch)
+        self.type_structure_matched: bool | None = (
+            False
+            if report.mismatch
+            else True
+            if report.evidence.constructed_type is not None
+            else None
         )
         super().__init__(self.format_result())
 
     def format_result(self) -> str:
         """渲染给定 Type、检查结论及其首要失败原因。"""
 
-        return "\n".join(
-            (
-                "=== HCSP 类型检查结果 ===",
-                f"Verdict : {self.verdict}",
-                "给定 Type 源码 : "
-                + format_type_source(self.expected_type),
-                f"原因     : {self.reason}",
-            )
-        )
+        if self.kind is TypeCheckingErrorKind.ENVIRONMENT:
+            structure_status = "未启动（环境无效）"
+        elif self.kind is TypeCheckingErrorKind.TYPE_MISMATCH:
+            structure_status = "不匹配"
+        else:
+            structure_status = "已按规则检查，最终结论未通过"
+        lines = [
+            "=== HCSP 类型检查结果 ===",
+            f"Verdict : {self.verdict}",
+            "检查结论 : 失败",
+            f"错误类别 : {self.kind.value}",
+            f"错误阶段 : {self.phase}",
+            "类别说明 : " + _error_category_explanation(self.kind.value),
+            f"Type 结构 : {structure_status}",
+            "给定 Type 源码 : " + format_type_source(self.expected_type),
+        ]
+        lines.extend(_render_primary_detail(self.primary_detail))
+        return "\n".join(lines)
 
     def format_full(self) -> str:
         """渲染用户 Type 与 Table 2 规则、证明义务的完整审计记录。"""
@@ -487,10 +709,12 @@ class HCSPTypeCheckingError(RuntimeError):
         ]
         if self._source_text:
             sections.append("--- 原始用户输入 ---\n" + self._source_text)
+        result_lines = self.format_result().splitlines()
         sections.extend(
             (
                 self._report.format_detailed(),
-                "=== Type 匹配结论 ===\n" + self.reason,
+                "=== Type 检查失败摘要 ===\n"
+                + "\n".join(result_lines[1:]),
             )
         )
         return "\n\n".join(sections)
@@ -594,9 +818,17 @@ def construct_hcsp_type(
     except HCSPInputError as error:
         if mode is not OutputMode.NONE:
             rendered = (
-                _format_input_error_full(source, source_name, error)
+                _format_input_error_full(
+                    source,
+                    source_name,
+                    error,
+                    operation="类型构造",
+                )
                 if mode is OutputMode.FULL
-                else _format_input_error_result(error)
+                else _format_input_error_result(
+                    error,
+                    operation="类型构造",
+                )
             )
             _write_output(rendered, stream)
         raise
@@ -615,6 +847,9 @@ def construct_hcsp_type(
                         "\n".join(
                             (
                                 "=== 路径条件解析失败 ===",
+                                "Verdict : input-error",
+                                f"错误类别 : {error.kind}",
+                                "错误阶段 : input",
                                 error.format_diagnostic(),
                                 "",
                                 "类型构造未启动。",
@@ -623,7 +858,10 @@ def construct_hcsp_type(
                     )
                 )
                 if mode is OutputMode.FULL
-                else _format_input_error_result(error)
+                else _format_input_error_result(
+                    error,
+                    operation="类型构造",
+                )
             )
             _write_output(rendered, stream)
         raise
@@ -716,7 +954,19 @@ def check_hcsp_type(
     except HCSPInputError as error:
         if mode is not OutputMode.NONE:
             _write_output(
-                _format_input_error_result(error),
+                (
+                    _format_input_error_full(
+                        source,
+                        source_name,
+                        error,
+                        operation="类型检查",
+                    )
+                    if mode is OutputMode.FULL
+                    else _format_input_error_result(
+                        error,
+                        operation="类型检查",
+                    )
+                ),
                 stream,
             )
         raise
@@ -726,7 +976,19 @@ def check_hcsp_type(
     except HCSPInputError as error:
         if mode is not OutputMode.NONE:
             _write_output(
-                _format_input_error_result(error),
+                (
+                    _format_input_error_full(
+                        source,
+                        source_name,
+                        error,
+                        operation="类型检查",
+                    )
+                    if mode is OutputMode.FULL
+                    else _format_input_error_result(
+                        error,
+                        operation="类型检查",
+                    )
+                ),
                 stream,
             )
         raise
@@ -839,12 +1101,15 @@ def build_type_transition_graph(
 
 
 __all__ = [
+    "HCSPErrorDetail",
     "HCSPInputError",
     "HCSPTypeConstructionError",
     "HCSPTypeCheckingError",
     "HCSPUntrustedTypeConstructionError",
     "OutputMode",
     "TypeAST",
+    "TypeCheckingErrorKind",
+    "TypeConstructionErrorKind",
     "TypeTransitionGraph",
     "build_type_transition_graph",
     "construct_hcsp_type",

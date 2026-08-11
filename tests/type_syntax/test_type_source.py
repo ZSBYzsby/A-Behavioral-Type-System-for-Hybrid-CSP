@@ -18,7 +18,7 @@ import unittest
 from fractions import Fraction
 from textwrap import dedent
 
-from hcsp_typechecker.frontend.type_constructor_frontend.errors import (
+from hcsp_typechecker.frontend.errors import (
     HCSPInputError,
 )
 from hcsp_typechecker.frontend.type_syntax import (
@@ -208,16 +208,25 @@ class TypeSourceDiagnosticsTests(unittest.TestCase):
         self.assertIn("must be parenthesized", str(caught.exception))
         self.assertEqual(caught.exception.phase, "syntax")
 
-    # 测试输入：有限 delay 使用 bottom 作为自然到时后继。
-    # 预期行为：由 FiniteDelayType 局部构造检查拒绝。
-    # 检查内容：bottom 不会被误当作有限时延的正常终止。
-    # 论文对应：有限 delay 的自然后继是 T；项目的 BottomType 不代表正常空行为。
-    def test_finite_delay_rejects_bottom_continuation(self) -> None:
-        """有限时延后继不得写成 BottomType。"""
+    # 测试输入：有限 delay 分别使用 bottom 与 empty 作为自然后继。
+    # 预期行为：两者均可解析、可逆输出，并保持为不同 Type AST。
+    # 检查内容：用户可以明确书写不可达 deadline 或可达空行为。
+    # 论文对应：T-unrhd 使用 bottom；T-unrhd-prime 的空后继使用 empty。
+    def test_finite_delay_preserves_bottom_and_empty_continuations(self) -> None:
+        """有限时延必须无损区分 BottomType 与 EmptyType。"""
 
-        with self.assertRaises(HCSPInputError) as caught:
-            parse_type_source("type delay(1) then bottom")
-        self.assertEqual(caught.exception.phase, "validation")
+        bottom = parse_type_source("type delay(1) then bottom")
+        empty = parse_type_source("type delay(1) then empty")
+        self.assertEqual(
+            bottom,
+            FiniteDelayType(1, NoInterruptType(), BottomType()),
+        )
+        self.assertEqual(
+            empty,
+            FiniteDelayType(1, NoInterruptType(), EmptyType()),
+        )
+        self.assertNotEqual(bottom, empty)
+        self.assertEqual(parse_type_source(format_type_source(bottom)), bottom)
 
     # 测试输入：缺少 delay 的 then 分隔符以及带尾逗号的 angelic 分支表。
     # 预期行为：两个输入均在具体语法阶段报错且保持源码行列信息。

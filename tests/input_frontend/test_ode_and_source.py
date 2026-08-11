@@ -3,7 +3,7 @@
 测试内容
 --------
 1. 必填 flow/domain/delay、可选 safety/interrupt 及其缺省 AST。
-2. dot 方程、精确有理/无穷 delay、事件反应和 ODE 局部时钟作用域。
+2. dot 方程、精确有理/无穷 delay、事件反应、ODE 自持后继和局部时钟作用域。
 3. ODE clause、方程、时延和 interrupt 的语法/良构负例。
 4. 单块源到 Process、多块源到规范 Parallel 的转换及资源分离诊断。
 
@@ -31,7 +31,6 @@ from hcsp_typechecker._internal import (
     ODEAnnotation,
     OutputChannel,
     Parallel,
-    Sequence,
     Skip,
     UnaryExpr,
     Variable,
@@ -51,7 +50,7 @@ class ODEInputTests(unittest.TestCase):
 
         source = (
             "{{ode(flow(dot x = v, dot v = -x), "
-            "domain(t <= 1), delay(1))}}"
+            "domain(t <= 1), delay(1)); skip}}"
         )
         expected = ODE(
             (
@@ -61,6 +60,7 @@ class ODEInputTests(unittest.TestCase):
             CompareExpr((Variable("t"), Literal(1)), ("<=",)),
             EmptyEvent(),
             annotation=ODEAnnotation(safety=True, delay=1),
+            continuation=Skip(),
         )
         self.assertEqual(parse_hcsp(source), expected)
 
@@ -81,7 +81,8 @@ class ODEInputTests(unittest.TestCase):
                     on reset?(new_x) {x := new_x},
                     on report!(x) {skip}
                 )
-            )
+            );
+            skip
         }}"""
         interrupts = EventChoice.of(
             (InputChannel("reset", "new_x"), Assign("x", "new_x")),
@@ -95,6 +96,7 @@ class ODEInputTests(unittest.TestCase):
                 safety=CompareExpr((Variable("x"), Literal(2)), ("<=",)),
                 delay=Fraction(1, 2),
             ),
+            continuation=Skip(),
         )
         self.assertEqual(parse_hcsp(source), expected)
 
@@ -106,15 +108,20 @@ class ODEInputTests(unittest.TestCase):
         """空 flow 与两类合法时延都应被精确保存。"""
 
         finite = parse_hcsp(
-            "{{ode(flow(), domain(true), delay(1 / 2 + 1 / 4))}}"
+            "{{ode(flow(), domain(true), delay(1 / 2 + 1 / 4)); skip}}"
         )
-        infinite = parse_hcsp("{{ode(flow(), domain(true), delay(inf))}}")
+        infinite = parse_hcsp(
+            "{{ode(flow(), domain(true), delay(inf)); skip}}"
+        )
         self.assertIsInstance(finite, ODE)
         self.assertIsInstance(infinite, ODE)
         assert isinstance(finite, ODE)
         assert isinstance(infinite, ODE)
         self.assertEqual(finite.eqs, ())
-        self.assertEqual(finite.annotation.delay, Literal(Fraction(3, 4)))
+        self.assertEqual(
+            finite.annotation.delay,
+            Literal(Fraction(3, 4)),
+        )
         self.assertEqual(infinite.annotation.delay, inf)
 
     # 测试输入：两个相同 ODE，以及事件 continuation 单独读取 t 的 ODE。
@@ -125,7 +132,8 @@ class ODEInputTests(unittest.TestCase):
         """每个 ODE 的 t 应新鲜，且不捕获事件后继中的同名变量。"""
 
         source = (
-            "{{ode(flow(dot x = t), domain(t <= 1), safety(t <= 1), delay(1))}}"
+            "{{ode(flow(dot x = t), domain(t <= 1), safety(t <= 1), "
+            "delay(1)); skip}}"
         )
         first = parse_hcsp(source)
         second = parse_hcsp(source)
@@ -139,7 +147,7 @@ class ODEInputTests(unittest.TestCase):
 
         event_source = (
             "{{ode(flow(dot x = 0), domain(t <= 1), delay(1), "
-            "interrupt(on report!(0) {use!(t)}))}}"
+            "interrupt(on report!(0) {use!(t)})); skip}}"
         )
         event_ode = parse_hcsp(event_source)
         self.assertIsInstance(event_ode, ODE)
@@ -154,6 +162,10 @@ class ODEInputTests(unittest.TestCase):
         """ODE 必填字段、顺序、非空中断和方程左端必须严格检查。"""
 
         cases = (
+            (
+                "{{ode(flow(), domain(true), delay(1))}}",
+                "validation",
+            ),
             ("{{ode(domain(true), delay(1))}}", "syntax"),
             ("{{ode(flow(), delay(1))}}", "syntax"),
             ("{{ode(flow(), domain(true))}}", "syntax"),

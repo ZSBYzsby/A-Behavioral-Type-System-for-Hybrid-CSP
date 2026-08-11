@@ -339,10 +339,11 @@ ChannelType(
   完整类型判断提供的共享只读参数。
 - `ContinuousType` 的声明名没有标量值，不能作为 refinement 表达式中的变量。
 - refinement 最终必须具有 `Bool` 类型。统一解析器只负责把语法合法的内容保存为
-  `Expr`；未绑定名称、类型错误和表达式未定义条件在通道实际参与 T-In/T-Out 时
-  由 TypeConstructor 中的表达式静态类型检查和证明检查处理。当前实现不会主动
-  遍历验证未使用通道的 refinement，因此
-  “source 解析成功”本身不代表整个 Theta 已完成语义检查。
+  `Expr`；TypeConstructor/TypeChecker 在准备完整判断环境时会遍历所有 Theta 项，
+  检查每个 refinement 的 binder、自由名称和 `Bool` 类型，即使对应通道没有出现在
+  Process 中也不会跳过。表达式有定义条件以及代入实际通信值后的公式证明仍由
+  T-In/T-Out 处理。因此，“source 解析成功”只代表 concrete syntax 正确；进入
+  后端环境准备并成功后，才代表整个 Theta 已完成静态语义检查。
 
 ### 5.4 Theta 的结构检查
 

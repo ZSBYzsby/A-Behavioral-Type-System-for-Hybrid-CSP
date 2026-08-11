@@ -15,9 +15,10 @@ TypeConstructor 使用的核心数据流如下：
    ``ProofObligation`` 立即追加到审计记录。``false`` 会否证当前规则并终止
    该分支；``unknown`` 只表示证明尚未完成，推导会继续构造候选类型，最终
    报告则保留 ``unknown``，明确说明所得类型尚不可信。
-3. ODE 根据源码形状确定性地选择规则：没有顺序后继时采用纯通信中断规则，
-   有有限时延后继时采用自然超时规则，无穷时延则没有可达的超时后继。规则
-   产生的 safety、domain 或 boundary 前提仍按源码顺序立即交给证明器。
+3. 用户必须为 ODE 显式书写顺序后继。``ODE;skip`` 隔离试用纯通信规则与
+   自然超时规则，并依据当场证明结果选择；有限非 ``skip`` 后继确定使用自然
+   超时规则，无穷时延没有可达的 timeout。各候选产生的 safety、domain 或
+   boundary 前提仍按推导顺序立即交给证明器。
 
 这不是把 Python 的递归调用直接当作论文推导树。每条 ``rule_t_*`` 规则只分析
 横线下方的结论 judgment，并显式返回横线上方的 premises；统一求解器按顺序
@@ -32,7 +33,8 @@ Table 2 的 T-\sqcup 在项目的规范多元 Process AST 上写成以下带公�
 
 该规则直接匹配 ``InternalChoice(P_1, ..., P_n, continuation=Q)``。省略公共
 后继时 Q 缺省为 ``Skip()``。规则把同一 Q 分别加到每个子 judgment，但运行时仍
-只会执行被选中的一条分支；这也不需要定义
+只会执行被选中的一条分支；尾递归检查会忽略这个不产生行为的缺省 ``skip``，
+不会把分支末尾的 ``X`` 误判成 ``X;Q`` 的非尾调用。这也不需要定义
 通用的类型级 T-Seq。
 
 共享规则引擎只接受 :mod:`hcsp_typechecker.data_structures.process_ast.ast` 中定义的节点，并使用明确的
@@ -41,7 +43,7 @@ Table 2 的 T-\sqcup 在项目的规范多元 Process AST 上写成以下带公�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from math import inf
 from typing import Any, Callable, Mapping, Sequence
@@ -93,6 +95,7 @@ from ...data_structures.type_ast.ast import (
     AngelicType,
     ConfigurationType,
     EmptyType,
+    BottomType,
     ExternalChoiceType,
     FiniteDelayType,
     InfiniteDelayType,
@@ -106,6 +109,7 @@ from ...data_structures.type_ast.ast import (
     TypeVar,
     make_external_choice,
     make_delay_type,
+    types_equivalent,
 )
 from ...data_structures.type_ast.render import (
     format_angelic_type,
@@ -118,10 +122,14 @@ from ...data_structures.runtime_context import (
     Configuration,
     ContinuousType,
     GammaType,
+    ParameterEnvironment,
     gamma_value_type,
     is_subtype,
+    normalize_channel_type,
     normalize_gamma_type,
+    normalize_type,
 )
+from .environment import PreparedTypingEnvironment
 from .model import (
     DLChecker,
     DLCheckResult,
@@ -232,6 +240,13 @@ class _ODEPostAssumption(str, Enum):
     NOT_DOMAIN_AND_SAFETY = "not-domain-and-safety"
 
 
+class _ODETypeRule(str, Enum):
+    """显式 ``ODE; skip`` 可能表示的两条 Table 2 规则。"""
+
+    COMMUNICATION_ONLY = "communication-only"
+    NATURAL_TIMEOUT = "natural-timeout"
+
+
 @dataclass(frozen=True, slots=True)
 class _ProofRequest:
     """一条将在当前推导位置立即判定的 Table 2 公式前提。
@@ -273,9 +288,9 @@ class _SystemJudgment:
 class _ProcessJudgment:
     r"""判断规范化顺序节点列表及 terminal continuation 的过程类型。
 
-    ``nodes[0]`` 是当前规则的进程头，``nodes[1:]`` 是普通 Sequence 的后继。
-    ``InternalChoice`` 的公共后继不放在 nodes tail，而是直接保存在节点的
-    ``continuation`` 字段中，由 T-\sqcup 分别交给两个分支子 judgment。
+    ``nodes[0]`` 是当前规则的进程头，``nodes[1:]`` 只保存上层规则临时附加的
+    推导尾部。规范 Process AST 中 If、InternalChoice 和 ODE 的源码公共后继
+    均保存在节点自己的 ``continuation`` 字段中。
     """
 
     nodes: tuple[Process, ...]
@@ -355,6 +370,18 @@ _ProcessConstructionResult = ProcessType | _ConstructionFailure
 _ConfigurationConstructionResult = ConfigurationType | _ConstructionFailure
 
 
+@dataclass(frozen=True, slots=True)
+class _ODECandidateAttempt:
+    """一次隔离 ODE 规则试推的结果及其尚未提交的审计证据。"""
+
+    mode: _ODETypeRule
+    result: _ProcessConstructionResult
+    verdict: Verdict
+    obligations: tuple[ProofObligation, ...]
+    diagnostics: tuple[Diagnostic, ...]
+    steps: tuple[DerivationStep, ...]
+
+
 class Table2RuleEngine:
     """封装 Constructor 与 Checker 共用的规则展开、符号执行和证明操作。
 
@@ -393,6 +420,168 @@ class Table2RuleEngine:
         self._fresh_counter = 0
         self._type_var_counter = 0
 
+    def _prepare_typing_environment(
+        self,
+        *,
+        gamma_source: Mapping[str, GammaType],
+        theta_source: Mapping[str, ChannelType | Any],
+        parameter_environment: ParameterEnvironment,
+        path_condition: Any,
+    ) -> PreparedTypingEnvironment | None:
+        """统一规范化并验证两个业务后端共享的类型环境。
+
+        该阶段只处理与“构造 Type”或“检查给定 Type”无关的公共前提：名称和
+        类型规范化、ContinuousType 良构性、Theta refinement 静态类型、参数
+        与 Gamma 不交、参数约束有定义且可满足。明确不可满足时返回 ``None``；
+        Z3 仅返回 ``unknown`` 时保留诊断并继续，使两个业务后端采用完全相同的
+        不可信结论语义。
+        """
+
+        try:
+            invalid_gamma_names = {
+                repr(name)
+                for name in gamma_source
+                if not is_hcsp_identifier(name)
+            }
+            if invalid_gamma_names:
+                raise ValueError(
+                    "Invalid Gamma names: "
+                    + ", ".join(sorted(invalid_gamma_names))
+                )
+            gamma = {
+                name: normalize_gamma_type(value, subject="Gamma entry")
+                for name, value in gamma_source.items()
+            }
+            self._validate_continuous_vectors(gamma)
+
+            invalid_parameter_names = {
+                repr(name)
+                for name in parameter_environment.declarations
+                if not is_hcsp_identifier(name)
+            }
+            if invalid_parameter_names:
+                raise ValueError(
+                    "Invalid parameter names: "
+                    + ", ".join(sorted(invalid_parameter_names))
+                )
+            parameters = {
+                name: normalize_type(value, subject="Parameter declaration")
+                for name, value in parameter_environment.declarations.items()
+            }
+            overlap = set(gamma) & set(parameters)
+            if overlap:
+                raise ValueError(
+                    "Gamma and the shared parameter environment overlap: "
+                    + ", ".join(sorted(overlap))
+                )
+            theta = {
+                self._channel_name(name): normalize_channel_type(value)
+                for name, value in theta_source.items()
+            }
+        except (TypeError, ValueError) as exc:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Invalid typing environment: {exc}",
+                "environment",
+            )
+            return None
+
+        try:
+            self._validate_theta_refinements(gamma, theta, parameters)
+        except ExpressionError as exc:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Invalid Theta environment: {exc}",
+                "environment",
+            )
+            return None
+
+        parameter_symbols: dict[str, Any] = {}
+        translator = ExpressionTranslator(
+            parameters,
+            parameter_symbols,
+            name_prefix="parameter__",
+        )
+        try:
+            for name, value_type in parameters.items():
+                translator.symbol(name, value_type)
+            constraint_result = translator.boolean_result(
+                parameter_environment.constraint
+            )
+            parameter_condition = conjunction(
+                self._defined_term(constraint_result),
+                *(
+                    domain_constraint
+                    for name, value_type in parameters.items()
+                    for domain_constraint in self._type_domain_constraints(
+                        value_type,
+                        parameter_symbols[name],
+                    )
+                ),
+            )
+        except ExpressionError as exc:
+            self._diagnose(
+                Verdict.FALSE,
+                f"Invalid shared parameter constraint: {exc}",
+                "parameters",
+            )
+            return None
+
+        parameter_verdict, detail = self.proof_engine.satisfiable(
+            parameter_condition
+        )
+        if parameter_verdict is Verdict.FALSE:
+            self._diagnose(
+                Verdict.FALSE,
+                "Shared parameter constraint must be satisfiable: " + detail,
+                "parameters",
+            )
+            return None
+        if parameter_verdict is Verdict.UNKNOWN:
+            self._diagnose(
+                Verdict.UNKNOWN,
+                "Shared parameter constraint satisfiability is unknown; "
+                "Table 2 rule processing continues, but the resulting "
+                "conclusion is untrusted: "
+                + detail,
+                "parameters",
+            )
+
+        step = self._start_step(
+            "environment",
+            "judgment",
+            "规范化 Gamma、Theta 与共享参数",
+            gamma=gamma,
+            parameters=parameters,
+            parameter_constraint=parameter_environment.constraint,
+            theta=theta,
+            path=path_condition,
+        )
+        self._finish_step(
+            step,
+            (
+                "环境规范化完成；参数约束可满足性未决"
+                if parameter_verdict is Verdict.UNKNOWN
+                else "环境规范化成功"
+            ),
+            (
+                "Constructor 与 Checker 后续规则共享这里展示的规范类型环境。"
+                + (
+                    " 参数约束未被判定为不可满足，因此继续符号推导；"
+                    "最终结论保持 UNKNOWN、不可信。"
+                    if parameter_verdict is Verdict.UNKNOWN
+                    else ""
+                )
+            ),
+        )
+        return PreparedTypingEnvironment(
+            gamma=gamma,
+            theta=theta,
+            parameters=parameters,
+            parameter_symbols=parameter_symbols,
+            parameter_condition=parameter_condition,
+        )
+
     # ------------------------------------------------------------------
     # Configuration and parallel rules
     # ------------------------------------------------------------------
@@ -409,9 +598,10 @@ class Table2RuleEngine:
     ) -> _RuleExpansion:
         """[T-||] 把顶层判断展开为各配置的显式子 judgment。
 
-        多配置判断若未显式给出局部 ``gamma``，会依据各进程/初始状态出现的
-        变量投影全局环境。所有局部 Gamma 必须两两不交，并且其不交并集必须
-        精确恢复判断入口的全局 Gamma；显式局部声明不得新增变量或改变类型。
+        Gamma 是整个判断共享的类型声明环境，每个配置子 judgment 都直接使用
+        同一份完整 Gamma。并行分量的可变状态所有权由 Process AST 的
+        Assumption 2.1 保证；这里再把初始状态定义域计入所有权集合，防止两个
+        独立 Configuration 通过 state 绕过该检查。
 
         ``path_condition`` 是没有局部路径时的公共默认值。若配置显式给出局部
         路径，则所有配置都必须给出，并且外层只能保留默认 ``true``；此时论文
@@ -430,107 +620,37 @@ class Table2RuleEngine:
             path=default_path,
         )
 
-        component_gammas: list[dict[str, GammaType]] = []
+        component_gammas = [dict(gamma) for _configuration in configurations]
         valid_component_gammas: list[bool] = []
-        used_domains: list[set[str]] = []
-        # 第一遍只计算每个配置的局部变量域，随后才能进行两两不相交检查。
+        owned_value_domains: list[set[str]] = []
+        # Process AST 已检查并行子树之间不共享变量；低层接口也允许直接传入多个
+        # Configuration，因此这里仍防御性地把 process/state 的实际变量域取出，
+        # 随后检查它们是否重叠。Gamma 中未使用的声明不属于任何状态所有权域。
         for index, configuration in enumerate(configurations, start=1):
-            if configuration.gamma is not None:
-                try:
-                    invalid_local_names = {
-                        repr(name)
-                        for name in configuration.gamma
-                        if not is_hcsp_identifier(name)
-                    }
-                    if invalid_local_names:
-                        raise ValueError(
-                            "Invalid local Gamma names: "
-                            + ", ".join(sorted(invalid_local_names))
-                        )
-                    component_gamma = {
-                        name: normalize_gamma_type(
-                            value,
-                            subject="Gamma entry",
-                        )
-                        for name, value in configuration.gamma.items()
-                    }
-                    self._validate_continuous_vectors(component_gamma)
-                    gamma_is_valid = True
-                    extra_names = set(component_gamma) - set(gamma)
-                    if extra_names:
-                        self._diagnose(
-                            Verdict.FALSE,
-                            "Local Gamma contains variables absent from the global Gamma: "
-                            + ", ".join(sorted(extra_names)),
-                            "T-||",
-                            f"K{index}",
-                        )
-                        gamma_is_valid = False
-                    incompatible = {
-                        name
-                        for name, value_type in component_gamma.items()
-                        if name in gamma and gamma[name] != value_type
-                    }
-                    if incompatible:
-                        details = ", ".join(
-                            f"{name} (global {gamma[name]}, local {component_gamma[name]})"
-                            for name in sorted(incompatible)
-                        )
-                        self._diagnose(
-                            Verdict.FALSE,
-                            "Local Gamma changes global variable types: " + details,
-                            "T-||",
-                            f"K{index}",
-                        )
-                        gamma_is_valid = False
-                except (TypeError, ValueError) as exc:
-                    self._diagnose(
-                        Verdict.FALSE,
-                        f"Invalid Gamma for configuration {index}: {exc}",
-                        "T-||",
-                        f"K{index}",
-                    )
-                    component_gamma = {}
-                    gamma_is_valid = False
-            elif len(configurations) == 1:
-                # 单配置无需分区，保留完整 Gamma 也允许路径条件使用辅助变量。
-                component_gamma = dict(gamma)
-                gamma_is_valid = True
-            else:
-                variables = self._process_vars(configuration.process) | set(configuration.state)
-                # 共享参数可被所有配置读取，但不属于任何分量的可变 Gamma。
-                variables -= set(parameters)
-                # 独立 ContinuousType 项只跟随真正含相应 ODE 的配置；标量成员
-                # 在 ODE 外仍是普通 Real，不会仅因读写其中一个成员就拖入整组。
-                variables = self._expand_continuous_vector_domain(
-                    gamma,
-                    variables,
-                    self._process_ode_vectors(configuration.process),
+            owned_values = (
+                self._process_vars(configuration.process)
+                | set(configuration.state)
+            ) - set(parameters)
+            missing = (
+                owned_values
+                - set(gamma)
+                - self._input_bound_vars(configuration.process)
+            )
+            for name in sorted(missing):
+                self._diagnose(
+                    Verdict.FALSE,
+                    f"Variable {name!r} is used but not declared in Gamma",
+                    "T-||",
+                    f"K{index}",
                 )
-                component_gamma = {
-                    name: value_type for name, value_type in gamma.items() if name in variables
-                }
-                missing = (
-                    variables
-                    - set(component_gamma)
-                    - self._input_bound_vars(configuration.process)
-                )
-                for name in sorted(missing):
-                    self._diagnose(
-                        Verdict.FALSE,
-                        f"Variable {name!r} is used but not declared in Gamma",
-                        "T-||",
-                        f"K{index}",
-                    )
-                gamma_is_valid = not missing
-            component_gammas.append(component_gamma)
-            valid_component_gammas.append(gamma_is_valid)
-            used_domains.append(set(component_gamma))
+            valid_component_gammas.append(not missing)
+            owned_value_domains.append(owned_values)
 
-        # 论文要求并行分量的状态空间互不相交；共享通信通过 Theta 表达。
-        for left in range(len(used_domains)):
-            for right in range(left + 1, len(used_domains)):
-                overlap = used_domains[left] & used_domains[right]
+        # 共享 Gamma 不代表共享可变状态；后者仍必须满足 Assumption 2.1/配置
+        # 组合的不相交要求。通道同步通过共享 Theta 表达，全局只读参数已排除。
+        for left in range(len(owned_value_domains)):
+            for right in range(left + 1, len(owned_value_domains)):
+                overlap = owned_value_domains[left] & owned_value_domains[right]
                 if overlap:
                     self._diagnose(
                         Verdict.FALSE,
@@ -541,22 +661,6 @@ class Table2RuleEngine:
                     )
                     valid_component_gammas[left] = False
                     valid_component_gammas[right] = False
-
-        # [T-||] 结论中的 Gamma 正是各前提 Gamma 的不交并集。只检查两两不交
-        # 还不够，否则局部配置可以悄悄遗漏全局变量。前面的类型一致性检查已
-        # 排除额外键和改型；这里再锁定并集的定义域。
-        if all(valid_component_gammas):
-            combined_domain = set().union(*used_domains) if used_domains else set()
-            missing_from_components = set(gamma) - combined_domain
-            if missing_from_components:
-                self._diagnose(
-                    Verdict.FALSE,
-                    "Parallel component Gammas do not cover the global Gamma: "
-                    + ", ".join(sorted(missing_from_components)),
-                    "T-||",
-                    "judgment",
-                )
-                valid_component_gammas = [False] * len(configurations)
 
         # ``path_condition`` 是默认路径，不是第二套可与局部路径并存的结论。
         # 全部局部路径存在时，外层 true 表示“由局部合取生成”；部分覆盖或同时
@@ -635,7 +739,7 @@ class Table2RuleEngine:
                 parallel_step,
                 f"分量类型 = [{readable_types}]",
                 self._premise_summary(expansion)
-                + " 显式子 judgments 已求解；各配置共享 Theta，状态 Gamma 分区互不相交。",
+                + " 显式子 judgments 已求解；各配置共享 Gamma/Theta，状态所有权互不相交。",
             )
             return types
 
@@ -684,8 +788,7 @@ class Table2RuleEngine:
             )
             self._diagnose(
                 Verdict.FALSE,
-                "Initial state contains variables not declared in the local "
-                "Gamma: "
+                "Initial state contains variables not declared in Gamma: "
                 + names,
                 "T-sigma",
                 context.location,
@@ -697,8 +800,8 @@ class Table2RuleEngine:
             )
         # 论文配置叶子严格是 (sigma, P)，而不是 (sigma, S1 || S2)。项目仍为
         # 最常见的无状态协议保留 ``Configuration({}, Parallel(...))`` 便捷写法：
-        # 在空 Gamma、空 state 和 true 路径下，拆成左右空上下文不会丢失任何
-        # 状态信息。只要存在状态或路径约束，就必须由调用方提交多个显式
+        # 在空 Gamma、空 state 和 true 路径下，拆成左右配置不会丢失任何
+        # 状态信息。只要存在状态声明或路径约束，就必须由调用方提交多个显式
         # Configuration，使每个叶子分别经过 T-sigma 和顶层 T-||。
         if isinstance(judgment.system, Parallel) and (
             judgment.state
@@ -708,7 +811,7 @@ class Table2RuleEngine:
             self._diagnose(
                 Verdict.FALSE,
                 "A stateful Parallel system must be supplied as separate "
-                "Configuration leaves with disjoint local Gammas and paths",
+                "Configuration leaves with disjoint state ownership and paths",
                 "T-||",
                 context.location,
             )
@@ -876,6 +979,15 @@ class Table2RuleEngine:
 
         head = nodes[0]
 
+        # 用户源码必须显式写出 ODE 的顺序后继。精确形状 ``ODE; skip``
+        # 既可能表示 T-\unrhd 的“无实际后继占位”，也可能表示
+        # T-\unrhd' 的真实空后继，因此必须隔离试用两条规则。其他非空后继
+        # 都由普通 ODE 分派按唯一适用规则处理。
+        if isinstance(head, ODE) and self._needs_ode_skip_rule_selection(
+            judgment
+        ):
+            return self._solve_ode_skip_rule_candidates(judgment)
+
         # Table 2 严格区分终端 ``skip`` 的 T-End 与中间 ``skip # P`` 的
         # T-Skip。空 nodes 则是 ch!/assert/assign 等前缀剥离后隐含的终端 skip。
         terminal_skip = isinstance(head, Skip) and len(nodes) == 1
@@ -940,6 +1052,248 @@ class Table2RuleEngine:
             + self._rule_explanation(rule),
         )
         return result
+
+    # ------------------------------------------------------------------
+    # ODE 候选规则选择
+    # ------------------------------------------------------------------
+    def _needs_ode_skip_rule_selection(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> bool:
+        """识别 ODE 自持后继与外层尾部合并后精确为终端 ``skip`` 的形状。"""
+
+        if not judgment.nodes or not isinstance(judgment.nodes[0], ODE):
+            return False
+        node = judgment.nodes[0]
+        tail = tuple(self._as_nodes(node.continuation)) + judgment.nodes[1:]
+        return len(tail) == 1 and isinstance(tail[0], Skip)
+
+    def _attempt_ode_candidate(
+        self,
+        judgment: _ProcessJudgment,
+        mode: _ODETypeRule,
+    ) -> _ODECandidateAttempt:
+        """隔离执行一条 ODE 候选，并在返回前回滚公开证据列表。"""
+
+        obligation_start = len(self.obligations)
+        diagnostic_start = len(self.diagnostics)
+        step_start = len(self.steps)
+        context = judgment.context
+        candidate_step = self._start_step(
+            "T-ODE",
+            context.location,
+            f"试用 ODE 候选规则 {mode.value}",
+            context=context,
+        )
+        expansion = self.rule_t_ode(judgment, candidate=mode)
+        result = self._solve_rule_expansion(expansion)
+        self._finish_step(
+            candidate_step,
+            (
+                "候选未构造正式类型"
+                if isinstance(result, _ConstructionFailure)
+                else "候选类型 = " + format_process_type(result)
+            ),
+            self._premise_summary(expansion),
+        )
+
+        obligations = tuple(self.obligations[obligation_start:])
+        diagnostics = tuple(self.diagnostics[diagnostic_start:])
+        steps = tuple(self.steps[step_start:])
+        del self.obligations[obligation_start:]
+        del self.diagnostics[diagnostic_start:]
+        del self.steps[step_start:]
+
+        verdict_inputs = [item.verdict for item in obligations]
+        verdict_inputs.extend(item.verdict for item in diagnostics)
+        if isinstance(result, _ConstructionFailure) and not any(
+            item is Verdict.FALSE for item in verdict_inputs
+        ):
+            verdict_inputs.append(Verdict.FALSE)
+        return _ODECandidateAttempt(
+            mode=mode,
+            result=result,
+            verdict=Verdict.combine(verdict_inputs),
+            obligations=obligations,
+            diagnostics=diagnostics,
+            steps=steps,
+        )
+
+    @staticmethod
+    def _ode_attempts_have_equivalent_types(
+        attempts: Sequence[_ODECandidateAttempt],
+    ) -> bool:
+        """判断多个已形成结论的候选是否给出同一行为类型。"""
+
+        if not attempts or isinstance(attempts[0].result, _ConstructionFailure):
+            return False
+        first = attempts[0].result
+        return all(
+            not isinstance(attempt.result, _ConstructionFailure)
+            and types_equivalent(first, attempt.result)
+            for attempt in attempts[1:]
+        )
+
+    def _commit_ode_candidate_evidence(
+        self,
+        attempts: Sequence[_ODECandidateAttempt],
+        selected: _ODECandidateAttempt | None,
+    ) -> None:
+        """保留两次试推公式，并标明哪一候选参与最终结论。"""
+
+        for attempt in attempts:
+            is_selected = attempt is selected
+            self.obligations.extend(
+                replace(
+                    obligation,
+                    active=is_selected,
+                    candidate=attempt.mode.value,
+                )
+                for obligation in attempt.obligations
+            )
+        if selected is not None:
+            self.diagnostics.extend(selected.diagnostics)
+            self.steps.extend(selected.steps)
+
+    @staticmethod
+    def _ode_attempt_summary(attempt: _ODECandidateAttempt) -> str:
+        """生成用于 T-ODE-Select 步骤的候选证明摘要。"""
+
+        proofs = ", ".join(
+            f"{item.rule}={item.verdict.value}"
+            for item in attempt.obligations
+        ) or "no formulas"
+        result = (
+            "failure"
+            if isinstance(attempt.result, _ConstructionFailure)
+            else format_process_type(attempt.result)
+        )
+        return (
+            f"{attempt.mode.value}: verdict={attempt.verdict.value}, "
+            f"type={result}, proofs=[{proofs}]"
+        )
+
+    def _solve_ode_skip_rule_candidates(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> _ProcessConstructionResult:
+        r"""试用 ``ODE;skip`` 的 ``T-\unrhd`` 与 ``T-\unrhd'``。"""
+
+        context = judgment.context
+        selection_step = self._start_step(
+            "T-ODE-Select",
+            context.location,
+            "ODE 后继为终端 skip：隔离试用两条 Table 2 规则",
+            context=context,
+        )
+        attempts = tuple(
+            self._attempt_ode_candidate(judgment, mode)
+            for mode in (
+                _ODETypeRule.COMMUNICATION_ONLY,
+                _ODETypeRule.NATURAL_TIMEOUT,
+            )
+        )
+        complete = tuple(
+            attempt
+            for attempt in attempts
+            if not isinstance(attempt.result, _ConstructionFailure)
+        )
+        proved = tuple(
+            attempt
+            for attempt in complete
+            if attempt.verdict is Verdict.TRUE
+        )
+        unknown = tuple(
+            attempt
+            for attempt in complete
+            if attempt.verdict is Verdict.UNKNOWN
+        )
+
+        selected: _ODECandidateAttempt | None = None
+        selection_warning = ""
+        if proved:
+            if self._ode_attempts_have_equivalent_types(proved):
+                selected = proved[0]
+                # 本项目把 T-\unrhd 与 T-\unrhd' 的适用条件视为互斥。
+                # 因而只要其中一个候选已经证明成立，就足以确定规则；另一个
+                # 候选即便因证明器能力不足而返回 UNKNOWN，也只是未选中的审计
+                # 证据，不能降低已证结论的可信性。
+            else:
+                selection_warning = (
+                    "Both ODE rules were proved but generated non-equivalent "
+                    "types; this contradicts the expected rule exclusivity"
+                )
+        elif unknown:
+            if self._ode_attempts_have_equivalent_types(unknown):
+                selected = unknown[0]
+            else:
+                # UNKNOWN 不应像 FALSE 一样截断类型构造。没有已证候选时，优先
+                # 保留包含显式 skip 子 judgment 的 T-\unrhd' 结论，并通过
+                # UNKNOWN 诊断明确标记它只是临时候选。
+                selected = next(
+                    (
+                        item
+                        for item in unknown
+                        if item.mode is _ODETypeRule.NATURAL_TIMEOUT
+                    ),
+                    unknown[0],
+                )
+                selection_warning = (
+                    "ODE rule selection remains unknown and candidate types "
+                    "are non-equivalent; the natural-timeout candidate is "
+                    "retained provisionally"
+                )
+
+        self._commit_ode_candidate_evidence(attempts, selected)
+        summaries = "; ".join(
+            self._ode_attempt_summary(attempt) for attempt in attempts
+        )
+        if selection_warning:
+            self._diagnose(
+                Verdict.UNKNOWN,
+                selection_warning,
+                "T-ODE-Select",
+                context.location,
+            )
+
+        if selected is not None:
+            self._finish_step(
+                selection_step,
+                f"选中 {selected.mode.value}: "
+                + format_process_type(selected.result),
+                summaries,
+            )
+            return selected.result
+
+        # 没有候选时，把两边真实的结构诊断带回报告，避免只留下笼统错误。
+        seen: set[tuple[Verdict, str, str, str]] = set()
+        for attempt in attempts:
+            for diagnostic in attempt.diagnostics:
+                key = (
+                    diagnostic.verdict,
+                    diagnostic.message,
+                    diagnostic.rule,
+                    diagnostic.location,
+                )
+                if key not in seen:
+                    self.diagnostics.append(diagnostic)
+                    seen.add(key)
+        verdict = Verdict.UNKNOWN if complete else Verdict.FALSE
+        self._diagnose(
+            verdict,
+            (
+                selection_warning
+                or "Neither ODE rule satisfies all of its Table 2 premises"
+            ),
+            "T-ODE-Select",
+            context.location,
+        )
+        self._finish_step(
+            selection_step,
+            "无法从两条 ODE 候选规则得到唯一完整结论",
+            summaries,
+        )
+        return _CONSTRUCTION_FAILURE
 
     def rule_t_end(self, judgment: _ProcessJudgment) -> _RuleExpansion:
         """[T-End] 直接把终端 ``skip``（含隐式终端）推导为 ``0``。
@@ -1119,7 +1473,7 @@ class Table2RuleEngine:
         """
 
         node = judgment.nodes[0]
-        tail = judgment.nodes[1:]
+        tail = tuple(self._as_nodes(node.continuation)) + judgment.nodes[1:]
         context = judgment.context
         then_context = context.clone(location=f"{context.location}.then")
         else_context = context.clone(location=f"{context.location}.else")
@@ -1232,10 +1586,11 @@ class Table2RuleEngine:
                     if existing_entry is None
                     else gamma_value_type(existing_entry)
                 )
-                if existing is not None and not (
-                    is_subtype(existing, value_type)
-                    or is_subtype(value_type, existing)
-                ):
+                # 输入值会被写入目标变量，因此安全方向只能是
+                # ``channel slot type <: existing variable type``。反向关系只说明
+                # 变量类型能够向通道类型提升，不能保证通道携带的任意值都能存入
+                # 该变量；例如 Real 通道不能写入已声明为 Int 的变量。
+                if existing is not None and not is_subtype(value_type, existing):
                     self._diagnose(
                         Verdict.FALSE,
                         f"Input target {index} {name!r} has type {existing}, "
@@ -1584,23 +1939,6 @@ class Table2RuleEngine:
         }
 
     @staticmethod
-    def _expand_continuous_vector_domain(
-        gamma: Mapping[str, GammaType],
-        names: set[str],
-        ode_vectors: set[frozenset[str]],
-    ) -> set[str]:
-        """把当前配置实际使用的 ODE 向量声明加入自动 Gamma 分区。"""
-
-        expanded = set(names)
-        for declaration_name, declaration in gamma.items():
-            if not isinstance(declaration, ContinuousType):
-                continue
-            members = frozenset(declaration.variables)
-            if members in ode_vectors:
-                expanded.add(declaration_name)
-        return expanded
-
-    @staticmethod
     def _declares_continuous_vector(
         gamma: Mapping[str, GammaType],
         evolved: Sequence[str],
@@ -1619,7 +1957,11 @@ class Table2RuleEngine:
             for declaration in gamma.values()
         )
 
-    def rule_t_ode(self, judgment: _ProcessJudgment) -> _RuleExpansion:
+    def rule_t_ode(
+        self,
+        judgment: _ProcessJudgment,
+        candidate: _ODETypeRule | None = None,
+    ) -> _RuleExpansion:
         """实现带 ``safety``/``delay`` 批注的连续演化类型规则。
 
         原始 ODE 语法仍由 ``eqs``、``constraint`` 和 ``interrupts`` 构成；
@@ -1631,9 +1973,10 @@ class Table2RuleEngine:
         左侧必须与其中一个集合精确相等，但方程书写顺序不影响匹配。隐式局部
         时钟不参与向量比较。
 
-        没有后继时使用纯通信中断规则；有限时延且存在顺序后继时使用带
-        fallback 的自然超时规则；无穷时延没有可达的超时后继。每个源码形状
-        只进入一条确定的 ODE 规则，不再进行候选规则试用或选择。
+        用户源码必须为每个 ODE 显式给出顺序后继。后继精确为终端 ``skip``
+        时，它既可能是纯通信规则的“无实际后继”占位，也可能是自然超时规则
+        的真实空后继，外层选择器会隔离试用两条规则。非 ``skip`` 后继在有限
+        delay 下只使用自然超时规则；正无穷 delay 没有可达 timeout。
 
         ``node.local_clock`` 由 ODE 构造器自动建立，不要求用户放入 Gamma 或
         初始状态。ODE 方程右端、演化域和节点 safety 中的 ``t`` 在局部作用域
@@ -1645,10 +1988,12 @@ class Table2RuleEngine:
         """
 
         node = judgment.nodes[0]
-        tail = judgment.nodes[1:]
+        tail = tuple(self._as_nodes(node.continuation)) + judgment.nodes[1:]
         context = judgment.context
         annotation = node.annotation
         equations = node.eqs
+        # ODE 节点始终自持一个公共后继；用户源码无实际后继时，前端要求显式
+        # 写 ``; skip``，lowering 后该占位保存在 ``node.continuation``。
         evolved: list[str] = []
         translator = self._translator(context)
         # 这里只为表达式静态检查创建一个临时局部 Real。正式 dL 义务稍后由
@@ -1781,10 +2126,24 @@ class Table2RuleEngine:
             # ODEAnnotation 的另一个合法结果只能是正无穷 math.inf。
             duration = duration_annotation
         infinite_duration = isinstance(duration, float) and duration == inf
-        # 有限 ODE 总有自然到时后继。若源程序在此结束，空节点序列会由 T-End
-        # 直接构造 EmptyType；不再人为补造 ``Skip()``，以免把“空通信行为”
-        # 错写为某个过程语法糖。正无穷时延没有到时迁移。
-        communication_rule = infinite_duration
+        if candidate is _ODETypeRule.NATURAL_TIMEOUT and infinite_duration:
+            self._diagnose(
+                Verdict.FALSE,
+                "The natural-timeout ODE rule requires a finite delay",
+                "T-ODE",
+                context.location,
+            )
+            return _RuleExpansion(
+                "T-ODE",
+                (),
+                lambda _children: _CONSTRUCTION_FAILURE,
+            )
+        # ``candidate`` 只由 ``ODE;skip`` 的隔离选择器设置。其他有限非空后继
+        # 确定走 T-\unrhd'；无限 delay 没有自然 timeout，仍走 T-\unrhd。
+        communication_rule = (
+            candidate is _ODETypeRule.COMMUNICATION_ONLY
+            or (candidate is None and infinite_duration)
+        )
 
         # 为 dL 模态建立独立入口快照。它不改变 HCSP AST，也不改变离开 ODE
         # 后的符号状态；仅用于把当前赋值替换后的状态正确嵌入连续演化公式。
@@ -1830,7 +2189,7 @@ class Table2RuleEngine:
             )
         ]
 
-        # 没有顺序后继时采用只含通信中断的规则；无限 delay 即使写有 tail，
+        # 纯通信候选把显式 skip 解释成无实际后继；无限 delay 即使写有 tail，
         # 自然超时也永远不会发生。Table 2 在这两种情况下要求在未把 B 预设为
         # 真的动力系统中证明 B 保持，即 ``pre -> [F]B``；
         # 若把待验证的性质写进程序域，证明义务会被错误削弱。
@@ -1899,8 +2258,15 @@ class Table2RuleEngine:
             )
 
         if communication_rule:
-            # 无限演化没有自然到时后继；tail 仍传给通信分支，因为它可能被通信
-            # 提前中断，分支 continuation 完成后仍应执行外层 tail。
+            # 候选选择器中的终端 skip 是“无实际后继”的占位，不能被附加到事件
+            # continuation；无限 ODE 后的非 skip tail 则仍会在通信中断后执行。
+            event_tail = (
+                ()
+                if candidate is _ODETypeRule.COMMUNICATION_ONLY
+                and len(tail) == 1
+                and isinstance(tail[0], Skip)
+                else tail
+            )
             interrupt_context = self._ode_post_context(
                 node,
                 context,
@@ -1916,7 +2282,7 @@ class Table2RuleEngine:
             premises.append(
                 self._event_premise(
                     node.interrupts,
-                    tail,
+                    event_tail,
                     interrupt_context,
                     judgment.terminal,
                 )
@@ -1925,14 +2291,15 @@ class Table2RuleEngine:
             def conclude_without_timeout(
                 children: tuple[Any, ...],
             ) -> _ProcessConstructionResult:
-                """组合无自然超时分支的 ODE 通信反应。"""
+                r"""组合 ``T-\unrhd`` 的通信反应与不可达 deadline 后继。"""
 
                 choices = children[0]
                 if isinstance(choices, _ConstructionFailure):
                     return _CONSTRUCTION_FAILURE
-                # 正无穷 delay 的自然到时后继固定为不可达的 BottomType；AST 用
-                # InfiniteDelayType 显式记录该时延，而不把它误降为裸 A。
-                return make_delay_type(duration, choices, EmptyType())
+                # T-\unrhd 不建立自然后继子 judgment：规则前提保证 ODE 会在 d 内
+                # 被某个通信打断，所以 deadline 位置在语义上不可达，必须写 bottom。
+                # 不能用 EmptyType 代替；EmptyType 表示一个可达但无通信行为的后继。
+                return make_delay_type(duration, choices, BottomType())
 
             return _RuleExpansion(
                 "T-ODE",
@@ -2156,8 +2523,10 @@ class Table2RuleEngine:
         自然结束后继使用 ``not B & safety``。调用方必须显式选择其中一种，避免
         用单个布尔开关混淆两个不同规则。
 
-        后继路径获得节点 safety 在中断/结束时刻的实例。若 domain 或 safety
-        使用了局部 ``t``，离开 ODE 时不能把这个名字泄漏到 Gamma。
+        后继路径严格采用 Table 2 写出的条件，不继承进入 ODE 前的普通路径事实：
+        ``B & safety``、``safety`` 或 ``not B & safety``。Gamma 基础类型固有约束
+        和项目扩展的只读参数条件仍属于判断环境，而不是被丢弃的前置路径事实。
+        若 domain 或 safety 使用了局部 ``t``，离开 ODE 时不能把这个名字泄漏到 Gamma。
         这里用一个新鲜 Real 翻译它，并以 ``exists t>=0`` 投影掉局部时钟；所得
         条件仍是实际 ODE 后状态的保守后置事实。事件 continuation 或顺序后继中
         另行出现的 ``t`` 不受这个量词绑定。
@@ -2220,14 +2589,28 @@ class Table2RuleEngine:
                 condition = conjunction(domain_condition, safety)
             else:
                 condition = safety
+            # Table 2 的后继判断仍处在同一个 Gamma 和全局只读参数环境下。
+            # Nat 等基础类型的固有约束由 Gamma 提供；除此之外，不把 ODE 入口
+            # 的 configuration/path facts 携带到后继。
+            environment_condition = conjunction(
+                context.parameter_condition,
+                *(
+                    constraint
+                    for name, value_type in self._value_gamma(post.gamma).items()
+                    for constraint in self._type_domain_constraints(
+                        value_type,
+                        post.symbols[name],
+                    )
+                ),
+            )
             if post_clock is not None:
                 condition = conjunction(post_clock >= 0, condition)
                 post.path = conjunction(
-                    post.parameter_condition,
+                    environment_condition,
                     z3.Exists([post_clock], condition),
                 )
             else:
-                post.path = conjunction(post.parameter_condition, condition)
+                post.path = conjunction(environment_condition, condition)
         except ExpressionError as exc:
             self._diagnose(Verdict.FALSE, str(exc), "T-ODE", context.location)
             return None
@@ -2250,7 +2633,7 @@ class Table2RuleEngine:
         """
 
         node = judgment.nodes[0]
-        tail = judgment.nodes[1:]
+        tail = self._observable_recursion_tail(judgment.nodes[1:])
         context = judgment.context
         if tail:
             self._diagnose(
@@ -2340,7 +2723,7 @@ class Table2RuleEngine:
         """[T-X] 在显式递归调用处检查边界不变式和尾位置限制。"""
 
         node = judgment.nodes[0]
-        tail = judgment.nodes[1:]
+        tail = self._observable_recursion_tail(judgment.nodes[1:])
         context = judgment.context
         name = node.name
         binding = context.rec_env.get(name)
@@ -2400,6 +2783,25 @@ class Table2RuleEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _observable_recursion_tail(
+        tail: Sequence[Process],
+    ) -> tuple[Process, ...]:
+        r"""删除递归调用之后不产生行为的 ``skip``，返回有效顺序后继。
+
+        多元 ``InternalChoice`` 为统一表示 ``(P_1 \sqcup ... \sqcup P_n);Q``，
+        会在没有显式公共后继时把 ``Q`` 规范为 ``Skip()``。T-sqcup 随后把该
+        占位结点附到每个分支，所以源码尾调用 ``X`` 会以 ``X;skip`` 的判断
+        形状到达 T-X。``skip`` 不产生通信或状态动作，不能因此把真正的尾调用
+        误判为非尾调用；显式写出的 ``X;skip`` 具有相同语义。
+
+        这里仅为 T-mu/T-X 的尾位置判断忽略 Skip，不做全局 Sequence 化简：
+        ODE 规则仍需要显式 ``ODE;skip`` 来区分两条候选规则。只要 tail 中还
+        存在任意非 Skip 进程，递归调用之后就仍有实际行为，必须继续拒绝。
+        """
+
+        return tuple(node for node in tail if not isinstance(node, Skip))
+
     @staticmethod
     def _lazy_assignment_post_state(
         context: _Context,
@@ -2649,6 +3051,43 @@ class Table2RuleEngine:
             {**context.parameters, **self._value_gamma(context.gamma)},
             context.symbols,
         )
+
+    def _validate_theta_refinements(
+        self,
+        gamma: Mapping[str, GammaType],
+        theta: Mapping[str, ChannelType],
+        parameters: Mapping[str, BasicType],
+    ) -> None:
+        """在执行规则前检查 Theta 中每个 refinement 都是良构 Bool 公式。
+
+        通道可能不会出现在当前 Process 中，但它仍是完整 Theta 环境的一部分。
+        因此这里为每个槽位建立仅供静态翻译的新鲜值，并允许 refinement 引用
+        自身 binders、Gamma 标量与共享参数。该检查不证明公式恒真，也不把这些
+        临时符号写入后续规则上下文。
+        """
+
+        translator = ExpressionTranslator(
+            {**parameters, **self._value_gamma(gamma)},
+            name_prefix="theta__",
+        )
+        for channel_name, channel_type in theta.items():
+            values = tuple(
+                translator.fresh_symbol(
+                    f"{channel_name}_{binder}",
+                    value_type,
+                    "__refinement",
+                )
+                for binder, value_type in zip(
+                    channel_type.binders,
+                    channel_type.value_types,
+                )
+            )
+            try:
+                translator.refinement_result(channel_type, values)
+            except ExpressionError as exc:
+                raise ExpressionError(
+                    f"Theta channel {channel_name!r} has an invalid refinement: {exc}"
+                ) from exc
 
     @staticmethod
     def _defined_term(result: ExprResult) -> Any:
@@ -3003,10 +3442,21 @@ class Table2RuleEngine:
         终止当前规则，UNKNOWN 则保留证据并继续构造一个明确标为不可信的类型。
         """
 
-        obligation = request.obligation
+        proof_location = next(
+            (
+                step.location
+                for step in reversed(self.steps)
+                if step.rule != "Proof" and step.location
+            ),
+            "",
+        )
+        obligation = replace(
+            request.obligation,
+            location=request.obligation.location or proof_location,
+        )
         proof_step = self._start_step(
             "Proof",
-            obligation.rule,
+            proof_location or obligation.rule,
             obligation.description,
         )
         proof_formula = obligation.formula
@@ -3079,7 +3529,7 @@ class Table2RuleEngine:
     ) -> RuleDerivationReport:
         """合并义务与诊断的三值结果，构造不可变最终报告。"""
         verdict = Verdict.combine(
-            [item.verdict for item in self.obligations]
+            [item.verdict for item in self.obligations if item.active]
             + [item.verdict for item in self.diagnostics]
         )
         return RuleDerivationReport(
@@ -3253,49 +3703,6 @@ class Table2RuleEngine:
         if not isinstance(process, HCSP):
             return set()
         return process.get_vars()
-
-    def _process_ode_vectors(self, process: Any) -> set[frozenset[str]]:
-        """收集进程树中真正出现的非空 ODE 左端变量集合。"""
-
-        if isinstance(process, ODE):
-            current = (
-                {frozenset(name for name, _derivative in process.eqs)}
-                if process.eqs
-                else set()
-            )
-            return current | self._event_ode_vectors(process.interrupts)
-        if isinstance(process, SequenceHP):
-            return self._process_ode_vectors(process.first) | self._process_ode_vectors(
-                process.second
-            )
-        if isinstance(process, If):
-            return self._process_ode_vectors(
-                process.then_branch
-            ) | self._process_ode_vectors(process.else_branch)
-        if isinstance(process, InternalChoice):
-            return set().union(
-                *(self._process_ode_vectors(branch) for branch in process.branches),
-                self._process_ode_vectors(process.continuation),
-            )
-        if isinstance(process, Mu):
-            return self._process_ode_vectors(process.body)
-        if isinstance(process, Parallel):
-            return self._process_ode_vectors(process.left) | self._process_ode_vectors(
-                process.right
-            )
-        return set()
-
-    def _event_ode_vectors(self, reaction: EventReaction) -> set[frozenset[str]]:
-        """收集 ODE 中断事件各 continuation 内嵌的 ODE 向量。"""
-
-        if isinstance(reaction, EmptyEvent):
-            return set()
-        if isinstance(reaction, EventChoice):
-            return set().union(
-                *(self._process_ode_vectors(continuation)
-                  for _communication, continuation in reaction.branches)
-            )
-        return set()
 
     def _input_bound_vars(self, process: Any) -> set[str]:
         """收集输入写入的目标；这些变量可以不预先出现在 Gamma。"""

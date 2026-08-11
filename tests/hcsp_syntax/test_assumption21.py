@@ -57,11 +57,14 @@ class Assumption21ConstructionTests(unittest.TestCase):
         )
         self.assertIsInstance(process, Sequence)
 
-        branched_prefix = Sequence(
-            If(True, InputChannel("sensor", "x"), Skip()),
-            Assert("x >= 0"),
+        branched_prefix = If(
+            True,
+            InputChannel("sensor", "x"),
+            Skip(),
+            continuation=Assert("x >= 0"),
         )
-        self.assertIsInstance(branched_prefix, Sequence)
+        self.assertIsInstance(branched_prefix, If)
+        self.assertIsInstance(branched_prefix.continuation, Assert)
 
     # 测试输入：``assert(x >= 0); sensor?x``，先自由读取再绑定 x。
     # 预期行为：Sequence 因 x 同属 fv 和 bv 抛出 ValueError。

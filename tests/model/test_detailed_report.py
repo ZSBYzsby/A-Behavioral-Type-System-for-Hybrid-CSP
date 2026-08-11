@@ -158,7 +158,7 @@ class DetailedReportTests(unittest.TestCase):
             "处理状态 : 已解决",
             "=== 未解决或未通过的证明义务 ===",
             "(无；所有已生成证明义务均已证明)",
-            "Proof @ T-Out",
+            "Proof @ K1",
             "=== 诊断信息 ===",
             "=== 汇总 ===",
             "规则步骤 : 8",
@@ -207,9 +207,10 @@ class DetailedReportTests(unittest.TestCase):
             "类型可信性 : 不可信（存在未验证义务）",
             "构造 Type 源码 : type delay(1) then empty",
             "T-ODE-safety",
+            "T-ODE-domain",
             "T-ODE-boundary",
             "[T-unrhd-prime]",
-            "证明义务 : 3",
+            "证明义务 : 5",
             "遗留义务 : 2",
         )
         for fragment in expected_fragments:

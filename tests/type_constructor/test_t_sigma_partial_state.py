@@ -88,9 +88,9 @@ class TSigmaPartialStateTests(unittest.TestCase):
         self.assertIn("counterexample", obligation.detail)
         self.assertFalse(any(item.rule == "T-End" for item in report.steps))
 
-    # 测试输入：局部 Gamma 只声明 x，但 state 同时给出 x 和 ghost。
+    # 测试输入：Gamma 只声明 x，但 state 同时给出 x 和 ghost。
     # 预期行为：ghost 没有 Basic Type，T-sigma 在创建状态证明义务之前静态失败，
-    #           最终没有候选类型，并明确指出 ghost 未在局部 Gamma 声明。
+    #           最终没有候选类型，并明确指出 ghost 未在 Gamma 声明。
     # 检查内容：覆盖规则层的 dom(state) subseteq dom(Gamma) 检查。
     # 论文对应：Gamma 必须为状态替换中的每一个已赋值变量提供类型解释。
     def test_undeclared_state_variable_stops_type_generation(self) -> None:
@@ -110,7 +110,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "not declared in the local Gamma" in item.message
+                "not declared in Gamma" in item.message
                 and "ghost" in item.message
                 for item in report.diagnostics
             )
