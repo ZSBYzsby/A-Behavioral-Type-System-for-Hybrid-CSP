@@ -37,7 +37,7 @@ from hcsp_typechecker._internal import (
     Configuration,
     ContinuousType,
     DLFormula,
-    EndType,
+    EmptyType,
     EventChoice,
     InfiniteDelayType,
     InputChannel,
@@ -375,7 +375,7 @@ class ContinuousGammaTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertEqual(
             report.constructed_type,
-            InfiniteDelayType(OutputType("tick", EndType())),
+            InfiniteDelayType(OutputType("tick", EmptyType())),
         )
         assert_obligation = next(
             item for item in report.obligations if item.rule == "T-Assert"
@@ -498,7 +498,7 @@ class ContinuousGammaTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertEqual(
             report.constructed_type,
-            InfiniteDelayType(OutputType("sample", EndType())),
+            InfiniteDelayType(OutputType("sample", EmptyType())),
         )
 
     # 测试输入：把独立声明键 ode_x 分别用作 state、赋值目标、输入目标和表达式。

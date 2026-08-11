@@ -23,7 +23,7 @@ from hcsp_typechecker._internal import (
     BasicType,
     Configuration,
     ContinuousType,
-    EndType,
+    EmptyType,
     ODE,
     ODEAnnotation,
     FiniteDelayType,
@@ -80,7 +80,7 @@ class FiniteODETerminationTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertEqual(
             report.constructed_type,
-            FiniteDelayType(1, NoInterruptType(), EndType()),
+            FiniteDelayType(1, NoInterruptType(), EmptyType()),
         )
         self.assertEqual(calls, ["boundary"])
 
@@ -127,7 +127,7 @@ class FiniteODETerminationTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.UNKNOWN)
         self.assertEqual(
             report.constructed_type,
-            FiniteDelayType(1, NoInterruptType(), EndType()),
+            FiniteDelayType(1, NoInterruptType(), EmptyType()),
         )
         self.assertEqual(calls, ["boundary"])
 
@@ -163,7 +163,7 @@ class FiniteODETerminationTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertEqual(
             report.constructed_type,
-            FiniteDelayType(1, NoInterruptType(), EndType()),
+            FiniteDelayType(1, NoInterruptType(), EmptyType()),
         )
 
 

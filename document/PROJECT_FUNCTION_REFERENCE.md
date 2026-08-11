@@ -548,7 +548,8 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
 
 ## 项目架构与自有 AST
 
-实现按数据流划分为一个稳定门面、三个输入结构层和两个核心职责层：
+实现按数据流划分为一个稳定门面、输入结构层、两个 Table 2 业务层以及一个
+Table 3 操作语义层：
 
 - `hcsp_typechecker.api`：面向普通用户的门面层，分别编排 Constructor 的“完整
   source → 内部 Process AST → `TypeAST`”与 Checker 的“完整 typed source →
@@ -561,6 +562,11 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
   内部环境对象的片段转换；
 - `hcsp_typechecker.frontend.type_syntax`：用户给定行为 Type 的输入结构，以及 Type AST 的
   解析与规范化输出；
+- `hcsp_typechecker.frontend.normalized_type_syntax`：把状态图中的规范化 Type AST
+  输出为贴近原用户 Type 的只读文本；扁平内部选择省略分支圆括号，匿名递归使用
+  `mu { ... }` 和 `recursion_position(index)`；该语法没有 parser；
+- `hcsp_typechecker.frontend.type_transition_graph_syntax`：一次输出状态图元数据、
+  规范状态、边标签和 Table 3 规则证据；该语法同样没有 parser；
 - `hcsp_typechecker.frontend.type_constructor_frontend`：完整 source 的组合前端，负责共享词法、源码位置诊断，
   并将参数环境、Gamma、Theta 和 Process 绑定为一次 TypeConstructor 调用的内部输入；
 - `hcsp_typechecker.frontend.type_checker_frontend`：在同一完整输入后继续解析必填
@@ -594,10 +600,11 @@ Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登�
 ```text
 HCSPInputError, HCSPTypeConstructionError, HCSPTypeCheckingError,
 HCSPUntrustedTypeConstructionError, OutputMode, TypeAST,
-construct_hcsp_type, check_hcsp_type
+TypeTransitionGraph, construct_hcsp_type, check_hcsp_type,
+build_type_transition_graph
 ```
 
-普通调用方只依赖这八个名称。`parse_hcsp_source`、`parse_hcsp`、
+普通调用方只依赖上述稳定名称。`parse_hcsp_source`、`parse_hcsp`、
 `parse_expression`、`construct_type`、具体 AST 节点、判断、证明义务和后端配置只能
 从相应子包取得，它们是内部实现与开发审计接口，不承诺兼容性，也不会重新从
 包根导出。以后新增 Type AST 分析功能时，也应先通过门面定义清楚稳定协议，
@@ -745,5 +752,35 @@ KeYmaera X 配置，只额外公开 `keymaerax_timeout_seconds` 作为本次调�
 - Z3 或 KeYmaera X 给出反例：`false`；
 - 求解/证明未完成、超时或工具不可用：`unknown`。
 
-当前范围是依据 Table 2 构造类型、检查用户给定类型并证明相应 premises；不包含
-论文 Table 3 的类型级状态空间搜索（deadlock/livelock model checking）。
+当前范围已经包括依据 Table 2 构造类型、检查用户给定类型并证明相应 premises，
+以及从已有 Type AST 生成 Table 3 可达状态图；暂不包含 deadlock/livelock 等图上
+性质分析。
+
+## Table 3 状态转移图
+
+已有 `TypeAST` 可交给第三个稳定业务入口：
+
+```python
+from hcsp_typechecker import (
+    TypeTransitionGraph,
+    build_type_transition_graph,
+)
+
+graph: TypeTransitionGraph = build_type_transition_graph(
+    type_ast,
+    max_states=None,
+    max_transitions=None,
+    output="full",
+)
+```
+
+`result` 模式只打印图规模、完整性与初始规范 Type；`full` 模式使用两个内部
+frontend formatter 打印全部状态、边标签和规则证据。formatter 不进入包根公开白名单。
+
+该接口先把原 Type AST 单向转换为独立的规范化 Type AST，再由
+`backend/type_operational_semantics` 穷尽 Table 3 可达状态。规范化 AST 与
+`TypeTransitionGraph`、状态、边、标签和规则证据位于 `data_structures`；递归替换、
+规则执行和 BFS 图构造位于后端。项目不提供规范化树反向转换。完整说明见
+[规范化 Type AST 与 Table 3 状态转移图](TYPE_OPERATIONAL_SEMANTICS.md)以及
+[规范化 Type AST 只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)和
+[状态迁移图只读输出语法](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)。

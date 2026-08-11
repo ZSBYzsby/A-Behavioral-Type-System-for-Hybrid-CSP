@@ -24,7 +24,7 @@ from hcsp_typechecker._internal import (
     TypeConstructionReport,
     Configuration,
     ContinuousType,
-    EndType,
+    EmptyType,
     InputChannel,
     ODE,
     ODEAnnotation,
@@ -199,7 +199,7 @@ class DetailedReportTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.UNKNOWN)
         self.assertEqual(
             report.constructed_type,
-            FiniteDelayType(1, NoInterruptType(), EndType()),
+            FiniteDelayType(1, NoInterruptType(), EmptyType()),
         )
         expected_fragments = (
             "规则推导 : 已完成",
@@ -250,8 +250,8 @@ class DetailedReportTests(unittest.TestCase):
         )
         report = TypeConstructionReport(
             verdict=Verdict.TRUE,
-            constructed_type=EndType(),
-            constructed_component_types=(EndType(),),
+            constructed_type=EmptyType(),
+            constructed_component_types=(EmptyType(),),
             obligations=obligations,
             diagnostics=(),
         )

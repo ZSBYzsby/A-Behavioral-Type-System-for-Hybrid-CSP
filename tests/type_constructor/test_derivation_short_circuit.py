@@ -32,7 +32,7 @@ from hcsp_typechecker._internal import (
     ChannelType,
     Configuration,
     ContinuousType,
-    EndType,
+    EmptyType,
     If,
     InputChannel,
     InputType,
@@ -112,7 +112,7 @@ class DerivationShortCircuitTests(unittest.TestCase):
             FiniteDelayType(
                 1,
                 NoInterruptType(),
-                InfiniteDelayType(InputType("ch", EndType())),
+                InfiniteDelayType(InputType("ch", EmptyType())),
             ),
         )
         ode_obligations = tuple(
@@ -155,8 +155,8 @@ class DerivationShortCircuitTests(unittest.TestCase):
         )
 
     # 测试输入：三个无状态配置依次为 skip、assert(false)、missing?x。
-    # 预期行为：K1 完成 EndType；K2 在断言处失败；K3 完全未访问。总类型为
-    #           None，分量报告为 (EndType(), None, None)。
+    # 预期行为：K1 完成 EmptyType；K2 在断言处失败；K3 完全未访问。总类型为
+    #           None，分量报告为 (EmptyType(), None, None)。
     # 检查内容：核对部分分量类型，并确认 K3 没有任何步骤或诊断。
     # 论文对应：T-|| 需要所有配置 premise；这里验证顺序求解的部分结果表示。
     def test_parallel_report_keeps_only_completed_prefix(self) -> None:
@@ -174,7 +174,7 @@ class DerivationShortCircuitTests(unittest.TestCase):
 
         self.assertEqual(report.verdict, Verdict.FALSE)
         self.assertIsNone(report.constructed_type)
-        self.assertEqual(report.constructed_component_types, (EndType(), None, None))
+        self.assertEqual(report.constructed_component_types, (EmptyType(), None, None))
         self.assertFalse(any(item.location == "K3" for item in report.steps))
         self.assertFalse(
             any("missing" in item.message for item in report.diagnostics)

@@ -1,14 +1,15 @@
-r"""验证项目根包公开的单入口 HCSP 类型构造接口。
+r"""验证项目根包公开的 Type 构造、检查和 Table 3 状态图接口。
 
 测试内容
 --------
-1. 根包暴露 TypeConstructor 与 TypeChecker 的两个正式业务入口、Type AST 抽象、输出模式和公共异常；
+1. 根包只暴露 TypeConstructor、TypeChecker 与可自行打印结果的状态图生成接口；
 2. 单进程与并行 source 都能由一次调用直接转换为正式 Type AST；
 3. ``none``、``result``、``full`` 只改变打印详细程度，不改变推导结果；
 4. concrete syntax 解析失败时立即抛 ``HCSPInputError``，类型构造器不会启动；
 5. ``false`` 时抛 ``HCSPTypeConstructionError`` 并保留部分推导；``unknown`` 且推导完成时抛
    ``HCSPUntrustedTypeConstructionError``，通过 ``untrusted_type`` 提供完整但不可信的候选；
 6. 并行初态数量、初态元素类型和字符串路径条件都由同一个入口规范化。
+7. 图接口的 result/full 模式分别输出摘要与完整状态图，formatter 不单独公开。
 
 论文对应
 --------
@@ -34,6 +35,8 @@ from hcsp_typechecker import (
     HCSPUntrustedTypeConstructionError,
     OutputMode,
     TypeAST,
+    TypeTransitionGraph,
+    build_type_transition_graph,
     construct_hcsp_type,
     check_hcsp_type,
 )
@@ -61,11 +64,11 @@ class PublicFacadeTests(unittest.TestCase):
     """锁定普通调用者可见的名称、返回值、输出和失败协议。"""
 
     # 测试输入：直接查看根包导出白名单以及旧两阶段接口和内部实现名称。
-    # 预期行为：根包只导出构造与检查两个业务函数；不存在可公开取得 Process AST 的程序容器。
+    # 预期行为：根包只导出三个业务接口及其公共结果/异常类型；不公开 formatter。
     # 检查内容：精确比较 __all__，并确认两阶段函数、HCSPProgram 和 AST 构造器均隐藏。
     # 论文对应：Process AST 只是应用规则所需的内部中间表示，不是类型判断的最终结果。
-    def test_root_package_exports_only_constructor_and_checker(self) -> None:
-        """普通调用者应只看到构造与检查两个正式业务入口。"""
+    def test_root_package_exports_only_supported_business_interfaces(self) -> None:
+        """普通调用者应只看到已承诺稳定的业务与展示接口。"""
 
         expected = {
             "HCSPInputError",
@@ -74,6 +77,8 @@ class PublicFacadeTests(unittest.TestCase):
             "HCSPUntrustedTypeConstructionError",
             "OutputMode",
             "TypeAST",
+            "TypeTransitionGraph",
+            "build_type_transition_graph",
             "construct_hcsp_type",
             "check_hcsp_type",
         }
@@ -97,9 +102,83 @@ class PublicFacadeTests(unittest.TestCase):
             "InferenceStep",
             "HCSPTypeError",
             "HCSPUntrustedTypeError",
+            "format_normalized_type_ast",
+            "format_type_transition_graph",
         ):
             with self.subTest(hidden_name=hidden_name):
                 self.assertFalse(hasattr(hcsp_typechecker, hidden_name))
+
+    # 测试输入：通过公开 TypeConstructor 得到的 skip Type AST。
+    # 预期行为：公开图接口返回 complete 的单状态、零边 TypeTransitionGraph。
+    # 检查内容：用户无需接触规范化 AST 或后端即可连接 Type 构造与 Table 3 图生成。
+    # 论文对应：Table 2 的 skip 得到正常空类型；Table 3 下该类型没有可执行转移。
+    def test_constructed_type_can_feed_the_public_graph_interface(self) -> None:
+        """第三个根接口直接消费已有正式 Type AST 并返回图数据结构。"""
+
+        constructed = construct_hcsp_type(_SKIP_SOURCE)
+
+        graph = build_type_transition_graph(constructed)
+
+        self.assertIsInstance(graph, TypeTransitionGraph)
+        self.assertTrue(graph.complete)
+        self.assertEqual(len(graph.states), 1)
+        self.assertEqual(graph.transitions, ())
+
+    # 测试输入：skip Type AST 与状态图接口的 result 输出模式。
+    # 预期行为：摘要给出图规模、完整性和 ``normalized type empty`` 初态。
+    # 检查内容：规范 Type formatter 只在图接口内部使用，不需要独立公开函数。
+    # 论文对应：Table 3 状态节点以规范配置类型为内容；本测试只锁定工程展示协议。
+    def test_graph_result_mode_prints_the_initial_normalized_type(self) -> None:
+        """图接口的摘要模式在内部调用规范类型 formatter。"""
+
+        output = StringIO()
+
+        graph = build_type_transition_graph(
+            construct_hcsp_type(_SKIP_SOURCE),
+            output="result",
+            stream=output,
+        )
+
+        self.assertEqual(len(graph.states), 1)
+        rendered = output.getvalue()
+        self.assertIn("Table 3 状态迁移图结果", rendered)
+        self.assertIn("状态数量 : 1", rendered)
+        self.assertIn("转移数量 : 0", rendered)
+        self.assertIn("完整闭包 : 是", rendered)
+        self.assertIn("normalized type empty", rendered)
+
+    # 测试输入：公开接口由 skip 构造的单状态、零转移完整图。
+    # 预期行为：整图输出包含初态、完整性、状态块、规范类型和空 transitions 块。
+    # 检查内容：普通用户无需遍历内部元组即可获得稳定、完整的图文本。
+    # 论文对应：Table 3 下空类型无后继，但仍构成含一个初态的完整可达图。
+    def test_graph_full_mode_prints_the_complete_graph(self) -> None:
+        """图接口的完整模式在内部调用整图 formatter。"""
+
+        output = StringIO()
+
+        graph = build_type_transition_graph(
+            construct_hcsp_type(_SKIP_SOURCE),
+            output="full",
+            stream=output,
+        )
+
+        rendered = output.getvalue().rstrip("\n")
+
+        self.assertEqual(
+            rendered,
+            "\n".join(
+                (
+                    "type transition graph {",
+                    "    initial = S0",
+                    "    complete = true",
+                    "    states {",
+                    "        S0 = normalized type empty",
+                    "    }",
+                    "    transitions {}",
+                    "}",
+                )
+            ),
+        )
 
     # 测试输入：skip 的完整 source 与等价的用户 Type 段 empty。
     # 预期行为：TypeChecker 返回用户给定的正式 Type AST。
@@ -116,7 +195,7 @@ class PublicFacadeTests(unittest.TestCase):
         )
         self.assertEqual(str(checked), "0")
         self.assertIn("Type 源码 : type empty", output.getvalue())
-        self.assertNotIn("EndType()", output.getvalue())
+        self.assertNotIn("EmptyType()", output.getvalue())
 
     # 测试输入：skip 的完整 source 与不匹配的用户 Type bottom。
     # 预期行为：TypeChecker 报告 false，而不是将 bottom 当错误占位符接受。
@@ -217,7 +296,7 @@ class PublicFacadeTests(unittest.TestCase):
         full_text = full_stream.getvalue()
         self.assertEqual(silent.getvalue(), "")
         self.assertIn("Type 源码 : type empty", result_text)
-        self.assertNotIn("EndType()", result_text)
+        self.assertNotIn("EmptyType()", result_text)
         emitted_source = next(
             line.partition(":")[2].strip()
             for line in result_text.splitlines()

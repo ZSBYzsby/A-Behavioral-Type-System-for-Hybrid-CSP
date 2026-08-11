@@ -37,7 +37,6 @@ from hcsp_typechecker._internal import (
     Configuration,
     ContinuousType,
     EmptyType,
-    EndType,
     Expr,
     InputChannel,
     InfiniteDelayType,
@@ -350,7 +349,7 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         expected = FiniteDelayType(
             1,
             NoInterruptType(),
-            InfiniteDelayType(OutputType("done", EndType())),
+            InfiniteDelayType(OutputType("done", EmptyType())),
         )
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(types_equivalent(report.constructed_type, expected))

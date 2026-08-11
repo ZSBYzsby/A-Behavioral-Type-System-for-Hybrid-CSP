@@ -2,8 +2,9 @@
 
 本项目把一份带 Parameters、Gamma、Theta 与批注 HCSP Process 的用户文本直接
 转换为正式 Type AST，并证明构造过程中产生的必要公式；也可以由用户给出 Type，
-再按同一套项目规则检查它是否成立。普通用户只需要包根的两个业务接口
-`construct_hcsp_type(...)` 与 `check_hcsp_type(...)`；解析时
+再按同一套项目规则检查它是否成立；已有 Type AST 还可以按照 Table 3 生成完整可达
+状态转移图。普通用户使用包根的 `construct_hcsp_type(...)`、
+`check_hcsp_type(...)` 与 `build_type_transition_graph(...)`；解析时
 生成的 Process AST、具体 Type AST 构造器、判断对象、证明义务和证明器适配器均
 属于内部实现，不构成稳定调用协议。
 
@@ -29,7 +30,8 @@ Type AST，但该候选会被明确标为未验证、不可信。使用
 
 包根稳定白名单只有 `HCSPInputError`、`HCSPTypeConstructionError`、
 `HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`、`OutputMode`、
-`TypeAST`、`construct_hcsp_type` 和 `check_hcsp_type`。
+`TypeAST`、`TypeTransitionGraph`、`construct_hcsp_type`、`check_hcsp_type` 和
+`build_type_transition_graph`。
 
 ```python
 from hcsp_typechecker import (
@@ -112,6 +114,50 @@ TypeConstructor 相同的可信证明机制。Type 结构不匹配、静态规�
 为 `false/unknown` 时抛出 `HCSPTypeCheckingError`；只有全部规则和证明均为
 `true` 时返回用户给定的正式 `TypeAST`。
 
+### 从 Type AST 生成 Table 3 状态图
+
+```python
+from hcsp_typechecker import (
+    TypeTransitionGraph,
+    build_type_transition_graph,
+    construct_hcsp_type,
+)
+
+type_ast = construct_hcsp_type(source)
+graph = build_type_transition_graph(type_ast, output="full")
+
+assert isinstance(graph, TypeTransitionGraph)
+print(len(graph.states), len(graph.transitions), graph.complete)
+```
+
+该接口先把已有 Type AST 单向转换为操作语义专用的规范化 Type AST，再以初态为
+根穷尽 Table 3 的全部可达非确定性后继。规范化会消除并行排列和空单位元差异，
+把内部选择按结合/交换/幂等律展平排序去重，把外部选择按交换/幂等律排序去重，并
+使用 De Bruijn index 消除递归绑定变量改名差异。规范化 AST 只作为图结点内容，
+不提供转回原 Type AST 的接口。
+
+规范状态输出沿用 `parallel`、`empty`、`internal`、`delay`、`forever` 和
+`angelic`；根部增加 `normalized` 标记。由于规范内部选择已经展平，分支不再套
+圆括号；匿名递归写成 `mu { ... }`，De Bruijn 引用写成
+`recursion_position(index)`。该格式只用于展示和审计，不接受用户输入，也没有
+parser。语法见
+[规范化 Type AST 输出格式](document/NORMALIZED_TYPE_OUTPUT_SYNTAX.md)。
+
+`build_type_transition_graph(..., output="result")` 输出图规模、完整性和初始规范
+类型；`output="full"` 输出全部规范状态、边标签及 Table 3 规则证据。两个内部
+formatter 不从包根公开。完整格式见
+[状态迁移图输出语法](document/TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)。
+
+时间转移只前进到所有分量共同等待时的下一个最早有限 deadline；若全部分量均可
+无限等待，则生成 infinity 时间边。`EmptyType` 是并行单位元，不会阻塞其他分量；
+并行保留重复分量。相同源、标签和目标由多种规则实例得到时，图只保存一条边，
+但在 `derivations` 中保存全部不同推导证据。
+
+`max_states` 和 `max_transitions` 可限制状态爆炸。触及上限时接口返回部分图，且
+`graph.complete` 为 `False`，`graph.truncation_reason` 明确说明截断原因。当前接口
+只生成图结构，不执行死锁、活锁或其他图上性质分析。详细结构见
+[Type 操作语义与状态图](document/TYPE_OPERATIONAL_SEMANTICS.md)。
+
 常用可选参数：
 
 - `initial_states`：单分量传一个 mapping；并行系统按源码分量顺序传等长的
@@ -125,7 +171,7 @@ TypeConstructor 相同的可信证明机制。Type 结构不匹配、静态规�
 
 ### 输出模式
 
-两个业务接口都支持：
+TypeConstructor 和 TypeChecker 两个源码接口都支持：
 
 - `output="none"`：默认，不打印；
 - `output="result"`：打印最终结论；成功时显示可信类型，`unknown` 且构造完整时

@@ -26,7 +26,7 @@ import unittest
 from hcsp_typechecker._internal import (
     BasicType,
     Configuration,
-    EndType,
+    EmptyType,
     Skip,
     Verdict,
     construct_type,
@@ -41,7 +41,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
     # 测试输入：Gamma 声明 x、y，state 只提供 x=0，路径为
     #           ``x=0 and y*y>=0``。
     # 预期行为：允许缺少 y 的部分状态；替换后证明 ``y*y>=0`` 对所有 Real y
-    #           有效，T-sigma 和完整检查均成功，类型为 EndType。
+    #           有效，T-sigma 和完整检查均成功，类型为 EmptyType。
     # 检查内容：覆盖 dom(state) 是 dom(Gamma) 真子集时的正例。
     # 论文对应：[T-sigma] 的 ``|= phi[sigma]``。
     def test_partial_state_is_accepted_when_residual_formula_is_valid(self) -> None:
@@ -55,7 +55,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
         )
 
         self.assertEqual(report.verdict, Verdict.TRUE)
-        self.assertEqual(report.constructed_type, EndType())
+        self.assertEqual(report.constructed_type, EmptyType())
         obligation = next(
             item for item in report.obligations if item.rule == "T-sigma"
         )
@@ -65,7 +65,7 @@ class TSigmaPartialStateTests(unittest.TestCase):
     # 测试输入：Gamma 声明 x、y，state 只提供 x=0，路径为
     #           ``x=0 and y>0``。
     # 预期行为：替换后 ``y>0`` 不是有效公式；Z3 给出反例，T-sigma 为 false，
-    #           而不是 unknown；推导立即停止，不再访问 Skip 或生成 EndType。
+    #           而不是 unknown；推导立即停止，不再访问 Skip 或生成 EmptyType。
     # 检查内容：覆盖“可满足但不恒真”的残留公式，防止旧实现只识别恒假公式。
     # 论文对应：[T-sigma] 要求有效性 ``|= phi[sigma]``，一个反例即可否证。
     def test_counterexample_to_residual_formula_is_false_not_unknown(self) -> None:

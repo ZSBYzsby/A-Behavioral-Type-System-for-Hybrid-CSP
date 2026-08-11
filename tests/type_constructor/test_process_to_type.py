@@ -45,7 +45,7 @@ from hcsp_typechecker._internal import (
     Configuration,
     ContinuousType,
     ConfigurationType,
-    EndType,
+    EmptyType,
     EventChoice,
     ExternalChoiceType,
     If,
@@ -187,14 +187,14 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "skip 转换为终止类型 0",
             Skip(),
             Verdict.TRUE,
-            EndType(),
+            EmptyType(),
         ),
         ConversionScenario(
             "P02_ASSIGN",
             "赋值更新符号状态但不增加可观察类型前缀",
             Assign("x", 1),
             Verdict.TRUE,
-            EndType(),
+            EmptyType(),
             gamma={"x": BasicType.INT},
             state={"x": 0},
         ),
@@ -203,7 +203,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "成功断言保持 continuation 类型",
             Assert("x >= 0"),
             Verdict.TRUE,
-            EndType(),
+            EmptyType(),
             gamma={"x": BasicType.INT},
             state={"x": 0},
             path="x >= 0",
@@ -214,7 +214,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "一槽 ch?(x) 转换为输入前缀类型",
             InputChannel("in", "x"),
             Verdict.TRUE,
-            InfiniteDelayType(InputType("in", EndType())),
+            InfiniteDelayType(InputType("in", EmptyType())),
             theta={"in": integer},
         ),
         ConversionScenario(
@@ -222,7 +222,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "一槽 ch!(e) 转换为输出前缀类型",
             OutputChannel("out", 1),
             Verdict.TRUE,
-            InfiniteDelayType(OutputType("out", EndType())),
+            InfiniteDelayType(OutputType("out", EmptyType())),
             theta={"out": integer},
             obligation_rules=("T-Out",),
         ),
@@ -237,8 +237,8 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             InternalChoiceType(
                 (
-                    InfiniteDelayType(OutputType("positive", EndType())),
-                    InfiniteDelayType(OutputType("negative", EndType())),
+                    InfiniteDelayType(OutputType("positive", EmptyType())),
+                    InfiniteDelayType(OutputType("negative", EmptyType())),
                 )
             ),
             gamma={"x": BasicType.INT},
@@ -252,8 +252,8 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             InfiniteDelayType(ExternalChoiceType(
                 (
-                    InputType("sense", EndType()),
-                    OutputType("stop", EndType()),
+                    InputType("sense", EmptyType()),
+                    OutputType("stop", EmptyType()),
                 )
             )),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
@@ -271,7 +271,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             InfiniteDelayType(
                 InputType(
                     "in",
-                    InfiniteDelayType(OutputType("out", EndType())),
+                    InfiniteDelayType(OutputType("out", EmptyType())),
                 )
             ),
             theta={"in": integer, "out": integer},
@@ -288,9 +288,9 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             InternalChoiceType(
                 (
-                    InfiniteDelayType(OutputType("left", EndType())),
-                    InfiniteDelayType(OutputType("right", EndType())),
-                    InfiniteDelayType(OutputType("audit", EndType())),
+                    InfiniteDelayType(OutputType("left", EmptyType())),
+                    InfiniteDelayType(OutputType("right", EmptyType())),
+                    InfiniteDelayType(OutputType("audit", EmptyType())),
                 )
             ),
             theta={"left": integer, "right": integer, "audit": integer},
@@ -319,7 +319,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             FiniteDelayType(
                 1,
                 NoInterruptType(),
-                InfiniteDelayType(OutputType("done", EndType())),
+                InfiniteDelayType(OutputType("done", EmptyType())),
             ),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"done": integer},
@@ -336,8 +336,8 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             ParallelType(
                 (
-                    InfiniteDelayType(OutputType("left", EndType())),
-                    InfiniteDelayType(InputType("right", EndType())),
+                    InfiniteDelayType(OutputType("left", EmptyType())),
+                    InfiniteDelayType(InputType("right", EmptyType())),
                 )
             ),
             theta={"left": integer, "right": integer},
@@ -347,7 +347,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "赋值后的符号状态可证明后继断言",
             Sequence.of(Assign("x", "x + 1"), Assert("x >= 1")),
             Verdict.TRUE,
-            EndType(),
+            EmptyType(),
             gamma={"x": BasicType.INT},
             state={"x": 0},
             path="x >= 0",
@@ -370,13 +370,13 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                     InfiniteDelayType(
                         OutputType(
                             "positive",
-                            InfiniteDelayType(OutputType("done", EndType())),
+                            InfiniteDelayType(OutputType("done", EmptyType())),
                         )
                     ),
                     InfiniteDelayType(
                         OutputType(
                             "negative",
-                            InfiniteDelayType(OutputType("done", EndType())),
+                            InfiniteDelayType(OutputType("done", EmptyType())),
                         )
                     ),
                 )
@@ -397,7 +397,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             InfiniteDelayType(
                 InputType(
                     "in",
-                    InfiniteDelayType(OutputType("out", EndType())),
+                    InfiniteDelayType(OutputType("out", EmptyType())),
                 )
             ),
             gamma={"y": BasicType.INT},
@@ -411,7 +411,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "有限 d、非空 A、空通信边界后继仍使用统一有限时延节点",
             timeout_ode,
             Verdict.TRUE,
-            FiniteDelayType(2, OutputType("tick", EndType()), EndType()),
+            FiniteDelayType(2, OutputType("tick", EmptyType()), EmptyType()),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"tick": integer},
             dl_checker=_true_dl,
@@ -426,9 +426,9 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                 1,
                 OutputType(
                     "alarm",
-                    InfiniteDelayType(OutputType("done", EndType())),
+                    InfiniteDelayType(OutputType("done", EmptyType())),
                 ),
-                InfiniteDelayType(OutputType("done", EndType())),
+                InfiniteDelayType(OutputType("done", EmptyType())),
             ),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": integer, "done": integer},
@@ -444,7 +444,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             Verdict.TRUE,
             InfiniteDelayType(OutputType(
                 "alarm",
-                InfiniteDelayType(OutputType("done", EndType())),
+                InfiniteDelayType(OutputType("done", EmptyType())),
             )),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={"alarm": integer, "done": integer},
@@ -465,13 +465,13 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
                     InfiniteDelayType(
                         OutputType(
                             "left",
-                            InfiniteDelayType(OutputType("done", EndType())),
+                            InfiniteDelayType(OutputType("done", EmptyType())),
                         )
                     ),
                     InfiniteDelayType(
                         OutputType(
                             "right",
-                            InfiniteDelayType(OutputType("done", EndType())),
+                            InfiniteDelayType(OutputType("done", EmptyType())),
                         )
                     ),
                 )
@@ -547,7 +547,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
             "非平凡 ODE 证明未决时仍生成完整但不可信的候选类型",
             Sequence.of(unknown_ode, Skip()),
             Verdict.UNKNOWN,
-            FiniteDelayType(1, NoInterruptType(), EndType()),
+            FiniteDelayType(1, NoInterruptType(), EmptyType()),
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             state={"x": 0},
             path="x == 0",
@@ -744,7 +744,7 @@ class ConstructionFailureSeparationTests(unittest.TestCase):
     """验证内部推导失败与有限 ODE 正常终止候选的边界。"""
 
     # 测试输入：合法 skip 与非法输入的并行报告，以及有限、无中断、无后继的 ODE。
-    # 预期行为：前者按位置报告 (EndType(), None)，后者隐式接续 Skip 并正常终止。
+    # 预期行为：前者按位置报告 (EmptyType(), None)，后者隐式接续 Skip 并正常终止。
     # 检查内容：失败不伪造类型，有限 ODE 的构造结果也不含 BottomType。
     # 论文对应：本项目将有限 ODE 的省略末尾解释为正常过程终止。
     def test_failure_is_none_and_terminal_ode_uses_normal_end(self) -> None:
@@ -761,7 +761,7 @@ class ConstructionFailureSeparationTests(unittest.TestCase):
 
         self.assertEqual(report.verdict, Verdict.FALSE)
         self.assertIsNone(report.constructed_type)
-        self.assertEqual(report.constructed_component_types, (EndType(), None))
+        self.assertEqual(report.constructed_component_types, (EmptyType(), None))
         terminal_ode_report = construct_type(
             gamma={"x": BasicType.REAL, "ode_x": ContinuousType(("x",))},
             theta={},
@@ -780,7 +780,7 @@ class ConstructionFailureSeparationTests(unittest.TestCase):
         self.assertEqual(terminal_ode_report.verdict, Verdict.TRUE)
         self.assertEqual(
             terminal_ode_report.constructed_type,
-            FiniteDelayType(1, NoInterruptType(), EndType()),
+            FiniteDelayType(1, NoInterruptType(), EmptyType()),
         )
 
 

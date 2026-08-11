@@ -29,7 +29,7 @@ from hcsp_typechecker._internal import (
     Assert,
     BasicType,
     Configuration,
-    EndType,
+    EmptyType,
     InputChannel,
     OutputChannel,
     Parallel,
@@ -232,7 +232,7 @@ class ParallelContextCoherenceTests(unittest.TestCase):
         self.assertTrue(
             types_equivalent(
                 report.constructed_type,
-                ParallelType((EndType(), EndType())),
+                ParallelType((EmptyType(), EmptyType())),
             )
         )
         self.assertEqual(sum(step.rule == "T-sigma" for step in report.steps), 2)

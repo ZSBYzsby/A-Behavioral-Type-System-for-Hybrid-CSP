@@ -34,13 +34,23 @@ from .frontend.type_constructor_frontend.parser import (
 )
 from .frontend.type_checker_frontend import parse_typechecking_source
 from .frontend.type_constructor_frontend.source import ParsedHCSPSource
+from .frontend.normalized_type_syntax import (
+    format_normalized_type_ast as _format_normalized_type_ast,
+)
+from .frontend.type_transition_graph_syntax import (
+    format_type_transition_graph as _format_type_transition_graph,
+)
 from .data_structures.process_ast.ast import HCSP, Process
 from .data_structures.type_ast.ast import ConfigurationType
 from .data_structures.type_ast.render import format_type_source
 from .backend.type_constructor import TypeConstructionReport, construct_type
 from .backend.type_checker import TypeChecker, TypeCheckingRequest
+from .backend.type_operational_semantics import (
+    build_type_transition_graph as _build_type_transition_graph,
+)
 from .backend.common.keymaerax import KeYmaeraXConfig
 from .backend.common.model import Verdict
+from .data_structures.type_transition_graph import TypeTransitionGraph
 from .data_structures.runtime_context import (
     ChannelType,
     Configuration,
@@ -54,7 +64,7 @@ TypeAST: TypeAlias = ConfigurationType
 
 
 class OutputMode(str, Enum):
-    """控制单一公共接口的结果展示详细程度。"""
+    """控制各公共业务接口的结果展示详细程度。"""
 
     NONE = "none"
     RESULT = "result"
@@ -782,6 +792,52 @@ def check_hcsp_type(
     raise error
 
 
+def build_type_transition_graph(
+    type_ast: TypeAST,
+    *,
+    max_states: int | None = None,
+    max_transitions: int | None = None,
+    output: OutputMode | str = OutputMode.NONE,
+    stream: TextIO | None = None,
+) -> TypeTransitionGraph:
+    """按 Table 3 穷尽给定 Type AST 的可达规范状态和全部非确定性转移。
+
+    接口先把现有 Type AST 单向转换为规范化 Type AST，再以最大关键 deadline
+    策略生成状态图。可选规模上限只用于防止状态爆炸；触及上限时返回图的
+    ``complete`` 为 false，并在 ``truncation_reason`` 中说明原因。``result`` 输出
+    图规模、完整性和初始规范类型；``full`` 输出全部状态、转移和规则证据。
+    """
+
+    if not isinstance(type_ast, ConfigurationType):
+        raise TypeError("type_ast must be a TypeAST/ConfigurationType")
+    mode = _normalize_output_mode(output)
+    graph = _build_type_transition_graph(
+        type_ast,
+        max_states=max_states,
+        max_transitions=max_transitions,
+    )
+    if mode is OutputMode.RESULT:
+        lines = [
+            "Table 3 状态迁移图结果",
+            f"初始状态 : S{graph.initial_state}",
+            f"状态数量 : {len(graph.states)}",
+            f"转移数量 : {len(graph.transitions)}",
+            "完整闭包 : " + ("是" if graph.complete else "否"),
+        ]
+        if graph.truncation_reason is not None:
+            lines.append("截断原因 : " + graph.truncation_reason)
+        initial = graph.states[graph.initial_state].type_ast
+        lines.append("初始规范 Type :")
+        lines.extend(
+            "    " + line
+            for line in _format_normalized_type_ast(initial).splitlines()
+        )
+        _write_output("\n".join(lines), stream)
+    elif mode is OutputMode.FULL:
+        _write_output(_format_type_transition_graph(graph), stream)
+    return graph
+
+
 __all__ = [
     "HCSPInputError",
     "HCSPTypeConstructionError",
@@ -789,6 +845,8 @@ __all__ = [
     "HCSPUntrustedTypeConstructionError",
     "OutputMode",
     "TypeAST",
+    "TypeTransitionGraph",
+    "build_type_transition_graph",
     "construct_hcsp_type",
     "check_hcsp_type",
 ]

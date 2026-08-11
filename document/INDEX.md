@@ -14,10 +14,13 @@
 - [用户给定 Type 的输入语法与 Type AST 往返](TYPE_INPUT_SYNTAX.md)
 - [Process 与表达式子语法](HCSP_INPUT_SYNTAX.md)
 
-## TypeConstructor、TypeChecker 与内部实现
+## TypeConstructor、TypeChecker、Table 3 与内部实现
 
 - [TypeConstructor：Process AST 到 Type AST 的真实构造过程](TYPE_CONSTRUCTOR.md)
 - [TypeChecker：检查用户给定 Type 的规则递归过程](TYPE_CHECKER.md)
+- [Table 3：规范化 Type AST 与状态转移图生成](TYPE_OPERATIONAL_SEMANTICS.md)
+- [规范化 Type AST 的只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)
+- [Table 3 状态迁移图的只读输出语法](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)
 - [完整项目功能参考](PROJECT_FUNCTION_REFERENCE.md)
 - [后端代码风格约定](BACKEND_CODE_STYLE.md)
 

@@ -27,13 +27,15 @@ from fractions import Fraction
 from math import inf, nan
 import unittest
 
+import hcsp_typechecker._internal as internal_api
+import hcsp_typechecker.data_structures.type_ast as type_ast_api
+
 from hcsp_typechecker._internal import (
     AngelicType,
     BehavioralType,
     BottomType,
     ConfigurationType,
     EmptyType,
-    EndType,
     ExternalChoiceType,
     FiniteDelayType,
     InfiniteDelayType,
@@ -53,6 +55,17 @@ from hcsp_typechecker._internal import (
 
 class AbstractTypeBaseTests(unittest.TestCase):
     """确认类型语法分类层不能绕过具体论文产生式单独构造。"""
+
+    # 测试输入：类型 AST 子包与内部审计聚合模块的导出命名空间。
+    # 预期行为：二者只公开 EmptyType，不再提供历史 EndType 兼容别名。
+    # 检查内容：锁定正常空通信行为的唯一类名，避免操作语义出现两套终止术语。
+    # 论文对应：Table 2 的 skip/空顺序尾统一对应项目正式节点 EmptyType。
+    def test_empty_type_has_no_end_type_alias(self) -> None:
+        """正常空行为只能通过 ``EmptyType`` 名称引用。"""
+
+        self.assertIs(type_ast_api.EmptyType, EmptyType)
+        self.assertFalse(hasattr(type_ast_api, "EndType"))
+        self.assertFalse(hasattr(internal_api, "EndType"))
 
     # 测试输入：直接实例化行为类型根、配置类型、过程类型和 angelic 类型基类。
     # 预期行为：四个构造都因继承抽象 __str__ 而抛出 TypeError。
@@ -76,14 +89,14 @@ class AngelicTypeNormalizationTests(unittest.TestCase):
     """检查 ``A`` 的分支数量与唯一 AST 表示。"""
 
     # 测试输入：零个、一个和两个合法通信分支，以及直接构造的非规范选择。
-    # 预期行为：工厂分别返回 End/Input/External；空或单分支 External 构造失败。
-    # 检查内容：同时拒绝把 EndType 伪装成 ExternalChoiceType 的通信分支。
+    # 预期行为：工厂分别返回 NoInterrupt/Input/External；非规范 External 构造失败。
+    # 检查内容：同时拒绝把 EmptyType 伪装成 ExternalChoiceType 的通信分支。
     # 论文对应：A ::= 0 | A \sqcap ch?.T | A \sqcap ch!.T。
     def test_angelic_choice_has_one_shape_per_branch_count(self) -> None:
         """同一个 angelic choice 不应再有多个结构不同的 AST 表示。"""
 
-        input_branch = InputType("in", EndType())
-        output_branch = OutputType("out", EndType())
+        input_branch = InputType("in", EmptyType())
+        output_branch = OutputType("out", EmptyType())
         self.assertIsInstance(make_external_choice(()), NoInterruptType)
         self.assertIs(make_external_choice((input_branch,)), input_branch)
         self.assertEqual(
@@ -106,8 +119,8 @@ class AngelicTypeNormalizationTests(unittest.TestCase):
 
         for name in ("channel", "channel_1", "_private", "Channel2"):
             with self.subTest(valid=name):
-                self.assertEqual(InputType(name, EndType()).channel, name)
-                self.assertEqual(OutputType(name, EndType()).channel, name)
+                self.assertEqual(InputType(name, EmptyType()).channel, name)
+                self.assertEqual(OutputType(name, EmptyType()).channel, name)
 
         for name in (
             "",
@@ -123,9 +136,9 @@ class AngelicTypeNormalizationTests(unittest.TestCase):
         ):
             with self.subTest(invalid=repr(name)):
                 with self.assertRaises(ValueError):
-                    InputType(name, EndType())
+                    InputType(name, EmptyType())
                 with self.assertRaises(ValueError):
-                    OutputType(name, EndType())
+                    OutputType(name, EmptyType())
 
     # 测试输入：ASCII 与 Unicode/NFKC 兼容形式的 TypeVar 和 MuType 绑定名。
     # 预期行为：ASCII 名称通过，非 ASCII 名称在直接 Type AST 构造时拒绝。
@@ -135,13 +148,13 @@ class AngelicTypeNormalizationTests(unittest.TestCase):
         """类型变量引用与递归绑定名必须满足项目 ASCII IDENT。"""
 
         self.assertEqual(TypeVar("t_1").name, "t_1")
-        self.assertEqual(MuType("t_1", EndType()).variable, "t_1")
+        self.assertEqual(MuType("t_1", EmptyType()).variable, "t_1")
         for name in ("类型", "ｔ", "K"):
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
                     TypeVar(name)
                 with self.assertRaises(ValueError):
-                    MuType(name, EndType())
+                    MuType(name, EmptyType())
 
 
 class TimedTypeNormalizationTests(unittest.TestCase):
@@ -193,7 +206,7 @@ class TimedTypeNormalizationTests(unittest.TestCase):
     def test_delay_node_constructors_reject_overlapping_forms(self) -> None:
         """具体 delay 节点不能重新表达另一个节点负责的缩写。"""
 
-        communication = OutputType("ch", EndType())
+        communication = OutputType("ch", EmptyType())
         with self.assertRaises(TypeError):
             FiniteDelayType(1, "not-an-interrupt", EmptyType())  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
@@ -209,12 +222,12 @@ class TimedTypeNormalizationTests(unittest.TestCase):
         """类型节点独立维护精确非负有限时延不变量。"""
 
         self.assertEqual(
-            FiniteDelayType(0.5, NoInterruptType(), EndType()).duration,
+            FiniteDelayType(0.5, NoInterruptType(), EmptyType()).duration,
             Fraction(1, 2),
         )
         self.assertEqual(
             FiniteDelayType(
-                Decimal("0.125"), NoInterruptType(), EndType()
+                Decimal("0.125"), NoInterruptType(), EmptyType()
             ).duration,
             Fraction(1, 8),
         )
@@ -226,7 +239,7 @@ class TimedTypeNormalizationTests(unittest.TestCase):
         for invalid in (-1, True, nan, -inf, Decimal("NaN")):
             with self.subTest(invalid=invalid):
                 with self.assertRaises((TypeError, ValueError)):
-                    FiniteDelayType(invalid, NoInterruptType(), EndType())
+                    FiniteDelayType(invalid, NoInterruptType(), EmptyType())
 
 
 class TypeLayerAndRecursionTests(unittest.TestCase):
@@ -239,17 +252,17 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
     def test_configuration_type_cannot_appear_inside_process_type(self) -> None:
         """组合配置类型不能污染通信后继、内部选择或递归体。"""
 
-        combined = ParallelType((EndType(), BottomType()))
+        combined = ParallelType((EmptyType(), BottomType()))
         with self.assertRaises(TypeError):
             InputType("ch", combined)  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
-            InternalChoiceType((EndType(), combined))  # type: ignore[arg-type]
+            InternalChoiceType((EmptyType(), combined))  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             MuType("t", combined)  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
-            InternalChoiceType((EndType(),))
+            InternalChoiceType((EmptyType(),))
         with self.assertRaises(ValueError):
-            ParallelType((EndType(),))
+            ParallelType((EmptyType(),))
         with self.assertRaises(TypeError):
             ProcessType()
 
@@ -260,9 +273,9 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
     def test_internal_choice_preserves_parenthesized_grouping(self) -> None:
         """内部选择的左右嵌套分块必须保持为不同 Type AST。"""
 
-        a = InfiniteDelayType(OutputType("a", EndType()))
-        b = InfiniteDelayType(OutputType("b", EndType()))
-        c = InfiniteDelayType(OutputType("c", EndType()))
+        a = InfiniteDelayType(OutputType("a", EmptyType()))
+        b = InfiniteDelayType(OutputType("b", EmptyType()))
+        c = InfiniteDelayType(OutputType("c", EmptyType()))
         left_grouped = InternalChoiceType((InternalChoiceType((a, b)), c))
         right_grouped = InternalChoiceType((a, InternalChoiceType((b, c))))
 
@@ -304,7 +317,7 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
             FiniteDelayType(
                 1,
                 InputType("ch", TypeVar("t")),
-                InfiniteDelayType(OutputType("done", EndType())),
+                InfiniteDelayType(OutputType("done", EmptyType())),
             ),
         )
         right = MuType(
@@ -312,7 +325,7 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
             FiniteDelayType(
                 Fraction(1),
                 InputType("ch", TypeVar("u")),
-                InfiniteDelayType(OutputType("done", EndType())),
+                InfiniteDelayType(OutputType("done", EmptyType())),
             ),
         )
         changed = MuType(
@@ -320,7 +333,7 @@ class TypeLayerAndRecursionTests(unittest.TestCase):
             FiniteDelayType(
                 1,
                 OutputType("ch", TypeVar("u")),
-                InfiniteDelayType(OutputType("done", EndType())),
+                InfiniteDelayType(OutputType("done", EmptyType())),
             ),
         )
         self.assertTrue(types_equivalent(left, right))
@@ -341,8 +354,8 @@ class TypeRenderingTests(unittest.TestCase):
             "in",
             InternalChoiceType(
                 (
-                    InfiniteDelayType(OutputType("left", EndType())),
-                    InfiniteDelayType(OutputType("right", EndType())),
+                    InfiniteDelayType(OutputType("left", EmptyType())),
+                    InfiniteDelayType(OutputType("right", EmptyType())),
                 )
             ),
         )
@@ -362,14 +375,14 @@ class TypeRenderingTests(unittest.TestCase):
 
         choices = ExternalChoiceType(
             (
-                InputType("reset", EndType()),
-                OutputType("alarm", EndType()),
+                InputType("reset", EmptyType()),
+                OutputType("alarm", EmptyType()),
             )
         )
         fallback = InternalChoiceType(
             (
-                InfiniteDelayType(OutputType("left", EndType())),
-                InfiniteDelayType(OutputType("right", EndType())),
+                InfiniteDelayType(OutputType("left", EmptyType())),
+                InfiniteDelayType(OutputType("right", EmptyType())),
             )
         )
 
@@ -396,14 +409,14 @@ class TypeRenderingTests(unittest.TestCase):
             InternalChoiceType(
                 (
                     InfiniteDelayType(InputType("ch", TypeVar("t"))),
-                    InfiniteDelayType(OutputType("stop", EndType())),
+                    InfiniteDelayType(OutputType("stop", EmptyType())),
                 )
             ),
         )
         delayed = FiniteDelayType(
             1,
             NoInterruptType(),
-            InfiniteDelayType(OutputType("done", EndType())),
+            InfiniteDelayType(OutputType("done", EmptyType())),
         )
 
         self.assertEqual(

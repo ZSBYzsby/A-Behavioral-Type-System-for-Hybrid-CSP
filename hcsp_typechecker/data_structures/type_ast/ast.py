@@ -189,11 +189,6 @@ class EmptyType(ProcessType):
         return "0"
 
 
-# 旧的内部审计脚本曾把 ``EndType`` 用作过程终止。保留该私有兼容别名，
-# 但 TypeConstructor 与规范化工厂均不再使用它；新代码必须使用 EmptyType。
-EndType = EmptyType
-
-
 # --------------------------------------------------------------------------
 # 论文对应：Section 4.1 的底行为 \bot，即空 demonic choice/异常终止。
 # 构造方式：BottomType()。
@@ -318,7 +313,7 @@ class ExternalChoiceType(AngelicType):
 
 
 # 论文对应：A ::= 0 | A \sqcap ch?.T | A \sqcap ch!.T 的规范化构造入口。
-# 功能：根据通信分支数返回唯一的 End/Input/Output/ExternalChoice 节点。
+# 功能：根据通信分支数返回唯一的 NoInterrupt/Input/Output/ExternalChoice 节点。
 # 构造检查：拒绝非通信分支，避免同一个 A 拥有多种 AST 形状。
 def make_external_choice(branches: Iterable[CommunicationType]) -> AngelicType:
     """把零个、一个或多个通信分支规范成唯一的 angelic type 节点。"""

@@ -26,7 +26,7 @@ from hcsp_typechecker._internal import (
     BasicType,
     ChannelType,
     Configuration,
-    EndType,
+    EmptyType,
     InputChannel,
     InputType,
     InfiniteDelayType,
@@ -70,7 +70,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         self.assertTrue(
             types_equivalent(
                 report.constructed_type,
-                InfiniteDelayType(InputType("data", EndType())),
+                InfiniteDelayType(InputType("data", EmptyType())),
             )
         )
         self.assertIn("T-Assert", {item.rule for item in report.obligations})
@@ -104,7 +104,7 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         self.assertTrue(
             types_equivalent(
                 report.constructed_type,
-                InfiniteDelayType(OutputType("pair", EndType())),
+                InfiniteDelayType(OutputType("pair", EmptyType())),
             )
         )
         t_out = [item for item in report.obligations if item.rule == "T-Out"]
@@ -186,8 +186,8 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         )
         expected = ParallelType(
             (
-                InfiniteDelayType(InputType("pair", EndType())),
-                InfiniteDelayType(OutputType("pair", EndType())),
+                InfiniteDelayType(InputType("pair", EmptyType())),
+                InfiniteDelayType(OutputType("pair", EmptyType())),
             )
         )
 

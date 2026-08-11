@@ -1,4 +1,4 @@
-"""锁定 TypeConstructor、TypeChecker 与共享后端的目录边界。
+"""锁定 TypeConstructor、TypeChecker、Table 3 操作语义与共享后端目录边界。
 
 测试内容：
 
@@ -7,6 +7,7 @@
 * 二者是否只共同继承 ``Table2RuleEngine``，而不互相继承；
 * ``backend/common`` 是否保持对两个业务包的零依赖；
 * ``data_structures`` 是否只保留领域数据且不反向依赖后端；
+* Table 3 操作语义是否只依赖 Type/图数据结构而不反向调用两个 Table 2 后端；
 * 已废弃的 ``typechecking`` 混合目录是否完全移除。
 
 预期行为：共享规则和证明工具只能位于 common；Constructor 与 Checker 可以
@@ -76,10 +77,29 @@ class BackendBoundaryTests(unittest.TestCase):
         self.assertNotIn("type_checker", constructor_source)
         self.assertNotIn("type_constructor", checker_source)
 
+    # 测试输入：backend/type_operational_semantics 下全部 Python 源码。
+    # 预期行为：Table 3 图生成不导入 TypeConstructor 或 TypeChecker。
+    # 检查内容：状态图后端只消费已有 Type AST，不重复运行任何 Table 2 业务流程。
+    # 论文对应：Table 3 的前提是已经得到类型，与 Table 2 构造/检查算法职责分离。
+    def test_operational_semantics_does_not_import_table2_backends(self) -> None:
+        """Table 3 后端不能通过 Constructor/Checker 间接决定图转移。"""
+
+        semantics = (
+            Path(hcsp_typechecker.__file__).parent
+            / "backend"
+            / "type_operational_semantics"
+        )
+        source = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(semantics.glob("*.py"))
+        )
+        self.assertNotIn("type_constructor", source)
+        self.assertNotIn("type_checker", source)
+
     # 测试输入：data_structures 的目录和全部 Python 导入文本。
-    # 预期行为：只保留 Process AST、Type AST、runtime context，且不依赖 backend。
-    # 检查内容：旧业务模型目录不存在，数据结构源码不含后端导入路径。
-    # 论文对应：该边界只整理实现依赖，不改变任何行为类型或推导判断。
+    # 预期行为：Process/Type/规范 Type/runtime context/图模型均不依赖 backend。
+    # 检查内容：旧业务模型目录不存在，全部领域数据源码不含后端导入路径。
+    # 论文对应：数据层同时承载 Table 2 类型和 Table 3 图，但不执行任何规则算法。
     def test_data_structures_contain_only_domain_models(self) -> None:
         """领域数据层不得重新吸收 Constructor/Checker 的业务模型。"""
 
