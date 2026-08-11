@@ -28,7 +28,8 @@ class ParsedHCSPSource:
     字段中的只读映射已经完成用户输入层能够独立执行的结构检查：声明名不重复，
     ``ContinuousType`` 的成员均有同一 Gamma 中的 ``Real`` 标量声明，并且每个
     ``ChannelType`` 都具有显式、互异且与槽位一一对应的 refinement binders。
-    refinement 的自由变量解析和 Bool 静态检查仍由完整类型构造上下文负责。
+    refinement 的自由变量解析和 Bool 静态检查仍由 Constructor/Checker 共用的
+    完整环境准备阶段负责。
     """
 
     gamma: Mapping[str, GammaType]

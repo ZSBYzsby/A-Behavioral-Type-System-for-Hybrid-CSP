@@ -1,4 +1,8 @@
-"""从同一 token 流解析 TypeChecker 的程序环境、Process 与用户 Type。"""
+"""从同一 token 流解析 TypeChecker 的环境、Process 与用户 Type。
+
+本模块复用 Constructor 前端的完整 program prefix 语法，再从同一绝对 token
+位置解析必填 ``type`` 分节；因此错误行列始终对应原始 typed source。
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from .source import ParsedTypeCheckingSource
 
 
 class TypeCheckingParser(Parser):
-    """在 TypeConstructor 输入后继续消费一个必填 ``type`` 分节。"""
+    """在 Constructor 的 program prefix 后继续消费必填 ``type`` 分节。"""
 
     def parse_complete_typechecking_source(self) -> ParsedTypeCheckingSource:
         """解析 ``gamma [parameters] theta process type EOF``。"""
@@ -30,7 +34,7 @@ def parse_typechecking_source(
     *,
     source_name: str = "<input>",
 ) -> ParsedTypeCheckingSource:
-    """解析包含用户给定 ``type`` 段的完整 TypeChecker 输入。"""
+    """解析完整 typed source，并绑定程序记录与给定 Type AST。"""
 
     return TypeCheckingParser(
         _checked_source(source, source_name),

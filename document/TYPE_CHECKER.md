@@ -59,6 +59,16 @@ Checker 不调用 `TypeConstructor.construct`，也不先构造一棵完整类�
 4. 规则的子 judgment 分别取得用户 Type 的对应子树并继续递归；
 5. 全部 Type 子树被恰好消费且全部有效证明义务为 true 时检查成功。
 
+第 1 步会主动遍历全部 Theta refinement，而不是只检查 Process 实际使用的通道。
+所以未使用通道中的未绑定名称、非 Bool refinement 或其他静态表达式错误，也会在
+进入 Type 结构递归前归入 `environment` 错误。
+
+证明器返回 `false` 时当前规则立即失败；返回 `unknown` 时，Checker 保留未决
+义务并继续消费后续 Type 结构，以便完整报告还能说明其余分支是否匹配。但
+`unknown` 不会被当作成功：检查结束后仍抛出 `HCSPTypeCheckingError(kind="proof-unknown")`。
+这与 Constructor 的区别是，Checker 不会通过异常交付“不可信的新类型”；它只会
+在报告中保留用户给定 Type 已检查到何处。
+
 主要规则映射如下：
 
 - `skip`/空顺序尾只接受 `EmptyType`（用户语法 `empty`）；

@@ -944,8 +944,11 @@ def check_hcsp_type(
     约束和 TypeConstructor 入口一致。检查器按源码顺序
     展开 Process 的 Table 2 规则、生成同样的 FOL/dL 前提，并将每个规则结论与
     用户给定 Type AST 比对；内部选择按用户圆括号保留的当前层分块逐项检查，
-    外部中断按 AST 分支顺序逐项检查。所有前提证明为真时返回原用户 Type AST，否则抛出
-    :class:`HCSPTypeCheckingError`。
+    外部中断按 AST 分支顺序逐项检查。公式 ``FALSE`` 会立即使当前规则失败；
+    ``UNKNOWN`` 会保留证据并继续检查剩余 Type 结构，但最终仍视为未通过。
+    只有结构完整匹配且全部前提均证明为真时才返回原用户 Type AST；其他检查失败
+    抛出 :class:`HCSPTypeCheckingError`。``output`` 仅控制 ``none``、``result``、
+    ``full`` 三档文本展示，不改变检查结论。
     """
 
     mode = _normalize_output_mode(output)

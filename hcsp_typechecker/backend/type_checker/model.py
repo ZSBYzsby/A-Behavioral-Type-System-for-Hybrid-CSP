@@ -22,7 +22,11 @@ from ..common.model import RuleDerivationReport, Verdict
 
 @dataclass(frozen=True, slots=True)
 class TypeCheckingRequest:
-    """检查 ``<Gamma, Theta, P> :: expected_type`` 所需的正式内部输入。"""
+    """检查 ``<Gamma, Pi, Theta, configurations> :: expected_type`` 的内部输入。
+
+    ``expected_type`` 是用户已经给定的规则结论，不是要求 Checker 重新构造的
+    结果；共享参数、路径与配置的解释与 TypeConstructor 请求保持一致。
+    """
 
     gamma: Mapping[str, GammaType]
     theta: Mapping[str, ChannelType]
@@ -38,7 +42,8 @@ class TypeCheckingReport:
 
     ``mismatch`` 只保存明确的用户 Type 结构不匹配；环境或其他规则错误写入
     ``failure_reason``。二者分离，使公开错误分类不会把环境失败误报成 Type
-    mismatch。
+    mismatch。``evidence.constructed_type`` 在本报告中表示给定 Type 已被规则
+    完整消费，不表示 Checker 又构造了一棵类型。
     """
 
     verdict: Verdict

@@ -236,7 +236,7 @@ ODE 的公共后继保存在节点自己的 `continuation` 字段。若它不是
 也可以把 domain/safety 改成例如 `t < 5 and x < 20` 与 `x >= t`；它们分别
 成为演化域不变量和安全性后置条件。
 用户不能把 `t` 再写成方程左端，因为 `t'=1` 已由 ODE 自动提供。局部 `t`
-不进入 Gamma、`fv`、`bv`、`get_vars()` 或并行分区 `V`，也不作用于事件分支
+不进入 Gamma、`fv`、`bv`、`get_vars()` 或并行状态所有权集合 `V`，也不作用于事件分支
 continuation 和 ODE 的顺序后继。若这些后续位置需要一个持久时钟，应改用另一
 个普通状态变量并在 Gamma 中声明。不同 ODE（包括并行 ODE）各自获得不同内部
 实例，TypeConstructor 生成 dL 时将各处源名 `t` 映射到本 ODE 的同一个新鲜 Real。
@@ -479,8 +479,13 @@ check_hcsp_type(
 `reason`、`rule`、`location`、`details`、`partial_types`，并提供
 `format_result()` 与 `format_full()`。Checker 异常使用自己的错误分类，另外提供
 `type_mismatch_detected` 与三值 `type_structure_matched`。词法、语法或 source
-结构错误会在类型构造
-开始前终止并抛出 `HCSPInputError`：
+结构错误会在对应业务后端启动前终止并抛出 `HCSPInputError`。
+
+Checker 只在 Type 结构完整匹配且全部前提为 `true` 时返回给定 `TypeAST`。明确
+结构不匹配、规则静态失败或证明为 `false` 时抛出 `HCSPTypeCheckingError`；证明
+为 `unknown` 时仍继续检查剩余 Type 结构以形成完整审计记录，但最终同样抛出
+`HCSPTypeCheckingError(kind="proof-unknown")`，不会把未验证 Type 当作成功返回。
+以下示例展示 Constructor 的异常处理：
 
 ```python
 from hcsp_typechecker import (
@@ -497,7 +502,8 @@ try:
         output="result",
     )
 except HCSPInputError as error:
-    print(error.format_diagnostic())
+    # result 模式已经打印诊断；这里可读取 error.kind 或设置退出码。
+    pass
 except HCSPUntrustedTypeConstructionError as error:
     # result 已用规范 Type 源码打印候选；对象仍在 error.untrusted_type 中。
     pass
@@ -509,9 +515,9 @@ except HCSPTypeConstructionError as error:
 `OutputMode.NONE`、`OutputMode.RESULT`、`OutputMode.FULL`。接口不会把日志字符串
 当作返回值：可信成功时始终返回 `TypeAST`；不可信候选只附着在异常上。`none`
 不打印；`result` 打印最终可信结果、不可信完整候选或失败摘要；`full` 打印输入、
-环境摘要、实际推导轨迹、FOL/dL 公式、证明结论、待证明义务和类型可信性，但不
-暴露内部 Process AST 对象/repr。打印目标默认是标准输出，`stream=` 仅用于定向
-到其他文本流。
+实际规则轨迹、FOL/dL 公式、证明结论、待证明义务和类型可信性。Constructor 的
+完整日志还含环境摘要；Checker 的环境可从每条规则步骤读取。两者都不暴露内部
+Process AST 对象/repr。打印目标默认是标准输出，`stream=` 仅用于定向到其他文本流。
 
 所有日志中的 Type 都使用 [TYPE_INPUT_SYNTAX.md](TYPE_INPUT_SYNTAX.md) 的规范
 用户语法，并带完整 `type` 前缀；不会再并列打印 Python Type AST `repr`。因此
@@ -753,7 +759,7 @@ domain/boundary 的即时证明结果选择；未选候选只作为审计证据�
 不同后继结束：纯通信规则使用不可达 `BottomType`，自然后继规则若后继是 skip
 则使用可达的 `EmptyType`。证明前提和子 judgment 也不同。
 
-后继 judgment 也严格按新版 Table 2 区分：纯通信规则的事件分支在
+后继 judgment 也严格按项目当前采用的 Table 2 规则区分：纯通信规则的事件分支在
 `B ∧ safety` 下检查；带自然超时规则的通信分支只使用 `safety`；其自然后继
 使用 `¬B ∧ safety`。这三种条件由不同的内部枚举值表示，不再共用含义模糊的
 布尔开关。

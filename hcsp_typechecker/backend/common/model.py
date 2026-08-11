@@ -23,7 +23,7 @@ from ...data_structures.type_ast.render import format_type_source
 #           combine 以 FALSE > UNKNOWN > TRUE 的保守优先级汇总结果。
 # --------------------------------------------------------------------------
 class Verdict(str, Enum):
-    """类型构造诊断与证明结果共用的三值逻辑。
+    """TypeConstructor、TypeChecker 与证明后端共用的三值逻辑。
 
     ``UNKNOWN`` 不等同于类型错误：它表示结构推导已经执行，但某个公式
     未能由当前证明后端判定。只有 ``FALSE`` 才表示已经发现反例或静态错误。

@@ -56,7 +56,8 @@ try:
         output="result",  # 打印可复制、可再次作为输入的规范 Type 源码
     )
 except HCSPInputError as error:
-    print(error.format_diagnostic())
+    # result 模式已经打印诊断；这里按应用需要记录 error.kind 或决定退出码。
+    pass
 except HCSPUntrustedTypeConstructionError as error:
     # 类型结构已经构造完成，但至少一条必要公式仍未证明。
     # result 已按规范 Type 源码打印候选；对象仍在 error.untrusted_type 中。
@@ -111,7 +112,8 @@ type forever interrupt angelic {
 try:
     checked_type = check_hcsp_type(typed_source, output="result")
 except HCSPTypeCheckingError as error:
-    print(error.format_full())
+    # result 模式已经打印摘要；机器逻辑可读取 error.kind、rule 和 details。
+    pass
 ```
 
 TypeChecker 不会先运行 TypeConstructor 再比较两棵完整 Type AST。它以用户 Type
@@ -193,9 +195,9 @@ TypeConstructor 和 TypeChecker 两个源码接口都支持：
 - `output="none"`：默认，不打印；
 - `output="result"`：打印最终结论；成功时显示可信类型，`unknown` 且构造完整时
   显示完整候选类型及“不可信”标记，其他失败显示原因和部分进度；
-- `output="full"`：打印原始输入、环境摘要、内部构造完成说明、规则轨迹、FOL/dL
-  公式、每条证明器结论、未决义务和最终可信性；不会打印或返回 Process AST
-  对象/repr。
+- `output="full"`：打印原始输入、规则轨迹、FOL/dL 公式、每条证明器结论、
+  未决义务和最终可信性；Constructor 还打印环境摘要与内部 AST 已完成但未暴露的
+  说明。两个接口都不会打印或返回 Process AST 对象/repr。
 
 凡日志中实际展示 Type 的位置，都统一使用
 [用户 Type 输入语法](document/TYPE_INPUT_SYNTAX.md) 的规范文本，例如
@@ -272,7 +274,7 @@ process {{data!(x, v)}}
 - 不支持字符串、Unit、tuple/list/dict/set、属性、下标、lambda、关键字参数、
   表达式级条件、赋值表达式或任意 Python 代码。
 - 语法树本身不区分数值式与 Bool 式；具体位置所需类型和除零、平方根定义域等
-  条件由类型构造过程中的表达式静态类型检查处理。
+  条件由 Constructor/Checker 共用的表达式静态类型检查处理。
 
 ### Process、递归与 ODE
 
@@ -293,8 +295,9 @@ process {{data!(x, v)}}
 
 - Z3 处理项目支持的一阶逻辑片段；不可靠或不支持的翻译不会猜测结论。
 - 非平凡 ODE 证明由 KeYmaera X 完成；证明器缺失、超时或公式超出可靠翻译
-  子集时得到 `unknown`。规则构造继续进行，但最终候选会作为不可信异常结果，
-  不会被当作成功。
+  子集时得到 `unknown`。Constructor 会继续规则构造，并把完整候选作为不可信
+  异常结果；Checker 会继续核对剩余 Type 结构，最后以 `proof-unknown` 报错。
+  两者都不会把未验证结论当作成功。
 - Python callable、原始 Z3 项和自定义 dL 回调只属于内部开发接口，不能写入
   用户 source。
 
@@ -307,7 +310,8 @@ Type AST；**TypeChecker** 在这些输入后再接收一个用户 Type，以该
 
 顶层 Python 包名 ``hcsp_typechecker`` 作为整个行为类型项目的总命名空间保留，
 同时容纳 TypeConstructor 与 TypeChecker；具体实现类仍是内部接口，包根只导出
-上述两个面向用户的函数和公共结果/异常类型。
+这两个 Table 2 面向用户的函数及其公共结果/异常类型。Table 3 图接口保持为前文
+单独说明的第三项稳定业务能力。
 
 ## 示例、测试与更多文档
 

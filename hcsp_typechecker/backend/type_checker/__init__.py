@@ -1,4 +1,8 @@
-"""按项目 Table 2 规则检查用户给定的行为 Type AST。"""
+"""TypeChecker 的类型定向递归、请求报告与错误分类。
+
+本后端把用户 Type 当作 Table 2 judgment 的给定结论逐层核对，不调用
+TypeConstructor。普通用户使用包根 ``check_hcsp_type``。
+"""
 
 from .checker import TypeChecker
 from .errors import TypeCheckingErrorKind, classify_checking_error

@@ -142,7 +142,13 @@ class TypeChecker(Table2RuleEngine):
     """
 
     def check(self, request: TypeCheckingRequest) -> TypeCheckingReport:
-        """规范化环境，然后以用户 Type 为目标递归检查全部 Table 2 规则。"""
+        """以用户 Type 为结论递归检查全部适用规则并返回审计报告。
+
+        方法先执行与 Constructor 相同的环境准备，再按源码结构拆解给定 Type。
+        公式 ``FALSE`` 会使当前检查失败；``UNKNOWN`` 会保留证据并继续检查剩余
+        结构，但最终报告不会把该 Type 判为通过。本方法不调用 Constructor，
+        也不负责打印或构造公共异常。
+        """
 
         self.obligations = []
         self.diagnostics = []
@@ -300,7 +306,12 @@ class TypeChecker(Table2RuleEngine):
         expansion: _RuleExpansion,
         expected_children: Sequence[_ExpectedChild],
     ) -> bool:
-        """按规则书写顺序证明公式，并递归检查给定的子类型。"""
+        """按规则顺序判定公式，并递归消费给定 Type 的对应子树。
+
+        ``FALSE`` 公式立即拒绝该规则；``UNKNOWN`` 只保留在证明证据中，结构递归
+        继续进行。因而本方法返回真只表示当前规则没有确定失败，最终是否通过仍由
+        全部证明义务的三值汇总决定。
+        """
 
         child_index = 0
         for premise in expansion.premises:

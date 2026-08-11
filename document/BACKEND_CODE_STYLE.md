@@ -36,4 +36,5 @@ data_structures 不能反向导入后端。backend/common 不能导入两个业�
 - 源码行宽不超过 100 字符，不使用通配符导入。
 - result/full 报告属于展示层；规则函数只积累结构化证据，不直接打印。
 
-这些约定由 tests/backend/test_backend_style.py 和依赖边界测试共同锁定。
+这些约定由 `tests/backend/test_backend_style.py` 和
+`tests/backend/test_backend_boundaries.py` 共同锁定。

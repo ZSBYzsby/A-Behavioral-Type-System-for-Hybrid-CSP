@@ -1,4 +1,4 @@
-"""Gamma、Theta、全局参数与运行 Configuration 的领域数据结构。
+"""Gamma、Theta、共享只读参数与运行 Configuration 的领域数据结构。
 
 本模块只描述运行上下文，不执行类型构造或类型检查。前端、TypeConstructor 与
 TypeChecker 都依赖这里的同一组类，因而不会通过某个业务后端反向取得环境定义。

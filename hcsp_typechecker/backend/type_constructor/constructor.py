@@ -23,13 +23,22 @@ from .model import TypeConstructionReport, TypeConstructionRequest
 
 
 class TypeConstructor(Table2RuleEngine):
-    """按项目采用的 Table 2 规则构造 HCSP 行为类型。"""
+    """按项目采用的 Table 2 规则主动构造 HCSP 行为 Type。
+
+    构造器组合每个子 judgment 的结论得到 Type AST，并沿途调用共享证明后端
+    判定规则前提。公式 ``FALSE`` 会终止当前推导；``UNKNOWN`` 会留下证据并继续，
+    因而完整候选是否可信必须结合最终报告的 ``verdict`` 判断。
+    """
 
     def construct(
         self,
         request: TypeConstructionRequest,
     ) -> TypeConstructionReport:
-        """构造候选 Type AST，并返回推导与证明的完整审计报告。"""
+        """执行一个构造请求并返回类型、三值结论及全部审计证据。
+
+        本方法不打印，也不把失败改写为公共异常；这些展示和异常策略只由
+        :func:`hcsp_typechecker.construct_hcsp_type` 的门面层负责。
+        """
 
         return self._construct_type(request)
 
@@ -140,7 +149,13 @@ def construct_type(
     keymaerax_config: KeYmaeraXConfig | None = None,
     z3_timeout_ms: int = 5_000,
 ) -> TypeConstructionReport:
-    """用一次性 :class:`TypeConstructor` 从 AST 和环境构造行为类型。"""
+    """从低层 AST、运行上下文和配置构造行为 Type 并返回报告。
+
+    这是供内部实现、规则测试和论文审计使用的低层入口。它接受已经构造好的
+    Process AST，不解析用户 source，也不打印或抛公共业务异常；调用者必须检查
+    报告的 ``verdict`` 与 ``constructed_type``。普通用户应调用包根的
+    :func:`hcsp_typechecker.construct_hcsp_type`。
+    """
 
     request = TypeConstructionRequest(
         gamma=gamma,

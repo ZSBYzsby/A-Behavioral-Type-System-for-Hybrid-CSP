@@ -197,8 +197,8 @@ Section 4.2/4.3 不增加新的 ``P`` 节点，而是在既有 ODE/Mu 节点上�
 该隐藏时钟进入 ODE 时自动取 0，并以导数 1 随连续时间演化。在该 ODE 的
 方程右端、演化域 ``B`` 和安全批注 ``safety`` 中，保留名 ``t`` 表示这个
 时钟的当前值；用户不能再把 ``t`` 写成 ODE 方程左端，因为 ``t'=1`` 已由
-节点自动提供。这个局部名不进入 Gamma、fv、bv、``get_vars()`` 或并行分区
-V，因此不同 ODE（包括并行 ODE）的时钟不会发生名称碰撞。
+节点自动提供。这个局部名不进入 Gamma、fv、bv、``get_vars()`` 或并行状态
+所有权集合 V，因此不同 ODE（包括并行 ODE）的时钟不会发生名称碰撞。
 
 TypeConstructor 在构造 dL 义务时才把这个抽象时钟实体化为新鲜 Real 符号，并加入
 入口等式 ``t=0`` 与演化方程 ``t'=1``。用户不再需要仅为了在本 ODE 的公式
@@ -252,15 +252,15 @@ class HCSP(ABC):
 
     # 功能：抽象收集系统中全部用户可见的值变量名称，既包括自由使用，
     #       也包括 ch?(x1,...,xn) 引入的全部输入目标；进程变量 X 不属于此返回值。
-    # 构造/论文关系：TypeConstructor 用结果投影/验证 Gamma；Parallel 另由内部
-    #                fv/bv 分析同时检查值变量和进程变量的 V 分离条件。
+    # 构造/论文关系：共享规则引擎用结果验证 Gamma 声明及并行状态所有权；
+    #                Parallel 另由 fv/bv 分析检查值变量和进程变量的 V 分离条件。
     @abstractmethod
     def get_vars(self) -> set[str]:
         """返回系统读取、写入或由输入引入的用户值变量。"""
 
     # 功能：从 get_vars 的值变量中单独标出多标量输入引入的全部目标变量。
-    # 检查/论文关系：并行 Gamma 自动分区时，这些名称允许在输入发生前没有
-    #                外部声明；T-In 随后按 Theta 各槽类型把 xi 加入当前 Gamma。
+    # 检查/论文关系：这些名称允许在输入发生前没有 Gamma 声明；T-In 随后按
+    #                Theta 各槽类型把 xi 加入当前控制流分支的 Gamma 副本。
     def get_input_bound_vars(self) -> set[str]:
         """返回可由 T-In 在当前 Gamma 中新引入的输入目标变量。"""
         return set()
@@ -287,8 +287,8 @@ class EventReaction(ABC):
     """论文事件反应语法 ``E`` 的共同基类。"""
 
     # 功能：抽象收集事件前缀、分支后继及其余事件分支中的用户值变量。
-    # 检查/论文关系：E 不是独立系统，但 ODE 和并行分区需要把中断分支所用
-    #                的变量纳入包含它的 Process；此接口本身不做类型检查。
+    # 检查/论文关系：E 不是独立系统，但 ODE 和并行状态所有权检查需要把中断
+    #                分支所用变量纳入包含它的 Process；此接口本身不做类型检查。
     @abstractmethod
     def get_vars(self) -> set[str]:
         """返回事件反应及其后继使用的用户值变量；具体节点必须实现。"""
@@ -503,8 +503,8 @@ class InputChannel(Process):
         object.__setattr__(self, "targets", _normalize_input_targets(targets))
 
     # 功能：把全部输入目标计入该进程的用户值变量域。
-    # 检查/论文关系：用于 Gamma 投影和并行分区；各 xi 的类型由 T-In 从
-    #                Theta 的对应槽位获得，不要求预先声明。
+    # 检查/论文关系：用于 Gamma 声明豁免和并行状态所有权检查；各 xi 的类型
+    #                由 T-In 从 Theta 的对应槽位获得，不要求预先声明。
     def get_vars(self) -> set[str]:
         """全部输入目标都属于进程的用户值变量域。"""
         return {target.name for target in self.targets}
@@ -1501,8 +1501,8 @@ class Parallel(HCSP):
 
     # 功能：返回两个分量中出现的全部用户值名称并集。
     # 检查/论文关系：裸 Process AST 无法从名称本身区分 Gamma 状态和共享
-    #                只读参数，因此本接口如实返回两者；TypeConstructor 再依
-    #                ParameterEnvironment 排除参数并投影各分量 Gamma。
+    #                只读参数，因此本接口如实返回两者；共享规则引擎再依
+    #                ParameterEnvironment 排除参数并核对分量状态所有权。
     def get_vars(self) -> set[str]:
         """合并两个并行系统使用的全部用户值名称。"""
         return set(_assumption21_info(self).value_variables)
@@ -1571,7 +1571,7 @@ class _Assumption21Info:
     output_channels: frozenset[str] = frozenset()
 
     # 功能：在值变量命名空间内计算 V_value=fv_value∪bv_value。
-    # 检查/论文关系：输入目标也属于系统状态域，供 Gamma 投影和 Parallel
+    # 检查/论文关系：输入目标也属于系统状态域，供 Gamma 声明验证和 Parallel
     #                的值变量分量不相交检查使用。
     @property
     def value_variables(self) -> frozenset[str]:
@@ -1737,7 +1737,7 @@ def _assumption21_info(
         )
     if isinstance(node, ODE):
         # 方程右端、演化域和 safety 中的 t 由本 ODE 的 local_clock 绑定；
-        # 它既不属于用户 fv/bv，也不参与并行分区 V。事件分支不在这个局部
+        # 它既不属于用户 fv/bv，也不参与并行状态所有权集合 V。事件分支不在这个局部
         # 作用域内，故其中独立出现的 t 仍由事件子树按普通用户变量统计。
         free_value_variables = set(node.constraint.get_vars())
         free_value_variables.update(node.annotation.safety.get_vars())

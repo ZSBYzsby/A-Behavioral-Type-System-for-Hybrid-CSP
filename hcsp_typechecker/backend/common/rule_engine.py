@@ -1,10 +1,11 @@
 r"""TypeConstructor 与 TypeChecker 共用的 Table 2 规则引擎。
 
-TypeConstructor 使用的核心数据流如下：
+两个业务后端共用的核心数据流如下：
 
 ``业务请求 -> ConclusionJudgment -> RuleExpansion(premises, conclude)
--> 按顺序立即判定 FormulaPremise + 递归求解 ChildJudgmentPremise
--> 由业务后端消费 premise 与 conclude -> 汇总共享规则证据``。
+-> 按顺序立即判定 FormulaPremise + 递归处理 ChildJudgmentPremise
+-> Constructor 组合子结论，或 Checker 消费给定 Type 子树
+-> 汇总共享规则证据``。
 
 推导与证明现在是完全顺序的：
 
@@ -612,7 +613,7 @@ class Table2RuleEngine:
         parallel_step = self._start_step(
             "T-||",
             "judgment",
-            f"检查 {len(configurations)} 个配置并建立状态变量分区",
+            f"检查 {len(configurations)} 个配置及其状态所有权",
             gamma=gamma,
             parameters=parameters,
             parameter_constraint=parameter_constraint,
@@ -3695,7 +3696,7 @@ class Table2RuleEngine:
         return True
 
     def _process_vars(self, process: Any) -> set[str]:
-        """从项目 HCSP 节点读取状态变量，用于并行 Gamma 自动分区。
+        """读取 Process 使用的值名称，供 Gamma 声明和并行状态所有权检查。
 
         外部对象返回空集并会在实际推导阶段产生结构错误；这里不调用其同名
         方法，避免重新引入鸭子类型兼容。

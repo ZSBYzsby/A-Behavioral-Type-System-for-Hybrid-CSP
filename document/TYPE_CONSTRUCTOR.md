@@ -148,10 +148,10 @@ ODE 的左端分量、导数右端参数、演化域和 safety 中的 Real 量�
 
 - \(\Delta\) 只能声明 `BasicType`参数；
 - \(H\) 只能引用 \(\Delta\) 中声明的名称；
-- 检查器先验证 \(H\land TypeDomain(\Delta)\) 可满足，防止矛盾假设
+- 共享环境准备阶段先验证 \(H\land TypeDomain(\Delta)\) 可满足，防止矛盾假设
   造成真空证明；
-- 参数在所有并行 configuration 中使用同一组 Z3 符号，不参与
-  Gamma 的局部投影、互斥性和并集覆盖检查；
+- 参数在所有并行 configuration 中使用同一组 Z3 符号；它们不属于 Gamma，
+  也不计入可变状态所有权或分量间状态重叠检查；
 - 参数可在路径、表达式、通道 refinement、递归不变式和 ODE
   公式中读取，但不能出现在 state 赋值、赋值左端、输入目标或
   ODE 左端。
@@ -177,6 +177,11 @@ Gamma 和 \(\Delta\) 的名称域必须不相交。参数由用户在 HCSP 执�
 `OutputType`。因此两个具有相同通道名、但 Theta 签名不同的通信，在 Type AST
 层只显示相同的 `ch?` 或 `ch!` 前缀。
 
+环境准备会在执行任何 Process 规则前遍历 **全部** Theta 项：为每个槽位建立
+临时符号，检查 refinement 只能引用本通道 binders、Gamma 标量和共享参数，并
+要求结果为 Bool。即使某个通道没有在当前 Process 中使用，非法 refinement 也会
+使环境准备失败；该阶段只检查公式良构性，不要求 refinement 恒真。
+
 ### 3.4 每条控制流路径上的 Context
 
 TypeConstructor 内部为每条控制流路径维护：
@@ -187,8 +192,10 @@ C=(\Gamma,\Delta,H,\Theta,\Phi,\rho,\mathcal R,location,valid),
 
 其中：
 
-- `gamma`是当前局部状态环境，`parameters`、`parameter_condition`分别是
-  共享的 \(\Delta\) 和 \(H\)，`theta` 是共享通道环境；
+- `gamma` 是当前控制流分支持有的完整 Gamma 副本；各顶层 configuration
+  从同一份完整 Gamma 开始，输入动作只能在自己的后继分支中增加新目标；
+  `parameters`、`parameter_condition` 分别是共享的 \(\Delta\) 和 \(H\)，
+  `theta` 是共享通道环境；
 - `path` 是 Z3 布尔公式 \(\Phi\)；
 - `symbols` 是符号状态 \(\rho\)，把变量名映射到当前 Z3 项；
 - `rec_env` 是递归进程变量到类型变量、不变量的绑定；
@@ -464,14 +471,14 @@ Gamma、路径条件和符号状态全部保持不变，不生成 Type AST 前�
 实际步骤为：
 
 1. 检查通道存在且输入元数等于 Theta 元数，并拒绝把共享参数作为输入目标；
-2. 对已存在的目标变量，代码要求它的基础类型与槽位类型在数值子类型链上
-   可比较，即实际条件是
+2. 对已存在的目标变量，代码按“输入值写入变量”的安全方向要求
 
 \[
-existing_i <: B_i\quad\lor\quad B_i <: existing_i.
+B_i <: existing_i.
 \]
 
-   这是一项双向“可比较性”检查，不是单向赋值检查；
+   因而 `Int` 通道值可以写入声明为 `Real` 的变量，但 `Real` 通道值不能写入
+   声明为 `Int` 的变量；
 3. 新目标加入当前分支的后继 Gamma，类型取对应的 \(B_i\)；
 4. 已存在目标保留原 `BasicType` 项；独立 ODE 向量声明不受通信更新影响；
 5. 为每个槽建立新鲜接收符号 \(r_i\)，并更新
@@ -489,10 +496,9 @@ existing_i <: B_i\quad\lor\quad B_i <: existing_i.
 
 `Nat` 接收值的 `TypeDomain` 是 \(r_i\ge0\)，其他当前为空。
 
-还有一个必须按源码理解的细节：若已有声明与通道槽类型不同、但在数值子类型链
-上可比较，Gamma 会保留已有声明，而新鲜 Z3 符号按通道槽类型建立。也就是说，
-当前代码没有把二者先统一成一个共同类型；后续表达式的静态类型标签来自 Gamma，
-缓存符号的 Z3 sort 则来自本次输入槽。
+若安全的子类型关系成立但两种类型不同，Gamma 仍保留目标变量原有的较宽声明，
+新鲜接收符号按实际通道槽类型建立。后续表达式因此把接收值作为该变量声明类型
+允许的一个具体子类型值使用，不会反向接受可能超出变量声明范围的通道值。
 
 输入 refinement 不产生需要证明的 FOL premise；环境给出的输入值被假设满足
 该 refinement。后继推导成功后生成：
@@ -568,13 +574,11 @@ InternalChoiceType((T1, T2))
 该节点表示全部选择分支共享同一个后继。代码分别推导：
 
 \[
-T_1=type(P_1;Q;tail,C_1),
-\qquad
-T_2=type(P_2;Q;tail,C_2).
+T_i=type(P_i;Q;tail,C_i)\qquad(i=1,\ldots,n).
 \]
 
-`C1`、`C2` 是原 Context 的独立克隆，防止一个分支中的赋值或输入污染另一个
-分支。两边成功后生成 `InternalChoiceType((T1,T2))`。
+每个 `C_i` 都是原 Context 的独立克隆，防止一个分支中的赋值或输入污染其他
+分支。所有分支成功后生成 `InternalChoiceType((T1,...,Tn))`。
 
 若构造时省略 `Q`，AST 中实际保存 `Skip()`。外层再写
 `Sequence(InternalChoice(...),Q)` 的非规范形状会在 Process AST 阶段被拒绝；
@@ -685,7 +689,7 @@ F^*=\{\dot x_1^0=e_1,\ldots,\dot x_n^0=e_n,\dot\tau=1\}.
 V_{ODE}=\{x_1,\ldots,x_n\}.
 \]
 
-检查器要求 Gamma 中存在 `variables` 恰好等于 \(V_{ODE}\) 的独立
+共享规则引擎要求 Gamma 中存在 `variables` 恰好等于 \(V_{ODE}\) 的独立
 `ContinuousType` 声明。没有精确匹配时 T-ODE 静态失败；匹配
 成功只表示这个 ODE 演化向量允许在 process 中出现，不会向 dL 公式添加性质。
 没有用户方程的空 flow ODE 使用空向量，不需要 Gamma 声明。dL 连续程序始终
@@ -1046,7 +1050,9 @@ InfiniteDelayType(
 显示为：
 
 ```text
-delay(inf) interrupt angelic {ch? -> delay(inf) interrupt angelic {ch! -> empty}}
+type forever interrupt angelic {
+    ch? -> forever interrupt angelic {ch! -> empty}
+}
 ```
 
 ### 14.2 `x := x + 1; ch!x`
@@ -1061,7 +1067,7 @@ T-Out 对 `x` 的读取直接得到 `x0+1`，因此 refinement 证明使用更�
 赋值本身不产生行为前缀，最终类型只保留：
 
 ```text
-ch!.(0)
+type forever interrupt angelic {ch! -> empty}
 ```
 
 ### 14.3 `if B then ch1!0 else ch2!0`
@@ -1100,7 +1106,8 @@ FiniteDelayType(d, NoInterruptType(), T)
 1. Sequence 通过传递剩余节点实现，不存在通用 Type 级顺序组合；
 2. T-Assign 不综合未知后置谓词，而用旧路径和更新后的符号映射表示后状态；
 3. 当前 `T-Assign-post` 的实际证明公式是 \(\Phi\Rightarrow\Phi\)；
-4. 输入已有变量的类型检查使用双向“可比较”关系，而输出使用单向子类型关系；
+4. 输入已有变量要求“通道槽类型 <: 目标声明类型”，输出也按载荷类型到槽位类型
+   的单向子类型关系检查；
 5. 输入 refinement 被加入路径作为假设，输出 refinement 必须证明；
 6. If 和 InternalChoice 的兄弟子 judgment 按顺序求解；三个控制节点 If、
    InternalChoice、ODE 都在 AST 中自持公共 continuation；第一个兄弟因 `false` 或结构
