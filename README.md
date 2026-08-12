@@ -3,8 +3,9 @@
 本项目把一份带 Parameters、Gamma、Theta 与批注 HCSP Process 的用户文本直接
 转换为正式 Type AST，并证明构造过程中产生的必要公式；也可以由用户给出 Type，
 再按同一套项目规则检查它是否成立；已有 Type AST 还可以按照 Table 3 生成完整可达
-状态转移图。普通用户使用包根的 `construct_hcsp_type(...)`、
-`check_hcsp_type(...)` 与 `build_type_transition_graph(...)`；解析时
+状态转移图，并在完整图上检查论文定义的死锁自由和活锁自由。普通用户使用包根的
+`construct_hcsp_type(...)`、`check_hcsp_type(...)`、
+`build_type_transition_graph(...)` 与 `analyze_type_lock_freedom(...)`；解析时
 生成的 Process AST、具体 Type AST 构造器、判断对象、证明义务和证明器适配器均
 属于内部实现，不构成稳定调用协议。
 
@@ -30,10 +31,12 @@ Type AST，但该候选会被明确标为未验证、不可信。使用
 
 包根稳定白名单只有 `HCSPInputError`、`HCSPTypeConstructionError`、
 `HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`、
-`HCSPTypeTransitionGraphError`、`OutputMode`、`TypeConstructionErrorKind`、
+`HCSPTypeTransitionGraphError`、`HCSPTypeLockAnalysisError`、`OutputMode`、
+`TypeConstructionErrorKind`、
 `TypeCheckingErrorKind`、`TypeTransitionGraphErrorKind`、`HCSPErrorDetail`、
-`TypeAST`、`TypeTransitionGraph`、`construct_hcsp_type`、`check_hcsp_type` 和
-`build_type_transition_graph`。
+`TypeLockAnalysisErrorKind`、`TypeAST`、`TypeTransitionGraph`、
+`LockFreedomReport`、`construct_hcsp_type`、`check_hcsp_type`、
+`build_type_transition_graph` 和 `analyze_type_lock_freedom`。
 
 第一次使用建议先阅读[公共接口使用手册](document/PUBLIC_API_GUIDE.md)。该手册按
 实际函数签名逐项说明参数、成功返回、异常字段、输出模式、Constructor 的
@@ -44,26 +47,27 @@ Type AST，但该候选会被明确标为未验证、不可信。使用
 开始：它逐条写明前端 lowering、运行上下文、Table 2 规则、ODE 候选、证明调度、
 Constructor/Checker 差异和 Table 3 图算法，不以“与论文一致”概括工程实现。
 
-三个业务接口的职责和数据流如下：
+四个业务接口的职责和数据流如下：
 
 | 接口 | 输入 | 成功返回 | 失败方式 |
 |---|---|---|---|
 | `construct_hcsp_type` | `gamma [parameters] theta process` 完整文本 | 构造并证明可信的 `TypeAST` | 输入错误、构造失败或带不可信候选的构造异常 |
 | `check_hcsp_type` | `gamma [parameters] theta process type` 完整文本 | 经规则和证明确认的用户 `TypeAST` | 输入、Type 结构、规则应用或证明异常 |
 | `build_type_transition_graph` | 已有的 `TypeAST` | 完整可达的 `TypeTransitionGraph` | Type 非法、规范化失败或图规模超限异常 |
+| `analyze_type_lock_freedom` | 第三接口的完整图 | 含结论和反例的 `LockFreedomReport` | 图对象非法或不是完整可达闭包 |
 
 典型调用顺序是：
 
 ```text
-HCSP 完整文本 --construct_hcsp_type--> 可信 TypeAST --build_type_transition_graph--> 完整图
-带 Type 的完整文本 --check_hcsp_type--> 已验证 TypeAST --build_type_transition_graph--> 完整图
+HCSP 完整文本 --construct_hcsp_type--> 可信 TypeAST --build_type_transition_graph--> 完整图 --analyze_type_lock_freedom--> 锁自由报告
+带 Type 的完整文本 --check_hcsp_type--> 已验证 TypeAST --build_type_transition_graph--> 完整图 --analyze_type_lock_freedom--> 锁自由报告
 ```
 
 Constructor 与 Checker 是两条独立业务路径：Checker 不先调用 Constructor 再比较
 结果。第三个接口也不会重新检查 Type 是否对应某个 HCSP；需要可信来源时，应使用
 前两个接口的正常返回值。
 
-三个接口共同接受 `output="none" | "result" | "full"`：`none` 完全不打印；
+四个接口共同接受 `output="none" | "result" | "full"`：`none` 完全不打印；
 `result` 只打印最终摘要；`full` 打印输入、规则/证明轨迹或完整状态图。传入
 `stream=` 时文本写入该文本流；未传时写入标准输出。输出档位只影响展示，不改变
 返回值、证明结论或异常。以下签名中的类型名均可从包根稳定接口获得，内部 AST
@@ -341,9 +345,44 @@ formatter 不从包根公开。完整格式见
 `max_states` 和 `max_transitions` 可限制状态爆炸。第三个接口使用
 `HCSPTypeTransitionGraphError` 统一报告错误；其 `kind` 可区分 `invalid-type`、
 `invalid-limit`、`normalization` 与 `size-limit`，`phase` 指明失败阶段。触及任一上限
-时不会返回没有分析意义的部分图。当前接口只生成图结构，不执行死锁、活锁或其他
-图上性质分析。详细结构见
+时不会返回没有分析意义的部分图。详细结构见
 [Type 操作语义与状态图](document/TYPE_OPERATIONAL_SEMANTICS.md)。
+
+### 4. 在完整状态图上检查死锁和活锁
+
+```python
+analyze_type_lock_freedom(
+    graph,
+    *,
+    output="none",
+    stream=None,
+) -> LockFreedomReport
+```
+
+第四接口只接受第三接口返回的完整 `TypeTransitionGraph`，不会重新读取 HCSP 或
+重新生成图。它以 `O(|V|+|E|)` 时间完成两项判断：
+
+- 死锁：存在可达迁移 `time(infinity, ready=R)` 且 `R` 非空；
+- 活锁：只保留 `tau` 边后，可达子图中存在有向环，即存在无限静默推导。
+
+报告提供 `deadlock_free`、`livelock_free`、`lock_free` 三个布尔属性。性质不成立
+不是运行错误：接口仍正常返回 `LockFreedomReport`，其中 `deadlock_witness` 保存
+初态到无限等待边的路径，`livelock_witness` 保存初态到静默环的路径和有限环。
+`EmptyType` 的无出边终态、`BottomType` 的无出边状态以及
+`time(infinity, ready={})` 都不满足上述死锁定义；带正时间边的环也不是活锁。
+
+```python
+from hcsp_typechecker import analyze_type_lock_freedom
+
+report = analyze_type_lock_freedom(graph, output="full")
+if not report.lock_free:
+    print(report.deadlock_witness, report.livelock_witness)
+```
+
+输入不是图或含有初态不可达的孤立状态时，接口抛
+`HCSPTypeLockAnalysisError`；性质为假时不抛异常。算法使用 CSR 出边索引、BFS 和
+显式栈 DFS，不使用 Python 递归，也不会为大图复制邻接对象。详细设计、反例结构和
+复杂度见[死锁/活锁分析](document/TYPE_LOCK_ANALYSIS.md)。
 
 常用可选参数：
 
@@ -358,13 +397,14 @@ formatter 不从包根公开。完整格式见
 
 ### 输出模式
 
-三个稳定业务接口都支持同一组输出模式：
+四个稳定业务接口都支持同一组输出模式：
 
 - `output="none"`：默认，不打印；
 - `output="result"`：Constructor/Checker 打印最终结论；图接口打印图规模与初始
-  规范 Type。构造 `unknown` 且类型完整时显示候选 Type 及“不可信”标记；
+  规范 Type；锁分析接口打印三项性质和紧凑反例。构造 `unknown` 且类型完整时显示候选 Type 及“不可信”标记；
 - `output="full"`：Constructor/Checker 打印原始输入、规则轨迹、FOL/dL 公式和
-  最终可信性；图接口打印全部规范状态、边标签和 Table 3 推导证据。Constructor
+  最终可信性；图接口打印全部规范状态、边标签和 Table 3 推导证据；锁分析接口打印
+  可达前缀、无限等待边或静默环及相关状态。Constructor
   与 Checker 都不会打印或返回 Process AST 对象/repr。
 
 凡日志中实际展示 Type 的位置，都统一使用
@@ -469,7 +509,8 @@ process {{data!(x, v)}}
   问题；长顺序 Process、深 Type continuation 和规范化项图转换因此不会仅因
   Python 调用栈深度而失败。项目还以端到端压力测试保证 TypeConstructor 在已测
   规模生成的深通信 Type 和大并行 Type，可以先按正式 Type 语法交给 TypeChecker
-  重新验证，也可以原样交给状态图接口；三个接口不存在不同的人工 AST 深度上限。
+  重新验证，也可以原样交给状态图接口；前三个树/图构造接口不存在不同的人工 AST
+  深度上限，第四接口也不使用递归图搜索。
   状态图仍可用 `max_states`/`max_transitions` 控制 Table 3 可达状态爆炸，达到
   上限时按接口契约整体报错。
 
@@ -505,7 +546,7 @@ Type AST；**TypeChecker** 在这些输入后再接收一个用户 Type，以该
   Table 3 状态图；
 - `python -m unittest discover -s tests -p "test_*.py"`：运行全部自动化测试；
 - `python scripts/check_repository.py`：运行隐私扫描、环境检查和全部测试。
-- [公共接口使用手册](document/PUBLIC_API_GUIDE.md)：三个接口的逐参数契约、完整
+- [公共接口使用手册](document/PUBLIC_API_GUIDE.md)：四个接口的逐参数契约、完整
   异常字段、输出模式和可复制示例；
 
 内部架构、真实转换算法、证明后端和测试职责不放在根 README 中，统一从

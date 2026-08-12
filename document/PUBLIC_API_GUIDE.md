@@ -1,7 +1,7 @@
 # 公共接口使用手册
 
 本文面向只想调用项目功能、而不需要直接构造内部 AST 或判断对象的用户。项目根包
-只承诺三个业务函数：
+只承诺四个业务函数：
 
 本文负责解释怎样调用接口、读取返回值和处理异常；它不以接口摘要代替内部语义。
 需要了解解析、符号执行、Table 2/3 推导和证明阶段具体做了什么，请阅读
@@ -12,13 +12,15 @@ from hcsp_typechecker import (
     construct_hcsp_type,
     check_hcsp_type,
     build_type_transition_graph,
+    analyze_type_lock_freedom,
 )
 ```
 
-三个函数分别完成“从 HCSP 构造 Type”“检查用户 Type”“从 Type 构造 Table 3
-状态图”。它们都支持 `output="none" | "result" | "full"`，但输入和成功结果不同。
+四个函数分别完成“从 HCSP 构造 Type”“检查用户 Type”“从 Type 构造 Table 3
+状态图”“在完整图上检查死锁/活锁自由”。它们都支持
+`output="none" | "result" | "full"`，但输入和成功结果不同。
 
-## 1. 三个接口之间的数据流
+## 1. 四个接口之间的数据流
 
 ```mermaid
 flowchart LR
@@ -29,11 +31,13 @@ flowchart LR
     T1 --> G["build_type_transition_graph"]
     T2 --> G
     G --> TG["完整 TypeTransitionGraph"]
+    TG --> L["analyze_type_lock_freedom"]
+    L --> R["LockFreedomReport + 反例"]
 ```
 
 Constructor 与 Checker 都在内部解析 HCSP、Gamma、Theta 和参数。它们不会向普通
 调用者返回 Process AST。图接口只接收已经存在的正式 `TypeAST`，不接收 HCSP 文本
-或用户 Type 文本。
+或用户 Type 文本。锁分析接口只接收第三接口已经生成的完整图。
 
 ## 2. 最短可运行示例
 
@@ -231,7 +235,7 @@ build_type_transition_graph(
 
 `state.type_ast` 是用于输出的规范 Type AST。`edge.label` 是无耗时 `tau` 标签或携带
 精确时长与 ready set 的时间标签；`edge.derivations` 保存产生同一源/标签/目标边的
-所有不同 Table 3 规则证据。图不包含“是否死锁”等分析结果，当前接口只负责构造图。
+所有不同 Table 3 规则证据。图不混入性质结论；第四接口单独产生锁自由报告。
 
 ### 5.2 规模限制
 
@@ -247,15 +251,31 @@ graph = build_type_transition_graph(
 `HCSPTypeTransitionGraphError(kind="size-limit")`，并且不返回部分图。这样调用者
 不会把尚未穷尽的前缀误认为完整状态空间。
 
-## 6. 输出模式
+## 6. 锁自由分析接口
 
-三个接口共享同一展示协议：
+```python
+analyze_type_lock_freedom(
+    graph: TypeTransitionGraph,
+    *,
+    output: OutputMode | str = "none",
+    stream=None,
+) -> LockFreedomReport
+```
+
+报告的 `deadlock_free`、`livelock_free` 和 `lock_free` 是稳定布尔属性。性质为假时
+接口正常返回，并分别在 `deadlock_witness` 或 `livelock_witness` 中给出有限反例；
+输入不是完整图时才抛 `HCSPTypeLockAnalysisError`。详细定义、算法和复杂度见
+[死锁/活锁分析](TYPE_LOCK_ANALYSIS.md)。
+
+## 7. 输出模式
+
+四个接口共享同一展示协议：
 
 | `output` | 内容 | 推荐用途 |
 |---|---|---|
 | `"none"` | 不打印 | 库调用、自动测试、Web 服务 |
-| `"result"` | 最终结论、Type 或图规模、首要错误 | 命令行普通运行 |
-| `"full"` | 原始输入、环境、推导/证明轨迹，或完整图 | 人工审计和排错 |
+| `"result"` | 最终结论、Type、图规模或锁自由摘要、首要错误 | 命令行普通运行 |
+| `"full"` | 原始输入、推导/证明轨迹、完整图或锁反例路径 | 人工审计和排错 |
 
 `stream` 可传任何支持 `write()` 的文本流：
 
@@ -270,7 +290,7 @@ audit_log = buffer.getvalue()
 `output="none"` 时，即使失败也不打印；异常对象仍可调用 `format_result()` 或
 `format_full()`。不要通过解析中文日志控制程序流程，应读取异常的结构化字段。
 
-## 7. 统一异常处理
+## 8. 统一异常处理
 
 ```python
 from hcsp_typechecker import (
@@ -282,7 +302,7 @@ from hcsp_typechecker import (
 )
 ```
 
-### 7.1 输入错误
+### 8.1 输入错误
 
 `HCSPInputError` 的核心字段：
 
@@ -298,7 +318,7 @@ from hcsp_typechecker import (
 `format_diagnostic()` 会生成源码行与插入符。输入错误发生后，Constructor/Checker
 后端不会启动。
 
-### 7.2 Constructor 错误
+### 8.2 Constructor 错误
 
 `HCSPTypeConstructionError.kind` 取值：
 
@@ -320,7 +340,7 @@ except HCSPTypeConstructionError as error:
     print(error.kind, error.reason)
 ```
 
-### 7.3 Checker 错误
+### 8.3 Checker 错误
 
 `HCSPTypeCheckingError.kind` 取值：`environment`、`type-mismatch`、
 `rule-application`、`proof-failed` 或 `proof-unknown`。除通用字段外还提供：
@@ -330,20 +350,26 @@ except HCSPTypeConstructionError as error:
 - `type_structure_matched`：`True` 表示结构已完整消费，`False` 表示明确不匹配，
   `None` 表示更早的环境/规则失败使检查未走完。
 
-### 7.4 图错误
+### 8.4 图错误
 
 `HCSPTypeTransitionGraphError.kind` 取值：`invalid-type`、`invalid-limit`、
 `normalization` 或 `size-limit`。规模错误额外给出 `limit_name/limit`，非法选项给出
 `option_name/option_value`。该异常从不携带部分状态图。
 
-### 7.5 `HCSPErrorDetail`
+### 8.5 锁分析错误
+
+`HCSPTypeLockAnalysisError.kind` 是 `invalid-graph` 或 `incomplete-graph`；同时公开
+`phase`、`reason`、`state_count`、`transition_count` 和 `details`。该异常只描述
+分析输入无效。发现死锁或活锁时接口正常返回带见证的 `LockFreedomReport`。
+
+### 8.6 `HCSPErrorDetail`
 
 Constructor 和 Checker 的 `details` 是 `HCSPErrorDetail` 元组。每项含
 `category/verdict/message/rule/location`；证明错误还含
 `proof_kind/formula/backend_detail`。这是一套面向程序的稳定证据格式，比解析完整
 日志可靠。
 
-## 8. 证明器与 `unknown`
+## 9. 证明器与 `unknown`
 
 Z3 用于表达式、状态和 FOL 义务；KeYmaera X 用于非平凡 ODE 的 dL 义务。若未配置
 KeYmaera X，离散程序仍可正常运行，但需要 dL 后端的义务通常得到 `unknown`。

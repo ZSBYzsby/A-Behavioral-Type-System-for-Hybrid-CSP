@@ -46,8 +46,10 @@ EXPECTED_PUBLIC_IMPORTS = {
     "new_case.py": COMMON_PUBLIC_IMPORTS
     | {
         "HCSPTypeTransitionGraphError",
+        "HCSPTypeLockAnalysisError",
         "HCSPUntrustedTypeConstructionError",
         "build_type_transition_graph",
+        "analyze_type_lock_freedom",
     },
 }
 

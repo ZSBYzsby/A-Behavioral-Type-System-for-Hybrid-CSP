@@ -285,7 +285,7 @@ Table 2 额外验证恰好到达该边界。ODE 若需要在 `d` 时自然结束
 实现仍按这些 AST 产生式逐项对应论文规则，但核心遍历使用显式工作栈：长顺序
 Process、深 Type continuation、类型构造/检查及规范化项图转换不依赖 Python
 调用栈深度。端到端压力测试会把 TypeConstructor 的真实大规模输出先序列化为正式
-Type 用户语法并交给 TypeChecker，也会直接交给状态图接口，防止三个接口形成不同的
+Type 用户语法并交给 TypeChecker，也会直接交给状态图接口，防止前三个接口形成不同的
 人工深度边界。状态图的状态数和转移数仍受调用者给出的规模上限约束，因为这属于
 Table 3 可达状态数量而非 AST 表示深度。
 
@@ -425,17 +425,18 @@ type_ast = construct_hcsp_type(source, output="full")
 
 包根 `hcsp_typechecker` 只公开以下稳定白名单：
 
-- 三个操作：`construct_hcsp_type`、`check_hcsp_type` 与
-  `build_type_transition_graph`；
-- 正式结果类型：`TypeAST` 与 `TypeTransitionGraph`；
+- 四个操作：`construct_hcsp_type`、`check_hcsp_type`、
+  `build_type_transition_graph` 与 `analyze_type_lock_freedom`；
+- 正式结果类型：`TypeAST`、`TypeTransitionGraph` 与 `LockFreedomReport`；
 - 打印模式枚举：`OutputMode`；
-- 五个公共异常：`HCSPInputError`、`HCSPTypeConstructionError`、
+- 六个公共异常：`HCSPInputError`、`HCSPTypeConstructionError`、
   `HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`。其中
   `HCSPUntrustedTypeConstructionError` 是
   `HCSPTypeConstructionError` 的子类；第三接口使用
-  `HCSPTypeTransitionGraphError`。
-- 三套错误分类和统一明细：`TypeConstructionErrorKind`、
+  `HCSPTypeTransitionGraphError`；第四接口使用 `HCSPTypeLockAnalysisError`。
+- 四套错误分类和统一明细：`TypeConstructionErrorKind`、
   `TypeCheckingErrorKind`、`TypeTransitionGraphErrorKind`、`HCSPErrorDetail`。
+  第四套为 `TypeLockAnalysisErrorKind`。
 
 Constructor 接口的签名为：
 
@@ -643,11 +644,12 @@ Table 3 操作语义层：
 ```text
 HCSPErrorDetail, HCSPInputError, HCSPTypeConstructionError,
 HCSPTypeCheckingError, HCSPTypeTransitionGraphError,
-HCSPUntrustedTypeConstructionError, OutputMode,
+HCSPTypeLockAnalysisError, HCSPUntrustedTypeConstructionError, OutputMode,
 TypeAST, TypeCheckingErrorKind, TypeConstructionErrorKind,
-TypeTransitionGraphErrorKind,
-TypeTransitionGraph, construct_hcsp_type, check_hcsp_type,
-build_type_transition_graph
+TypeTransitionGraphErrorKind, TypeLockAnalysisErrorKind,
+TypeTransitionGraph, LockFreedomReport,
+construct_hcsp_type, check_hcsp_type,
+build_type_transition_graph, analyze_type_lock_freedom
 ```
 
 普通调用方只依赖上述稳定名称。`parse_hcsp_source`、`parse_hcsp`、
@@ -838,6 +840,12 @@ frontend formatter 打印全部状态、边标签和规则证据。formatter 不
 还公开 `limit_name`/`limit`，非法选项公开 `option_name`/`option_value`。任何失败都
 不会返回部分状态图。`result` 输出紧凑摘要，`full` 输出输入 Type 和各阶段状态，
 `none` 保持静默。
+
+完整图可继续交给第四接口 `analyze_type_lock_freedom(graph, ...)`。它用 CSR 索引和
+非递归 BFS/DFS 线性搜索非空-ready无限等待死锁和纯静默环活锁，返回
+`LockFreedomReport` 及可达路径反例。性质为假是正常报告；图对象非法或不是完整
+可达闭包时才抛 `HCSPTypeLockAnalysisError`。详见
+[死锁/活锁分析](TYPE_LOCK_ANALYSIS.md)。
 
 该接口先把原 Type AST 单向转换为独立的规范化 Type AST，再由
 `backend/type_operational_semantics` 穷尽基于 Table 3 的关键-deadline约化状态。规范化 AST 与

@@ -73,6 +73,14 @@ TypeAST -> Normalized Type -> EquiRecursiveStateKey
 图节点真正用于判等和继续推导的是循环项图键；节点携带的规范 Type 只是由该键
 确定性重建的可读代表。因此递归展开产生的不同有限语法树不会被误当成不同状态。
 
+### 1.4 状态图上的死锁与活锁分析
+
+`analyze_type_lock_freedom(graph, ...)` 不重新执行 Type 降低或 Table 3。它对第三接口
+返回的完整显式图建立 CSR 出边索引，BFS 搜索 `time(infinity,R)` 且 `R` 非空的
+死锁边，并在 `tau` 诱导子图上用显式栈 DFS 搜索活锁环。性质为假时返回可达前缀
+和有限反例，不作为接口异常；图对象非法或不是完整可达闭包时才抛异常。全部搜索
+和路径重建均为非递归的 `O(|V|+|E|)` 算法。
+
 ---
 
 ## 2. 前端实际接受并建立什么对象
@@ -651,6 +659,8 @@ BFS 以循环项图键去重状态，以 `(source,label,target)` 去重边；同
 | 递归 | 通信守卫的尾递归片段；抽象入口只保留参数约束、类型域和递归不变量 |
 | Table 3 时间 | 只生成到下一最大关键 deadline 的时间边 |
 | 状态等价 | 在等递归循环项图上取商；打印规范 AST 不参与状态判等 |
+| 死锁 | 可达无限时间边且 ready 集非空；无出边终态不按出度误判 |
+| 活锁 | 可达 `tau` 诱导子图存在有向环；正时间环不算活锁 |
 
 这些行为有的是论文规则的直接算法化，有的是项目为明确输入、证明器边界、可扩展性
 或状态图有限表示做出的决定。修改其中任何一项时，至少需要同步对应专题文档、规则
@@ -678,7 +688,9 @@ BFS 以循环项图键去重状态，以 `(source,label,target)` 去重边；同
 | 等递归项图 | `backend/type_operational_semantics/regular_tree.py` |
 | Table 3 单步 | `backend/type_operational_semantics/table3.py` |
 | 可达图 BFS | `backend/type_operational_semantics/graph_builder.py` |
-| 三个公开接口和结构化异常 | `api.py` |
+| 锁分析报告与反例 | `data_structures/type_lock_analysis/` |
+| CSR、死锁 BFS 与活锁 DFS | `backend/type_lock_analysis/` |
+| 四个公开接口和结构化异常 | `api.py` |
 
 这张表说明“某项行为由哪里决定”。前端 EBNF 文档不是 Table 2 语义实现，Type
 AST 的 `__str__` 也不是图状态判等算法；审计时应进入相应权威层，而不是从展示文本

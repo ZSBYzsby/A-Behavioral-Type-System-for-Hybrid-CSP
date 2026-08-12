@@ -6,6 +6,8 @@ r"""构造改良版 Section 5 Type，并继续生成其 Table 3 状态迁移图�
 ``build_type_transition_graph(type_ast) -> TypeTransitionGraph``：第三接口先规范化
 Type、建立等递归循环项图，再穷尽项目 Table 3 的全部可达迁移。Process AST、
 规范 Type AST 和循环项图仍是内部对象，不需要由本脚本手工构造。
+图构造完成后，脚本再调用 ``analyze_type_lock_freedom(graph)``，用第四接口检查
+全部可达状态是否同时满足死锁自由和活锁自由，并在失败时给出有限反例路径。
 
 ``end``、``vmax``、``amin``、``amax`` 是 source 中声明的共享只读 Real
 参数，不属于任一并行分量的状态 Gamma，也不会被替换成具体数值。统一约束为：
@@ -47,8 +49,10 @@ from hcsp_typechecker import (
     HCSPInputError,
     HCSPTypeConstructionError,
     HCSPTypeTransitionGraphError,
+    HCSPTypeLockAnalysisError,
     HCSPUntrustedTypeConstructionError,
     build_type_transition_graph,
+    analyze_type_lock_freedom,
     construct_hcsp_type,
 )
 
@@ -68,6 +72,9 @@ OUTPUT_MODE = "result"
 
 # 设为 "full" 可查看所有状态、边标签以及合并后的 Table 3 推导证据。
 GRAPH_OUTPUT_MODE = "result"
+
+# 设为 "full" 可查看死锁可达前缀、无限等待边或活锁静默环及规则证据。
+LOCK_ANALYSIS_OUTPUT_MODE = "result"
 
 
 def _number_text(value: Fraction) -> str:
@@ -275,7 +282,7 @@ def parse_period(argv: Sequence[str] | None = None) -> Fraction:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """先构造可信 Type AST，再用第三个稳定接口生成完整状态迁移图。"""
+    """依次构造可信 Type、完整状态图，并用第四接口检查锁自由性。"""
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -336,6 +343,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         "案例第二阶段通过：已从可信 Type AST 构造完整状态迁移图；"
         f"状态 {len(graph.states)} 个，转移 {len(graph.transitions)} 条。"
     )
+    try:
+        report = analyze_type_lock_freedom(
+            graph,
+            output=LOCK_ANALYSIS_OUTPUT_MODE,
+        )
+    except HCSPTypeLockAnalysisError as error:
+        print(
+            "案例第三阶段失败：无法分析完整状态迁移图 "
+            f"[{error.kind.value}/{error.phase}]。"
+        )
+        return 1
+    if not report.lock_free:
+        print(
+            "案例第三阶段未通过：状态图存在锁反例；"
+            f"deadlock_free={report.deadlock_free}, "
+            f"livelock_free={report.livelock_free}。"
+        )
+        return 1
+    print("案例第三阶段通过：全部可达状态同时满足死锁自由和活锁自由。")
     return 0
 
 

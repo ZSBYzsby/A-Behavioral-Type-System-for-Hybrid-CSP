@@ -20,13 +20,14 @@
 - [用户给定 Type 的输入语法与 Type AST 往返](TYPE_INPUT_SYNTAX.md)
 - [Process 与表达式子语法](HCSP_INPUT_SYNTAX.md)
 
-## TypeConstructor、TypeChecker 与 Table 3 图接口
+## TypeConstructor、TypeChecker、Table 3 图与锁分析接口
 
-- [三个稳定接口的详细使用手册](PUBLIC_API_GUIDE.md)
+- [四个稳定接口的详细使用手册](PUBLIC_API_GUIDE.md)
 - [当前代码的实现语义与论文规则落地方式](IMPLEMENTATION_SEMANTICS.md)
 - [TypeConstructor：Process AST 到 Type AST 的真实构造过程](TYPE_CONSTRUCTOR.md)
 - [TypeChecker：检查用户给定 Type 的规则递归过程](TYPE_CHECKER.md)
 - [第三接口：规范化 Type AST、循环项图与 Table 3 状态转移图](TYPE_OPERATIONAL_SEMANTICS.md)
+- [第四接口：状态图上的死锁自由与活锁自由分析](TYPE_LOCK_ANALYSIS.md)
 - [规范化 Type AST 的只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)
 - [Table 3 状态迁移图的只读输出语法](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)
 - [完整项目功能参考](PROJECT_FUNCTION_REFERENCE.md)

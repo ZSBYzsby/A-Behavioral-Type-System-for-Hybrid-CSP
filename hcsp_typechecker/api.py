@@ -1,4 +1,4 @@
-"""面向普通使用者的 HCSP TypeConstructor、TypeChecker 与状态图门面。
+"""面向普通使用者的 HCSP TypeConstructor、TypeChecker、状态图与锁分析门面。
 
 普通调用者只需把一份完整用户 source 交给 :func:`construct_hcsp_type`。接口会在
 内部依次完成“源码解析 -> Process AST/环境构造 -> Table 2 类型构造与前提证明”，
@@ -46,6 +46,10 @@ from .frontend.normalized_type_syntax import (
 from .frontend.type_transition_graph_syntax import (
     format_type_transition_graph as _format_type_transition_graph,
 )
+from .frontend.type_lock_analysis_syntax import (
+    format_lock_freedom_full as _format_lock_freedom_full,
+    format_lock_freedom_result as _format_lock_freedom_result,
+)
 from .data_structures.process_ast.ast import HCSP, Process
 from .data_structures.type_ast.ast import ConfigurationType
 from .data_structures.type_ast.render import format_type_source
@@ -66,9 +70,14 @@ from .backend.type_operational_semantics import (
     TypeTransitionGraphSizeError,
     build_type_transition_graph as _build_type_transition_graph,
 )
+from .backend.type_lock_analysis import (
+    IncompleteTransitionGraphError,
+    analyze_lock_freedom as _analyze_lock_freedom,
+)
 from .backend.common.keymaerax import KeYmaeraXConfig
 from .backend.common.model import Verdict
 from .data_structures.type_transition_graph import TypeTransitionGraph
+from .data_structures.type_lock_analysis import LockFreedomReport
 from .data_structures.runtime_context import (
     ChannelType,
     Configuration,
@@ -101,6 +110,13 @@ class TypeTransitionGraphErrorKind(str, Enum):
     INVALID_LIMIT = "invalid-limit"
     NORMALIZATION = "normalization"
     SIZE_LIMIT = "size-limit"
+
+
+class TypeLockAnalysisErrorKind(str, Enum):
+    """第四个接口可稳定区分的图对象与可达闭包错误类别。"""
+
+    INVALID_GRAPH = "invalid-graph"
+    INCOMPLETE_GRAPH = "incomplete-graph"
 
 
 @dataclass(frozen=True, slots=True)
@@ -918,6 +934,105 @@ def _write_graph_error(
     )
 
 
+class HCSPTypeLockAnalysisError(RuntimeError):
+    """第四接口无法在一张完整 Type 图上执行性质分析时抛出的异常。
+
+    性质为假不是异常：可达死锁或活锁由 :class:`LockFreedomReport` 中的反例
+    正常返回。本异常只表示调用对象不是第三接口的图，或图含有不可达孤立状态，
+    因而不能被当作一张完整的可达闭包进行全局性质判断。
+    """
+
+    def __init__(
+        self,
+        kind: TypeLockAnalysisErrorKind,
+        reason: str,
+        graph: object,
+    ) -> None:
+        """冻结机器可读类别、阶段、原因和图规模摘要。"""
+
+        if not isinstance(kind, TypeLockAnalysisErrorKind):
+            raise TypeError("lock-analysis error kind must be TypeLockAnalysisErrorKind")
+        self.verdict = "error"
+        self.kind = kind
+        self.phase = (
+            "input-validation"
+            if kind is TypeLockAnalysisErrorKind.INVALID_GRAPH
+            else "reachability-validation"
+        )
+        self.reason = reason
+        self.state_count = len(graph.states) if isinstance(graph, TypeTransitionGraph) else None
+        self.transition_count = (
+            len(graph.transitions) if isinstance(graph, TypeTransitionGraph) else None
+        )
+        self.details = (
+            HCSPErrorDetail(
+                category=kind.value,
+                verdict="error",
+                message=reason,
+                rule="lock-freedom-graph-analysis",
+                location="TypeTransitionGraph root",
+            ),
+        )
+        self.primary_detail = self.details[0]
+        super().__init__(self.format_result())
+
+    def format_result(self) -> str:
+        """返回失败类别、阶段和不返回部分结论的紧凑说明。"""
+
+        lines = [
+            "=== Type 锁自由分析结果 ===",
+            "Verdict : error",
+            "性质分析 : 失败",
+            f"错误类别 : {self.kind.value}",
+            f"错误阶段 : {self.phase}",
+            f"原因     : {self.reason}",
+        ]
+        if self.state_count is not None:
+            lines.extend(
+                (
+                    f"图状态数 : {self.state_count}",
+                    f"图迁移数 : {self.transition_count}",
+                )
+            )
+        lines.append("返回结果 : 无（不会返回部分性质结论）")
+        return "\n".join(lines)
+
+    def format_full(self) -> str:
+        """返回各验证阶段和失败摘要，不重复输出整张可能很大的图。"""
+
+        reachability = (
+            "未启动"
+            if self.kind is TypeLockAnalysisErrorKind.INVALID_GRAPH
+            else "失败"
+        )
+        return "\n\n".join(
+            (
+                "=== Type 锁自由分析完整错误日志 ===\n"
+                f"图对象验证 : {'失败' if self.kind is TypeLockAnalysisErrorKind.INVALID_GRAPH else '成功'}\n"
+                f"可达闭包验证 : {reachability}\n"
+                "死锁搜索 : 未启动\n"
+                "活锁搜索 : 未启动",
+                "=== 锁自由分析失败摘要 ===\n"
+                + "\n".join(self.format_result().splitlines()[1:]),
+            )
+        )
+
+
+def _write_lock_analysis_error(
+    error: HCSPTypeLockAnalysisError,
+    mode: OutputMode,
+    stream: TextIO | None,
+) -> None:
+    """按照第四接口的输出模式至多写出一次结构化错误。"""
+
+    if mode is OutputMode.NONE:
+        return
+    _write_output(
+        error.format_full() if mode is OutputMode.FULL else error.format_result(),
+        stream,
+    )
+
+
 def _normalize_initial_states(
     value: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
     component_count: int,
@@ -1370,8 +1485,8 @@ def build_type_transition_graph(
     Notes
     -----
     图状态身份来自等递归循环项图，而不是展示 AST 的 Python 结构相等性。因此
-    ``mu t.T`` 与其有限次展开不会产生重复状态。当前接口只构造图，不执行死锁、
-    活锁或其他图上性质分析。
+    ``mu t.T`` 与其有限次展开不会产生重复状态。本接口只构造图；死锁和活锁性质
+    由 :func:`analyze_type_lock_freedom` 在完整返回图上独立分析。
     """
 
     mode = _normalize_output_mode(output)
@@ -1449,19 +1564,95 @@ def build_type_transition_graph(
     return graph
 
 
+def analyze_type_lock_freedom(
+    graph: TypeTransitionGraph,
+    *,
+    output: OutputMode | str = OutputMode.NONE,
+    stream: TextIO | None = None,
+) -> LockFreedomReport:
+    """判断完整 Type 状态迁移图的死锁自由与活锁自由性质。
+
+    该接口严格作用于第三接口返回的显式完整图。它先用 BFS 验证并遍历从
+    ``initial_state`` 出发的可达闭包，同时寻找满足 Definition 4.5 的
+    ``time(infinity, R)`` 且 ``R`` 非空的死锁边；随后在静默迁移诱导子图上用
+    显式栈 DFS 搜索有向环。静默环等价于 Definition 4.6 的无限静默推导。
+
+    Parameters
+    ----------
+    graph:
+        :func:`build_type_transition_graph` 返回的完整 ``TypeTransitionGraph``。
+        本接口不接受 Type AST，也不在内部重新生成图。
+    output:
+        ``none`` 静默；``result`` 输出三项布尔结论和紧凑反例；``full`` 还输出
+        可达前缀、死锁无限时间边或活锁静默环、相关规范 Type 状态和规则证据。
+    stream:
+        输出目标；``None`` 表示 ``sys.stdout``。
+
+    Returns
+    -------
+    LockFreedomReport
+        图规模、死锁自由/活锁自由/锁自由结论，以及性质不成立时可由程序读取的
+        最短可达前缀和有限反例环。发现反例是正常分析结果，不抛异常。
+
+    Raises
+    ------
+    HCSPTypeLockAnalysisError
+        输入不是 TypeTransitionGraph，或图含有从初态不可达的孤立状态，无法作为
+        第三接口承诺的完整可达闭包使用。失败时不返回部分分析结果。
+
+    Notes
+    -----
+    算法的时间复杂度为 ``O(|V|+|E|)``，辅助空间为 ``O(|V|+|E|)``。BFS、
+    静默环 DFS 和反例重建都不使用 Python 递归，因此不会受 Python 递归深度限制。
+    ``EmptyType`` 或 ``BottomType`` 的无出边状态本身不按论文定义判为死锁；
+    ``time(infinity, empty-ready)`` 也不是死锁。只要存在可达纯静默环，即使环上
+    另有退出边，仍存在一种无限静默执行，因此判为活锁。
+    """
+
+    mode = _normalize_output_mode(output)
+    if not isinstance(graph, TypeTransitionGraph):
+        error = HCSPTypeLockAnalysisError(
+            TypeLockAnalysisErrorKind.INVALID_GRAPH,
+            "graph 必须是 build_type_transition_graph 返回的 TypeTransitionGraph",
+            graph,
+        )
+        _write_lock_analysis_error(error, mode, stream)
+        raise error
+    try:
+        report = _analyze_lock_freedom(graph)
+    except IncompleteTransitionGraphError as cause:
+        error = HCSPTypeLockAnalysisError(
+            TypeLockAnalysisErrorKind.INCOMPLETE_GRAPH,
+            str(cause),
+            graph,
+        )
+        _write_lock_analysis_error(error, mode, stream)
+        raise error from cause
+
+    if mode is OutputMode.RESULT:
+        _write_output(_format_lock_freedom_result(report), stream)
+    elif mode is OutputMode.FULL:
+        _write_output(_format_lock_freedom_full(report, graph), stream)
+    return report
+
+
 __all__ = [
     "HCSPErrorDetail",
     "HCSPInputError",
     "HCSPTypeConstructionError",
     "HCSPTypeCheckingError",
     "HCSPTypeTransitionGraphError",
+    "HCSPTypeLockAnalysisError",
     "HCSPUntrustedTypeConstructionError",
     "OutputMode",
     "TypeAST",
     "TypeCheckingErrorKind",
     "TypeConstructionErrorKind",
     "TypeTransitionGraphErrorKind",
+    "TypeLockAnalysisErrorKind",
     "TypeTransitionGraph",
+    "LockFreedomReport",
+    "analyze_type_lock_freedom",
     "build_type_transition_graph",
     "construct_hcsp_type",
     "check_hcsp_type",
