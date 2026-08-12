@@ -7,6 +7,7 @@ r"""第四接口的死锁自由、活锁自由语义与高负载回归测试。
 3. 返回从初态到反例的连续路径和 Table 3 原始迁移证据；
 4. 拒绝含不可达孤立状态的非闭包图，并提供三档公共输出；
 5. 用长链确认 BFS/DFS/路径重建不依赖 Python 递归。
+6. 区分正常 Empty 终态与可达 Bottom 错误终止，并返回最短错误见证。
 
 论文对应
 --------
@@ -35,10 +36,14 @@ from hcsp_typechecker.data_structures.normalized_type_ast import (
     NormalizedEmptyType,
 )
 from hcsp_typechecker.data_structures.type_ast import (
+    BottomType,
     EmptyType,
+    FiniteDelayType,
     InfiniteDelayType,
     InputType,
     NoInterruptType,
+    OutputType,
+    ParallelType,
 )
 from hcsp_typechecker.data_structures.type_transition_graph import (
     CommunicationDirection,
@@ -113,6 +118,69 @@ class LockFreedomSemanticsTests(unittest.TestCase):
                 self.assertTrue(report.deadlock_free)
                 self.assertTrue(report.livelock_free)
                 self.assertTrue(report.lock_free)
+                self.assertTrue(report.error_free)
+                self.assertTrue(report.behavior_correct)
+
+    # 测试输入：单独 BottomType 错误终态，与 EmptyType 正常终态对照。
+    # 预期行为：两者都没有锁，但只有 Bottom 使 error_free/behavior_correct 为假。
+    # 检查内容：错误终止不会被重命名为死锁，也不会被正常 Empty 结论掩盖。
+    # 论文对应：Bottom 是异常终止；Definition 4.5--4.7 的锁自由仍保持独立。
+    def test_bottom_terminal_is_reported_separately_from_lock_freedom(self) -> None:
+        """Bottom 终态保持 lock_free，但不再被报告为整体行为正确。"""
+
+        report = analyze_lock_freedom(build_graph_internal(BottomType()))
+
+        self.assertTrue(report.deadlock_free)
+        self.assertTrue(report.livelock_free)
+        self.assertTrue(report.lock_free)
+        self.assertFalse(report.error_free)
+        self.assertFalse(report.behavior_correct)
+        witness = report.bottom_error_witness
+        self.assertIsNotNone(witness)
+        assert witness is not None
+        self.assertEqual(witness.prefix.state_ids, (0,))
+        self.assertEqual(witness.component_indices, (0,))
+
+    # 测试输入：ch 同步后接收分量进入 Bottom，发送分量仍有可执行的零时延。
+    # 预期行为：报告从初态到错误状态的一步最短路径，并指出 Bottom 根位置。
+    # 检查内容：只检查已成为并行根的 Bottom，不误报 delay/通信 continuation 中尚未到达的 Bottom。
+    # 论文对应：同步失败后的异常终止是可达行为错误，需与锁见证分开记录。
+    def test_reachable_bottom_has_a_shortest_error_witness(self) -> None:
+        """可达 Bottom 错误使用 BFS 父边返回最短前缀和准确分量位置。"""
+
+        receiver = InfiniteDelayType(InputType("ch", BottomType()))
+        unmatched = analyze_lock_freedom(build_graph_internal(receiver))
+        self.assertTrue(unmatched.error_free)
+
+        sender = InfiniteDelayType(
+            OutputType(
+                "ch",
+                FiniteDelayType(0, NoInterruptType(), EmptyType()),
+            )
+        )
+        graph = build_graph_internal(ParallelType((receiver, sender)))
+        report = analyze_lock_freedom(graph)
+
+        self.assertTrue(report.lock_free)
+        self.assertFalse(report.error_free)
+        self.assertFalse(report.behavior_correct)
+        witness = report.bottom_error_witness
+        self.assertIsNotNone(witness)
+        assert witness is not None
+        self.assertEqual(len(witness.prefix.transitions), 1)
+        self.assertEqual(witness.prefix.end_state, graph.transitions[0].target)
+        self.assertEqual(witness.component_indices, (0,))
+
+        output = StringIO()
+        public_report = analyze_type_lock_freedom(
+            graph,
+            output="full",
+            stream=output,
+        )
+        self.assertEqual(public_report, report)
+        self.assertIn("Bottom 错误反例", output.getvalue())
+        self.assertIn("bottom_error_witness", output.getvalue())
+        self.assertIn("bottom_components = (0,)", output.getvalue())
 
     # 测试输入：S0 经一条时间边到 S1，S1 具有 tau 自环且另有退出边。
     # 预期行为：仍存在无限选择 tau 的执行，故报告活锁并返回 S1 自环。
@@ -253,6 +321,8 @@ class LockFreedomSemanticsTests(unittest.TestCase):
         self.assertEqual(result, full)
         self.assertEqual(silent_stream.getvalue(), "")
         self.assertIn("死锁自由 : 否", result_stream.getvalue())
+        self.assertIn("错误终止自由 : 是", result_stream.getvalue())
+        self.assertIn("整体行为正确 : 否", result_stream.getvalue())
         self.assertNotIn("witness_states", result_stream.getvalue())
         self.assertIn("deadlock_witness", full_stream.getvalue())
         self.assertIn("witness_states", full_stream.getvalue())

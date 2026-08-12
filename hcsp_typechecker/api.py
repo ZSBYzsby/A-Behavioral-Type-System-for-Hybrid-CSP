@@ -91,7 +91,7 @@ TypeAST: TypeAlias = ConfigurationType
 
 
 class OutputMode(str, Enum):
-    """控制三个公共接口的文本输出详细程度。
+    """控制四个公共接口的文本输出详细程度。
 
     ``NONE`` 不写任何文本，适合把返回值和异常交给上层程序自行处理；``RESULT``
     只写最终结论、正式 Type 或首要错误；``FULL`` 还写输入、规则推导、证明义务，
@@ -937,8 +937,9 @@ def _write_graph_error(
 class HCSPTypeLockAnalysisError(RuntimeError):
     """第四接口无法在一张完整 Type 图上执行性质分析时抛出的异常。
 
-    性质为假不是异常：可达死锁或活锁由 :class:`LockFreedomReport` 中的反例
-    正常返回。本异常只表示调用对象不是第三接口的图，或图含有不可达孤立状态，
+    性质为假不是异常：可达死锁、活锁或 Bottom 错误终止由
+    :class:`LockFreedomReport` 中的反例正常返回。本异常只表示调用对象不是
+    第三接口的图，或图含有不可达孤立状态，
     因而不能被当作一张完整的可达闭包进行全局性质判断。
     """
 
@@ -980,7 +981,7 @@ class HCSPTypeLockAnalysisError(RuntimeError):
         """返回失败类别、阶段和不返回部分结论的紧凑说明。"""
 
         lines = [
-            "=== Type 锁自由分析结果 ===",
+            "=== Type 行为正确性分析结果 ===",
             "Verdict : error",
             "性质分析 : 失败",
             f"错误类别 : {self.kind.value}",
@@ -1007,12 +1008,13 @@ class HCSPTypeLockAnalysisError(RuntimeError):
         )
         return "\n\n".join(
             (
-                "=== Type 锁自由分析完整错误日志 ===\n"
+                "=== Type 行为正确性分析完整错误日志 ===\n"
                 f"图对象验证 : {'失败' if self.kind is TypeLockAnalysisErrorKind.INVALID_GRAPH else '成功'}\n"
                 f"可达闭包验证 : {reachability}\n"
                 "死锁搜索 : 未启动\n"
-                "活锁搜索 : 未启动",
-                "=== 锁自由分析失败摘要 ===\n"
+                "活锁搜索 : 未启动\n"
+                "Bottom 错误搜索 : 未启动",
+                "=== 行为正确性分析失败摘要 ===\n"
                 + "\n".join(self.format_result().splitlines()[1:]),
             )
         )
@@ -1570,12 +1572,13 @@ def analyze_type_lock_freedom(
     output: OutputMode | str = OutputMode.NONE,
     stream: TextIO | None = None,
 ) -> LockFreedomReport:
-    """判断完整 Type 状态迁移图的死锁自由与活锁自由性质。
+    """判断完整 Type 图的锁自由、Bottom 错误自由与整体行为正确性。
 
     该接口严格作用于第三接口返回的显式完整图。它先用 BFS 验证并遍历从
     ``initial_state`` 出发的可达闭包，同时寻找满足 Definition 4.5 的
     ``time(infinity, R)`` 且 ``R`` 非空的死锁边；随后在静默迁移诱导子图上用
     显式栈 DFS 搜索有向环。静默环等价于 Definition 4.6 的无限静默推导。
+    同一次 BFS 还定位首个含 ``BottomType`` 并行根的可达错误终止状态。
 
     Parameters
     ----------
@@ -1583,16 +1586,18 @@ def analyze_type_lock_freedom(
         :func:`build_type_transition_graph` 返回的完整 ``TypeTransitionGraph``。
         本接口不接受 Type AST，也不在内部重新生成图。
     output:
-        ``none`` 静默；``result`` 输出三项布尔结论和紧凑反例；``full`` 还输出
-        可达前缀、死锁无限时间边或活锁静默环、相关规范 Type 状态和规则证据。
+        ``none`` 静默；``result`` 输出锁、错误与综合结论及紧凑反例；``full`` 还输出
+        可达前缀、死锁无限时间边、活锁静默环或 Bottom 错误状态，以及相关
+        规范 Type 与 Table 3 规则证据。
     stream:
         输出目标；``None`` 表示 ``sys.stdout``。
 
     Returns
     -------
     LockFreedomReport
-        图规模、死锁自由/活锁自由/锁自由结论，以及性质不成立时可由程序读取的
-        最短可达前缀和有限反例环。发现反例是正常分析结果，不抛异常。
+        图规模、死锁/活锁/锁自由、Bottom 错误自由与整体行为正确结论，以及
+        性质不成立时可由程序读取的最短可达前缀和有限反例环。发现反例是正常分析结果，
+        不抛异常。
 
     Raises
     ------
@@ -1605,6 +1610,7 @@ def analyze_type_lock_freedom(
     算法的时间复杂度为 ``O(|V|+|E|)``，辅助空间为 ``O(|V|+|E|)``。BFS、
     静默环 DFS 和反例重建都不使用 Python 递归，因此不会受 Python 递归深度限制。
     ``EmptyType`` 或 ``BottomType`` 的无出边状态本身不按论文定义判为死锁；
+    但可达 Bottom 根会使 ``error_free`` 和 ``behavior_correct`` 为假。
     ``time(infinity, empty-ready)`` 也不是死锁。只要存在可达纯静默环，即使环上
     另有退出边，仍存在一种无限静默执行，因此判为活锁。
     """

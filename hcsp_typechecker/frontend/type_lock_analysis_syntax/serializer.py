@@ -1,4 +1,4 @@
-"""把锁自由分析结论和反例路径渲染成可审计文本。"""
+"""把锁自由、Bottom 错误自由结论和反例路径渲染成可审计文本。"""
 
 from __future__ import annotations
 
@@ -99,12 +99,14 @@ def format_lock_freedom_result(report: LockFreedomReport) -> str:
     """生成适合终端查看的简洁分析结果。"""
 
     lines = [
-        "=== Type 锁自由分析结果 ===",
+        "=== Type 行为正确性分析结果 ===",
         f"可达状态 : {report.reachable_state_count}",
         f"迁移数量 : {report.transition_count}",
         f"死锁自由 : {_yes_no(report.deadlock_free)}",
         f"活锁自由 : {_yes_no(report.livelock_free)}",
         f"锁自由   : {_yes_no(report.lock_free)}",
+        f"错误终止自由 : {_yes_no(report.error_free)}",
+        f"整体行为正确 : {_yes_no(report.behavior_correct)}",
     ]
     if report.deadlock_witness is not None:
         lines.append(
@@ -116,11 +118,17 @@ def format_lock_freedom_result(report: LockFreedomReport) -> str:
             f"活锁反例 : 静默环入口 S{cycle.start_state}，"
             f"环长 {len(cycle.transitions)}"
         )
+    if report.bottom_error_witness is not None:
+        witness = report.bottom_error_witness
+        lines.append(
+            f"Bottom 错误反例 : S{witness.prefix.end_state}，"
+            f"分量 {witness.component_indices}"
+        )
     return "\n".join(lines)
 
 
 def _witness_state_ids(report: LockFreedomReport) -> tuple[int, ...]:
-    """收集两个反例中出现的状态，供完整报告集中显示 Type。"""
+    """收集三类反例中出现的状态，供完整报告集中显示 Type。"""
 
     state_ids: set[int] = set()
     if report.deadlock_witness is not None:
@@ -129,6 +137,8 @@ def _witness_state_ids(report: LockFreedomReport) -> tuple[int, ...]:
     if report.livelock_witness is not None:
         state_ids.update(report.livelock_witness.prefix.state_ids)
         state_ids.update(report.livelock_witness.cycle.state_ids)
+    if report.bottom_error_witness is not None:
+        state_ids.update(report.bottom_error_witness.prefix.state_ids)
     return tuple(sorted(state_ids))
 
 
@@ -139,8 +149,10 @@ def format_lock_freedom_full(
     """生成含规范 Type 状态、路径和规则编号的完整反例报告。"""
 
     lines = [format_lock_freedom_result(report), "", "=== 分析证据 ==="]
-    if report.lock_free:
-        lines.append("所有可达状态均不满足死锁定义，静默子图中不存在有向环。")
+    if report.behavior_correct:
+        lines.append(
+            "所有可达状态均无死锁、无活锁，且不含 Bottom 错误终止根。"
+        )
 
     if report.deadlock_witness is not None:
         witness = report.deadlock_witness
@@ -165,6 +177,19 @@ def format_lock_freedom_full(
         lines.extend(["  }", "  silent_cycle {"])
         lines.extend(_format_path(witness.cycle, indent="    "))
         lines.extend(["  }", "}"])
+
+    if report.bottom_error_witness is not None:
+        witness = report.bottom_error_witness
+        lines.extend(["bottom_error_witness {", "  reachable_prefix {"])
+        lines.extend(_format_path(witness.prefix, indent="    "))
+        lines.extend(
+            [
+                "  }",
+                f"  error_state = S{witness.prefix.end_state}",
+                f"  bottom_components = {witness.component_indices}",
+                "}",
+            ]
+        )
 
     state_ids = _witness_state_ids(report)
     if state_ids:

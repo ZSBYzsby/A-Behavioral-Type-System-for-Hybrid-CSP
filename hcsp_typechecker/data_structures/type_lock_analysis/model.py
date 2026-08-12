@@ -1,4 +1,4 @@
-"""类型状态迁移图上的死锁/活锁分析结果。
+"""类型状态迁移图上的锁自由、Bottom 错误自由与综合分析结果。
 
 本文件只定义数据，不执行图搜索。反例被保存为真正的迁移对象序列，而不是
 容易失效的状态编号字符串。这样，展示层可以同时输出迁移标签和 Table 3
@@ -106,13 +106,37 @@ class LivelockWitness:
 
 
 @dataclass(frozen=True, slots=True)
+class BottomErrorWitness:
+    """到达含一个或多个 Bottom 并行根的错误终止状态的最短前缀。"""
+
+    prefix: TransitionPath
+    component_indices: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        """规范并检查展示状态中指向 Bottom 根的分量编号。"""
+
+        indices = tuple(self.component_indices)
+        object.__setattr__(self, "component_indices", indices)
+        if not indices:
+            raise ValueError("Bottom error witness requires at least one component")
+        if any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0
+            for index in indices
+        ):
+            raise ValueError("Bottom component indices must be non-negative integers")
+        if tuple(sorted(set(indices))) != indices:
+            raise ValueError("Bottom component indices must be sorted and unique")
+
+
+@dataclass(frozen=True, slots=True)
 class LockFreedomReport:
-    """完整图上的死锁自由、活锁自由结论和可复查反例。"""
+    """完整图上的锁自由、Bottom 错误自由结论和可复查见证。"""
 
     reachable_state_count: int
     transition_count: int
     deadlock_witness: DeadlockWitness | None = None
     livelock_witness: LivelockWitness | None = None
+    bottom_error_witness: BottomErrorWitness | None = None
 
     def __post_init__(self) -> None:
         """防止报告计数与见证结构出现明显不一致。"""
@@ -139,3 +163,15 @@ class LockFreedomReport:
         """同时满足死锁自由与活锁自由。"""
 
         return self.deadlock_free and self.livelock_free
+
+    @property
+    def error_free(self) -> bool:
+        """不存在任何可达的含 Bottom 并行根的错误终止状态。"""
+
+        return self.bottom_error_witness is None
+
+    @property
+    def behavior_correct(self) -> bool:
+        """同时满足论文锁自由和项目补充的 Bottom 错误自由。"""
+
+        return self.lock_free and self.error_free

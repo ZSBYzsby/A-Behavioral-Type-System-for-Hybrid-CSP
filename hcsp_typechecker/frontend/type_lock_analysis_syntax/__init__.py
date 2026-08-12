@@ -1,4 +1,4 @@
-"""死锁/活锁分析报告的只读用户展示格式。"""
+"""锁自由、Bottom 错误与综合行为正确性报告的只读展示。"""
 
 from .serializer import format_lock_freedom_full, format_lock_freedom_result
 

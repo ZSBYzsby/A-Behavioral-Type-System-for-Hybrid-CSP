@@ -8,6 +8,8 @@ deadline 节点，再把目标项图裁剪并按等递归正规树重新最小�
 时间语义采用项目确认的“下一个关键 deadline”策略：全部非空并行分量必须能够
 共同等待，且不同分量的 ready set 中不能存在互补动作；有限 deadline 取最小值，
 全部为无穷时生成 ``infinity`` 时间自循环。
+任一并行根为 ``Bottom`` 时，当前配置已经错误终止，所有 Table 3 规则均不再适用；
+``Empty`` 则是不阻塞其他分量的正常完成单位元。
 
 规则计算始终使用项图位置；写入公开 ``TransitionDerivation`` 前，再借助同一状态
 确定生成的展示映射，把分量和分支索引转换为用户实际看到的规范 AST 位置。
@@ -82,8 +84,9 @@ def derive_one_step(
 ) -> tuple[DerivedTransition, ...]:
     """枚举一个规范循环项图状态的全部瞬时和最大时间转移。
 
-    枚举内容包括内部选择、零时延且后继非 ``Bottom`` 的 timeout、任意两并行
-    分量之间的互补通信，以及满足等待前提时唯一的最大关键时间步。
+    若任一并行根已是 ``Bottom``，整个配置是错误终止状态，立即返回
+    空后继集。否则枚举内部选择、零时延且后继非 ``Bottom`` 的 timeout、
+    任意两并行分量之间的互补通信，以及满足等待前提时唯一的最大关键时间步。
 
     ``state`` 已经是等递归正规树的最小有限表示，所以 ``[P-mu]`` 在这里表现为
     沿回边读取 continuation，而不是额外的 AST 展开规则。返回的每个目标也立即
@@ -93,6 +96,15 @@ def derive_one_step(
 
     if not isinstance(state, EquiRecursiveStateKey):
         raise TypeError("Table 3 semantics requires an equi-recursive state key")
+
+    # Bottom 不是一个可被忽略的并行单位元，而是整个配置已经出错的标志。
+    # 这个全局检查必须先于其他分量的选择、通信和时间步。Empty 则会在并行
+    # 规范化中被当作单位元删除（或在全部完成时保留唯一 Empty 根），不触发错误终止。
+    if any(
+        state.nodes[root].kind is RegularTypeNodeKind.BOTTOM
+        for root in state.component_roots
+    ):
+        return ()
 
     transitions: list[DerivedTransition] = []
     roots = state.component_roots

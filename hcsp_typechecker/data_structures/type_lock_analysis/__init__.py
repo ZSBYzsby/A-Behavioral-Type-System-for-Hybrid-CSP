@@ -1,6 +1,7 @@
-"""死锁/活锁分析结果及反例见证的数据结构。"""
+"""锁自由、Bottom 错误自由及综合行为正确性见证数据结构。"""
 
 from .model import (
+    BottomErrorWitness,
     DeadlockWitness,
     LivelockWitness,
     LockFreedomReport,
@@ -8,6 +9,7 @@ from .model import (
 )
 
 __all__ = [
+    "BottomErrorWitness",
     "DeadlockWitness",
     "LivelockWitness",
     "LockFreedomReport",

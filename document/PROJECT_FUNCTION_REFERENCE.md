@@ -842,8 +842,10 @@ frontend formatter 打印全部状态、边标签和规则证据。formatter 不
 `none` 保持静默。
 
 完整图可继续交给第四接口 `analyze_type_lock_freedom(graph, ...)`。它用 CSR 索引和
-非递归 BFS/DFS 线性搜索非空-ready无限等待死锁和纯静默环活锁，返回
-`LockFreedomReport` 及可达路径反例。性质为假是正常报告；图对象非法或不是完整
+非递归 BFS/DFS 线性搜索非空-ready无限等待死锁、纯静默环活锁和可达 Bottom
+错误终止，返回 `LockFreedomReport` 及各自的最短可达路径反例。报告保留论文的
+`lock_free`，另行提供 `error_free` 和综合的 `behavior_correct`。性质为假是正常报告；
+图对象非法或不是完整
 可达闭包时才抛 `HCSPTypeLockAnalysisError`。详见
 [死锁/活锁分析](TYPE_LOCK_ANALYSIS.md)。
 

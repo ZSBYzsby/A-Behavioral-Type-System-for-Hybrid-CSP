@@ -17,7 +17,7 @@ from hcsp_typechecker import (
 ```
 
 四个函数分别完成“从 HCSP 构造 Type”“检查用户 Type”“从 Type 构造 Table 3
-状态图”“在完整图上检查死锁/活锁自由”。它们都支持
+状态图”“在完整图上检查锁、Bottom 错误和综合行为正确性”。它们都支持
 `output="none" | "result" | "full"`，但输入和成功结果不同。
 
 ## 1. 四个接口之间的数据流
@@ -235,7 +235,8 @@ build_type_transition_graph(
 
 `state.type_ast` 是用于输出的规范 Type AST。`edge.label` 是无耗时 `tau` 标签或携带
 精确时长与 ready set 的时间标签；`edge.derivations` 保存产生同一源/标签/目标边的
-所有不同 Table 3 规则证据。图不混入性质结论；第四接口单独产生锁自由报告。
+所有不同 Table 3 规则证据。图不混入性质结论；第四接口单独产生锁、Bottom
+错误和综合行为正确性报告。
 
 ### 5.2 规模限制
 
@@ -262,10 +263,12 @@ analyze_type_lock_freedom(
 ) -> LockFreedomReport
 ```
 
-报告的 `deadlock_free`、`livelock_free` 和 `lock_free` 是稳定布尔属性。性质为假时
-接口正常返回，并分别在 `deadlock_witness` 或 `livelock_witness` 中给出有限反例；
+报告保留 `deadlock_free`、`livelock_free` 和 `lock_free`，并提供
+`error_free` 与 `behavior_correct`。最后一项严格等于
+`lock_free and error_free`。性质为假时接口正常返回，并分别在
+`deadlock_witness`、`livelock_witness` 或 `bottom_error_witness` 中给出有限反例；
 输入不是完整图时才抛 `HCSPTypeLockAnalysisError`。详细定义、算法和复杂度见
-[死锁/活锁分析](TYPE_LOCK_ANALYSIS.md)。
+[锁与 Bottom 错误分析](TYPE_LOCK_ANALYSIS.md)。
 
 ## 7. 输出模式
 
@@ -274,7 +277,7 @@ analyze_type_lock_freedom(
 | `output` | 内容 | 推荐用途 |
 |---|---|---|
 | `"none"` | 不打印 | 库调用、自动测试、Web 服务 |
-| `"result"` | 最终结论、Type、图规模或锁自由摘要、首要错误 | 命令行普通运行 |
+| `"result"` | 最终结论、Type、图规模或行为正确性摘要、首要错误 | 命令行普通运行 |
 | `"full"` | 原始输入、推导/证明轨迹、完整图或锁反例路径 | 人工审计和排错 |
 
 `stream` 可传任何支持 `write()` 的文本流：

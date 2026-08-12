@@ -8,7 +8,8 @@ judgment 和证明请求只在接口内部流转；其余子包不承诺稳定�
 后继的状态转移图；该接口通过 ``result/full`` 模式输出初始规范类型或完整图，并以
 :class:`HCSPTypeTransitionGraphError` 结构化报告输入、规范化和规模错误。
 完整图可以继续交给 :func:`analyze_type_lock_freedom`。第四接口按照论文定义寻找
-带非空 ready 集的无限时间边和纯静默有向环；性质不成立时正常返回含反例的
+带非空 ready 集的无限时间边和纯静默有向环，并独立检查可达的 Bottom
+错误终止状态。性质不成立时正常返回含最短反例的
 ``LockFreedomReport``，只有图对象无效或不是完整可达闭包时才抛
 ``HCSPTypeLockAnalysisError``。
 

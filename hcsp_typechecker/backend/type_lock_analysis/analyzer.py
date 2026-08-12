@@ -1,4 +1,4 @@
-"""以 O(|V|+|E|) 显式图算法判断 Type 图的死锁与活锁自由性。
+"""以 O(|V|+|E|) 显式图算法判断 Type 图的锁自由与 Bottom 错误自由。
 
 实现不使用 Python 递归：BFS 同时建立最短可达前缀，显式栈 DFS 在静默
 迁移子图中寻找有向环。因而其可承载规模与第三接口生成的显式图相匹配，
@@ -11,11 +11,13 @@ from array import array
 from collections import deque
 
 from ...data_structures.type_lock_analysis import (
+    BottomErrorWitness,
     DeadlockWitness,
     LivelockWitness,
     LockFreedomReport,
     TransitionPath,
 )
+from ...data_structures.normalized_type_ast import NormalizedBottomType
 from ...data_structures.type_transition_graph import (
     InfiniteTime,
     SilentTransitionLabel,
@@ -53,6 +55,19 @@ def _is_deadlock_edge(transition: TypeTransition) -> bool:
         isinstance(label, TimedTransitionLabel)
         and label.duration is InfiniteTime.VALUE
         and bool(label.ready)
+    )
+
+
+def _bottom_component_indices(
+    graph: TypeTransitionGraph,
+    state_id: int,
+) -> tuple[int, ...]:
+    """返回一个规范状态中已经成为并行根的全部 Bottom 分量位置。"""
+
+    return tuple(
+        index
+        for index, component in enumerate(graph.states[state_id].type_ast.components)
+        if isinstance(component, NormalizedBottomType)
     )
 
 
@@ -184,7 +199,7 @@ def _find_silent_cycle(
 
 
 def analyze_lock_freedom(graph: TypeTransitionGraph) -> LockFreedomReport:
-    """分析一张完整可达 Type 图，并返回死锁/活锁结论与反例见证。"""
+    """分析完整可达 Type 图，返回锁、Bottom 错误与综合正确性见证。"""
 
     if not isinstance(graph, TypeTransitionGraph):
         raise TypeError("graph must be a TypeTransitionGraph")
@@ -214,9 +229,21 @@ def analyze_lock_freedom(graph: TypeTransitionGraph) -> LockFreedomReport:
             cycle=cycle,
         )
 
+    bottom_error_witness = None
+    for state_id in order:
+        component_indices = _bottom_component_indices(graph, state_id)
+        if not component_indices:
+            continue
+        bottom_error_witness = BottomErrorWitness(
+            prefix=_reconstruct_prefix(graph, parent_edge, state_id),
+            component_indices=component_indices,
+        )
+        break
+
     return LockFreedomReport(
         reachable_state_count=len(order),
         transition_count=len(graph.transitions),
         deadlock_witness=deadlock_witness,
         livelock_witness=livelock_witness,
+        bottom_error_witness=bottom_error_witness,
     )

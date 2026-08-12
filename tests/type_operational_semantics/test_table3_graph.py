@@ -10,6 +10,7 @@ r"""Table 3 单步规则与完整 Type 状态转移图的回归测试。
 6. 等递归且选择幂等的同一项图类具有唯一、完备的出边集合。
 7. 图规模上限直接终止构造并抛错，绝不返回部分图。
 8. 推导证据中的分量和分支编号始终指向状态中实际展示的规范类型。
+9. 任一并行根为 bottom 时整个配置错误终止，Empty 仍是正常并行单位元。
 
 论文对应
 --------
@@ -30,6 +31,7 @@ from hcsp_typechecker.backend.type_operational_semantics import (
     normalized_type_from_state_key,
 )
 from hcsp_typechecker.data_structures.normalized_type_ast import (
+    NormalizedBottomType,
     NormalizedExternalChoiceType,
     NormalizedInfiniteDelayType,
     NormalizedInternalChoiceType,
@@ -202,6 +204,55 @@ class Table3OneStepTests(unittest.TestCase):
             transitions[0].derivation.rule,
             Table3Rule.COMMUNICATION,
         )
+
+    # 测试输入：一个已经是 bottom 的分量，分别与可选择、可通信或可等待的分量并行。
+    # 预期行为：三种配置均没有任何后继，其他分量不得绕过已发生的错误继续执行。
+    # 检查内容：bottom 的全局错误终止优先于 P-sqcup、P-unrhd 和 P-parallel。
+    # 论文对应：进入 bottom 表示异常终止，不是可忽略的并行空行为。
+    def test_bottom_component_stops_the_entire_configuration(self) -> None:
+        """任一根为 bottom 时禁止整个配置的所有 Table 3 转移。"""
+
+        selectable = InternalChoiceType(
+            (
+                FiniteDelayType(1, NoInterruptType(), EmptyType()),
+                InfiniteDelayType(NoInterruptType()),
+            )
+        )
+        sender = InfiniteDelayType(OutputType("ch", EmptyType()))
+        receiver = InfiniteDelayType(InputType("ch", EmptyType()))
+        waiting = FiniteDelayType(2, NoInterruptType(), EmptyType())
+        cases = (
+            ParallelType((BottomType(), selectable)),
+            ParallelType((BottomType(), sender, receiver)),
+            ParallelType((BottomType(), waiting)),
+        )
+
+        for value in cases:
+            with self.subTest(value=value):
+                transitions = derive_one_step(
+                    equi_recursive_state_key(normalize_type_ast(value))
+                )
+                self.assertEqual(transitions, ())
+
+    # 测试输入：一个 EmptyType 分量与零时延的正常后继并行。
+    # 预期行为：EmptyType 作为已完成分量被规范化消去，其他分量仍可 timeout。
+    # 检查内容：正常完成与 bottom 错误终止的全局语义不会被混淆。
+    # 论文对应：EmptyType 表示已完成的空通信行为，不阻塞其他并行分量。
+    def test_empty_component_does_not_stop_other_components(self) -> None:
+        """EmptyType 仍是并行单位元，不具有 bottom 的全局停止效果。"""
+
+        value = ParallelType(
+            (
+                EmptyType(),
+                FiniteDelayType(0, NoInterruptType(), EmptyType()),
+            )
+        )
+        transitions = derive_one_step(
+            equi_recursive_state_key(normalize_type_ast(value))
+        )
+
+        self.assertEqual(len(transitions), 1)
+        self.assertEqual(transitions[0].derivation.rule, Table3Rule.TIMEOUT)
 
     # 测试输入：剩余时延 2 和 5、ready set 不互补的两个并行 delay。
     # 预期行为：只有一条 duration=2 的共同时间边，目标剩余时延为 0 和 3。
@@ -493,6 +544,34 @@ class TypeTransitionGraphTests(unittest.TestCase):
                 self.assertEqual(branch_index, 1)
             else:  # pragma: no cover - failure message for a broken target shape
                 self.fail(f"Unexpected communication target: {target!r}")
+
+    # 测试输入：一次合法通信使其中一个分量进入 bottom，另一分量仍有零时延后继。
+    # 预期行为：图保留进入错误状态的通信边，但错误状态没有后继 timeout 边。
+    # 检查内容：完整可达图的 BFS 扩展也必须遵守 bottom 的全局停止语义。
+    # 论文对应：异常终止状态可作为转移目标被记录，但不再参与 Table 3 推导。
+    def test_reachable_bottom_configuration_is_not_expanded(self) -> None:
+        """生成图保留可达 bottom 结点，但不从该结点继续生成边。"""
+
+        receiver = InfiniteDelayType(InputType("ch", BottomType()))
+        sender = InfiniteDelayType(
+            OutputType(
+                "ch",
+                FiniteDelayType(0, NoInterruptType(), EmptyType()),
+            )
+        )
+
+        graph = build_type_transition_graph(ParallelType((receiver, sender)))
+
+        self.assertEqual(len(graph.states), 2)
+        self.assertEqual(len(graph.transitions), 1)
+        target_id = graph.transitions[0].target
+        self.assertTrue(
+            any(
+                isinstance(component, NormalizedBottomType)
+                for component in graph.states[target_id].type_ast.components
+            )
+        )
+        self.assertEqual(graph.outgoing(target_id), ())
 
     # 测试输入：会产生多个可达状态的两个有限并行 delay，max_states=2。
     # 预期行为：注册第三个状态之前抛出状态图规模异常，不返回部分图。

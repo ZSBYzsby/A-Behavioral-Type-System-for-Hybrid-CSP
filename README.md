@@ -3,7 +3,8 @@
 本项目把一份带 Parameters、Gamma、Theta 与批注 HCSP Process 的用户文本直接
 转换为正式 Type AST，并证明构造过程中产生的必要公式；也可以由用户给出 Type，
 再按同一套项目规则检查它是否成立；已有 Type AST 还可以按照 Table 3 生成完整可达
-状态转移图，并在完整图上检查论文定义的死锁自由和活锁自由。普通用户使用包根的
+状态转移图，并在完整图上检查论文定义的死锁/活锁自由和项目补充的 Bottom
+错误终止自由。普通用户使用包根的
 `construct_hcsp_type(...)`、`check_hcsp_type(...)`、
 `build_type_transition_graph(...)` 与 `analyze_type_lock_freedom(...)`；解析时
 生成的 Process AST、具体 Type AST 构造器、判断对象、证明义务和证明器适配器均
@@ -54,13 +55,13 @@ Constructor/Checker 差异和 Table 3 图算法，不以“与论文一致”概
 | `construct_hcsp_type` | `gamma [parameters] theta process` 完整文本 | 构造并证明可信的 `TypeAST` | 输入错误、构造失败或带不可信候选的构造异常 |
 | `check_hcsp_type` | `gamma [parameters] theta process type` 完整文本 | 经规则和证明确认的用户 `TypeAST` | 输入、Type 结构、规则应用或证明异常 |
 | `build_type_transition_graph` | 已有的 `TypeAST` | 完整可达的 `TypeTransitionGraph` | Type 非法、规范化失败或图规模超限异常 |
-| `analyze_type_lock_freedom` | 第三接口的完整图 | 含结论和反例的 `LockFreedomReport` | 图对象非法或不是完整可达闭包 |
+| `analyze_type_lock_freedom` | 第三接口的完整图 | 含锁、Bottom 错误和综合结论及反例的 `LockFreedomReport` | 图对象非法或不是完整可达闭包 |
 
 典型调用顺序是：
 
 ```text
-HCSP 完整文本 --construct_hcsp_type--> 可信 TypeAST --build_type_transition_graph--> 完整图 --analyze_type_lock_freedom--> 锁自由报告
-带 Type 的完整文本 --check_hcsp_type--> 已验证 TypeAST --build_type_transition_graph--> 完整图 --analyze_type_lock_freedom--> 锁自由报告
+HCSP 完整文本 --construct_hcsp_type--> 可信 TypeAST --build_type_transition_graph--> 完整图 --analyze_type_lock_freedom--> 行为正确性报告
+带 Type 的完整文本 --check_hcsp_type--> 已验证 TypeAST --build_type_transition_graph--> 完整图 --analyze_type_lock_freedom--> 行为正确性报告
 ```
 
 Constructor 与 Checker 是两条独立业务路径：Checker 不先调用 Constructor 再比较
@@ -339,7 +340,9 @@ formatter 不从包根公开。完整格式见
 
 时间转移只前进到所有分量共同等待时的下一个最早有限 deadline；若全部分量均可
 无限等待，则生成 infinity 时间边。`EmptyType` 是并行单位元，不会阻塞其他分量；
-并行保留重复分量。相同源、标签和目标由多种规则实例得到时，图只保存一条边，
+并行保留重复分量。与之不同，只要任一并行分量已是 `BottomType`，整个状态就表示
+错误终止，不再生成选择、通信、timeout 或时间边。相同源、标签和目标由多种规则实例
+得到时，图只保存一条边，
 但在 `derivations` 中保存全部不同推导证据。
 
 `max_states` 和 `max_transitions` 可限制状态爆炸。第三个接口使用
@@ -348,7 +351,7 @@ formatter 不从包根公开。完整格式见
 时不会返回没有分析意义的部分图。详细结构见
 [Type 操作语义与状态图](document/TYPE_OPERATIONAL_SEMANTICS.md)。
 
-### 4. 在完整状态图上检查死锁和活锁
+### 4. 在完整状态图上检查锁与 Bottom 错误终止
 
 ```python
 analyze_type_lock_freedom(
@@ -360,29 +363,36 @@ analyze_type_lock_freedom(
 ```
 
 第四接口只接受第三接口返回的完整 `TypeTransitionGraph`，不会重新读取 HCSP 或
-重新生成图。它以 `O(|V|+|E|)` 时间完成两项判断：
+重新生成图。它以 `O(|V|+|E|)` 时间完成三类判断：
 
 - 死锁：存在可达迁移 `time(infinity, ready=R)` 且 `R` 非空；
 - 活锁：只保留 `tau` 边后，可达子图中存在有向环，即存在无限静默推导。
+- Bottom 错误：存在可达状态，其任一并行根是 `BottomType`。
 
-报告提供 `deadlock_free`、`livelock_free`、`lock_free` 三个布尔属性。性质不成立
-不是运行错误：接口仍正常返回 `LockFreedomReport`，其中 `deadlock_witness` 保存
-初态到无限等待边的路径，`livelock_witness` 保存初态到静默环的路径和有限环。
+报告保留 `deadlock_free`、`livelock_free`、`lock_free`，并新增 `error_free` 和
+`behavior_correct = lock_free and error_free`。性质不成立不是运行错误：接口仍正常返回
+`LockFreedomReport`。`deadlock_witness`、`livelock_witness` 和 `bottom_error_witness`
+分别保存三类有限反例证据。
 `EmptyType` 的无出边终态、`BottomType` 的无出边状态以及
-`time(infinity, ready={})` 都不满足上述死锁定义；带正时间边的环也不是活锁。
+`time(infinity, ready={})` 都不满足上述死锁定义；但 Bottom 状态会被独立报告为
+错误终止。带正时间边的环也不是活锁。
 
 ```python
 from hcsp_typechecker import analyze_type_lock_freedom
 
 report = analyze_type_lock_freedom(graph, output="full")
-if not report.lock_free:
-    print(report.deadlock_witness, report.livelock_witness)
+if not report.behavior_correct:
+    print(
+        report.deadlock_witness,
+        report.livelock_witness,
+        report.bottom_error_witness,
+    )
 ```
 
 输入不是图或含有初态不可达的孤立状态时，接口抛
 `HCSPTypeLockAnalysisError`；性质为假时不抛异常。算法使用 CSR 出边索引、BFS 和
 显式栈 DFS，不使用 Python 递归，也不会为大图复制邻接对象。详细设计、反例结构和
-复杂度见[死锁/活锁分析](document/TYPE_LOCK_ANALYSIS.md)。
+复杂度见[锁与 Bottom 错误分析](document/TYPE_LOCK_ANALYSIS.md)。
 
 常用可选参数：
 
@@ -401,7 +411,7 @@ if not report.lock_free:
 
 - `output="none"`：默认，不打印；
 - `output="result"`：Constructor/Checker 打印最终结论；图接口打印图规模与初始
-  规范 Type；锁分析接口打印三项性质和紧凑反例。构造 `unknown` 且类型完整时显示候选 Type 及“不可信”标记；
+  规范 Type；行为分析接口打印五项性质和紧凑反例。构造 `unknown` 且类型完整时显示候选 Type 及“不可信”标记；
 - `output="full"`：Constructor/Checker 打印原始输入、规则轨迹、FOL/dL 公式和
   最终可信性；图接口打印全部规范状态、边标签和 Table 3 推导证据；锁分析接口打印
   可达前缀、无限等待边或静默环及相关状态。Constructor
