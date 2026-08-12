@@ -1,9 +1,12 @@
 # HCSP Behavioral Type Constructor and Checker：完整功能参考
 
-这是对论文 *A Behavioral Type System for Hybrid CSP* 中 Table 2 的 Python
-实现。除通信载荷按项目约定扩展为多个独立标量外，项目使用 Section 2.1 的
-HCSP 语法，并把 Section 4.2/4.3 要求的安全、时延和递归不变量批注随 AST
-一同输入：
+本项目以论文 *A Behavioral Type System for Hybrid CSP* 的 Table 2 为规则
+来源，但当前代码不是对论文排版的逐字翻译。多标量通信、控制节点自持公共后继、
+共享 Gamma、全局只读参数、ODE 隐式时钟和双候选、三值证明等都是实际实现的一
+部分。需要审计每条规则真正执行的数学操作时，应先阅读
+[当前代码的实现语义与论文规则落地方式](IMPLEMENTATION_SEMANTICS.md)，再用本文
+查询模块、输入和接口。项目使用 Section 2.1 的 HCSP 语法范畴，并把 Section
+4.2/4.3 要求的安全、时延和递归不变量批注随 AST 一同输入：
 
 - 用户把共享参数、`Gamma`、`Theta` 和 HCSP process 写在同一份完整 source 中；
 - 两个公共业务接口都在内部解析 source：TypeConstructor 主动构造 Type AST，
@@ -279,8 +282,12 @@ Table 2 额外验证恰好到达该边界。ODE 若需要在 `d` 时自然结束
 检查覆盖顺序、条件、内部选择和 ODE 事件 continuation，并遵守词法作用域：
 内层同名 `Mu("X", ...)` 会遮蔽外层绑定。ODE 的事件 continuation 由对应
 事件通信保护，但 ODE 的自然结束路径不会借用中断通信来保护公共后继。
-实现按这些 AST 产生式直接递归，便于逐项对照论文规则；项目不再额外保证
-超过 Python 递归上限的人工超深语法树仍可处理。
+实现仍按这些 AST 产生式逐项对应论文规则，但核心遍历使用显式工作栈：长顺序
+Process、深 Type continuation、类型构造/检查及规范化项图转换不依赖 Python
+调用栈深度。端到端压力测试会把 TypeConstructor 的真实大规模输出先序列化为正式
+Type 用户语法并交给 TypeChecker，也会直接交给状态图接口，防止三个接口形成不同的
+人工深度边界。状态图的状态数和转移数仍受调用者给出的规模上限约束，因为这属于
+Table 3 可达状态数量而非 AST 表示深度。
 
 ## Section 4.2/4.3 批注
 
@@ -411,17 +418,24 @@ type_ast = construct_hcsp_type(source, output="full")
 
 ## 公共接口的输入和输出
 
+本节用于说明公共接口与内部架构的边界。普通用户需要逐参数说明、返回对象字段、
+异常捕获模板和端到端示例时，请直接阅读
+[公共接口使用手册](PUBLIC_API_GUIDE.md)，避免从本文件的内部实现说明中反推调用
+协议。
+
 包根 `hcsp_typechecker` 只公开以下稳定白名单：
 
-- 两个操作：`construct_hcsp_type` 与 `check_hcsp_type`；
-- 正式结果抽象基类：`TypeAST`；
+- 三个操作：`construct_hcsp_type`、`check_hcsp_type` 与
+  `build_type_transition_graph`；
+- 正式结果类型：`TypeAST` 与 `TypeTransitionGraph`；
 - 打印模式枚举：`OutputMode`；
-- 四个公共异常：`HCSPInputError`、`HCSPTypeConstructionError`、
+- 五个公共异常：`HCSPInputError`、`HCSPTypeConstructionError`、
   `HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`。其中
   `HCSPUntrustedTypeConstructionError` 是
-  `HCSPTypeConstructionError` 的子类。
-- 两套错误分类和统一明细：`TypeConstructionErrorKind`、
-  `TypeCheckingErrorKind`、`HCSPErrorDetail`。
+  `HCSPTypeConstructionError` 的子类；第三接口使用
+  `HCSPTypeTransitionGraphError`。
+- 三套错误分类和统一明细：`TypeConstructionErrorKind`、
+  `TypeCheckingErrorKind`、`TypeTransitionGraphErrorKind`、`HCSPErrorDetail`。
 
 Constructor 接口的签名为：
 

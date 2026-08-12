@@ -55,7 +55,14 @@ class SourcePosition:
 
 
 class HCSPInputError(ValueError):
-    """带源码位置和机器可读阶段的统一用户输入错误。"""
+    """带源码位置和机器可读阶段的统一用户输入错误。
+
+    ``phase`` 为 ``lexical``、``syntax`` 或 ``validation``，``kind`` 分别为
+    ``input-lexical``、``input-syntax``、``input-validation``。``line`` 和
+    ``column`` 从 1 开始，``offset`` 从 0 开始；``found`` 保存实际 token，
+    ``expected`` 保存可能的期望 token。调用者可用这些字段生成自己的 UI，也可
+    直接调用 :meth:`format_diagnostic` 获得带源码行和插入符的文本。
+    """
 
     def __init__(
         self,

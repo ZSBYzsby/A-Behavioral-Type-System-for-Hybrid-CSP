@@ -117,15 +117,15 @@ class ExplicitSubjudgmentArchitectureTests(unittest.TestCase):
 
         constructor = TypeConstructor(dl_checker=observing_backend)
         visited: list[str] = []
-        original_solver = constructor._solve_child_judgment
+        original_preparer = constructor._prepare_child_judgment
 
-        def observing_solver(judgment):
-            """记录统一分派器收到的 judgment 类别，再保持原求解语义。"""
+        def observing_preparer(judgment):
+            """记录显式工作栈准备的 judgment 类别，再保持原求解语义。"""
 
             visited.append(type(judgment).__name__)
-            return original_solver(judgment)
+            return original_preparer(judgment)
 
-        constructor._solve_child_judgment = observing_solver  # type: ignore[method-assign]
+        constructor._prepare_child_judgment = observing_preparer  # type: ignore[method-assign]
         report = constructor.construct(
             TypeConstructionRequest(
                 gamma={},

@@ -35,6 +35,77 @@ Type AST，但该候选会被明确标为未验证、不可信。使用
 `TypeAST`、`TypeTransitionGraph`、`construct_hcsp_type`、`check_hcsp_type` 和
 `build_type_transition_graph`。
 
+第一次使用建议先阅读[公共接口使用手册](document/PUBLIC_API_GUIDE.md)。该手册按
+实际函数签名逐项说明参数、成功返回、异常字段、输出模式、Constructor 的
+`unknown` 候选、Checker 的失败语义，以及 `TypeTransitionGraph` 的遍历方式。
+本 README 保留足以开始调用的摘要和输入限制；论文规则与内部实现继续放在
+`document/` 的专题文档中。需要审计实现时，请从
+[当前代码的实现语义与论文规则落地方式](document/IMPLEMENTATION_SEMANTICS.md)
+开始：它逐条写明前端 lowering、运行上下文、Table 2 规则、ODE 候选、证明调度、
+Constructor/Checker 差异和 Table 3 图算法，不以“与论文一致”概括工程实现。
+
+三个业务接口的职责和数据流如下：
+
+| 接口 | 输入 | 成功返回 | 失败方式 |
+|---|---|---|---|
+| `construct_hcsp_type` | `gamma [parameters] theta process` 完整文本 | 构造并证明可信的 `TypeAST` | 输入错误、构造失败或带不可信候选的构造异常 |
+| `check_hcsp_type` | `gamma [parameters] theta process type` 完整文本 | 经规则和证明确认的用户 `TypeAST` | 输入、Type 结构、规则应用或证明异常 |
+| `build_type_transition_graph` | 已有的 `TypeAST` | 完整可达的 `TypeTransitionGraph` | Type 非法、规范化失败或图规模超限异常 |
+
+典型调用顺序是：
+
+```text
+HCSP 完整文本 --construct_hcsp_type--> 可信 TypeAST --build_type_transition_graph--> 完整图
+带 Type 的完整文本 --check_hcsp_type--> 已验证 TypeAST --build_type_transition_graph--> 完整图
+```
+
+Constructor 与 Checker 是两条独立业务路径：Checker 不先调用 Constructor 再比较
+结果。第三个接口也不会重新检查 Type 是否对应某个 HCSP；需要可信来源时，应使用
+前两个接口的正常返回值。
+
+三个接口共同接受 `output="none" | "result" | "full"`：`none` 完全不打印；
+`result` 只打印最终摘要；`full` 打印输入、规则/证明轨迹或完整状态图。传入
+`stream=` 时文本写入该文本流；未传时写入标准输出。输出档位只影响展示，不改变
+返回值、证明结论或异常。以下签名中的类型名均可从包根稳定接口获得，内部 AST
+构造器和后端对象不需要由普通用户操作。
+
+### 1. 从 HCSP 构造 Type
+
+```python
+construct_hcsp_type(
+    source,
+    *,
+    source_name="<input>",
+    initial_states=None,
+    path_condition=True,
+    output="none",
+    stream=None,
+    z3_timeout_ms=5000,
+    keymaerax_timeout_seconds=None,
+) -> TypeAST
+```
+
+- `source`：字符串，必须依次包含 `gamma`、可选 `parameters`、`theta` 和
+  `process`，不能包含用户 `type` 分节。
+- `source_name`：只用于日志和输入诊断中的来源名称，不参与数学语义。
+- `initial_states`：可选部分初态。单 Process 可传一个变量到值的 mapping；并行
+  Process 必须按源码顶层分量顺序传入等长的 mapping 序列。默认每个分量初态为空。
+- `path_condition`：初始路径条件，可传 `bool` 或符合项目表达式语法的字符串；
+  默认恒真。
+- `z3_timeout_ms`：每次 Z3 查询的毫秒超时。
+- `keymaerax_timeout_seconds`：可选的 KeYmaera X 单次证明秒数；省略时使用环境配置。
+- 成功返回：已经完成规则构造且全部必要公式均证明为真的 `TypeAST`。
+- 失败：源码解析失败抛 `HCSPInputError`；环境、规则或已否证公式导致构造失败时抛
+  `HCSPTypeConstructionError`；形成完整 Type 但仍有 `unknown` 义务时抛其子类
+  `HCSPUntrustedTypeConstructionError`，候选只通过 `error.untrusted_type` 明确取得。
+
+`initial_states` 的两个合法形状如下；并行输入不接受一个合并后的全局 mapping：
+
+```python
+single = {"x": 0}
+parallel = ({"left_state": 0}, {"right_state": 0})
+```
+
 ```python
 from hcsp_typechecker import (
     HCSPInputError,
@@ -94,7 +165,33 @@ except HCSPTypeConstructionError as error:
 `proof-unknown`。每个 `HCSPErrorDetail` 保存消息、规则、判断位置；证明错误还
 保存公式类别、实际公式和证明器说明。调用方无需解析中文日志来判断失败种类。
 
-### 检查用户给定的 Type
+### 2. 检查用户给定的 Type
+
+```python
+check_hcsp_type(
+    source,
+    *,
+    source_name="<input>",
+    initial_states=None,
+    path_condition=True,
+    output="none",
+    stream=None,
+    z3_timeout_ms=5000,
+    keymaerax_timeout_seconds=None,
+) -> TypeAST
+```
+
+- `source`：字符串，必须依次包含 `gamma`、可选 `parameters`、`theta`、
+  `process` 和用户给定的 `type`；`type` 使用项目的规范 Type 输入语法。
+- `source_name`、`initial_states`、`path_condition` 和两个证明超时参数与
+  `construct_hcsp_type` 含义完全相同。
+- 成功返回：输入中给出的同一个 `TypeAST`。成功意味着 Type 结构被完整消费、每层
+  规则均适用，而且全部 FOL/dL 前提均已证明；Checker 不调用 Constructor 生成一个
+  Type 再作整棵比较。
+- 失败：词法、语法和输入结构错误抛 `HCSPInputError`；环境错误、Type 结构不匹配、
+  规则不适用、公式为 `false` 或证明为 `unknown` 均抛
+  `HCSPTypeCheckingError`。可读取 `kind`、`rule`、`details`、
+  `type_structure_matched` 等字段区分失败阶段。
 
 在同一份输入末尾增加规范 `type` 段，然后调用 TypeChecker 入口：
 
@@ -102,11 +199,12 @@ except HCSPTypeConstructionError as error:
 from hcsp_typechecker import HCSPTypeCheckingError, check_hcsp_type
 
 typed_source = """
-gamma(x: Int)
-theta(ch: channel(value: Int))
-process {{ch?(x); ch!(x)}}
+gamma()
+parameters(limit: Int) where(limit >= 0)
+theta(ch: channel(value: Int) where(0 <= value and value <= limit))
+process {{ch!(limit)}}
 type forever interrupt angelic {
-    ch? -> forever interrupt angelic {ch! -> empty}
+    ch! -> empty
 }
 """
 
@@ -125,6 +223,14 @@ TypeConstructor 相同的可信证明机制。Type 结构不匹配、静态规�
 为 `false/unknown` 时抛出 `HCSPTypeCheckingError`；只有全部规则和证明均为
 `true` 时返回用户给定的正式 `TypeAST`。
 
+TypeChecker 完整支持可选的共享全局参数段 `parameters(...) where(H)`。参数声明
+和约束 `H` 会被转换为 `ParameterEnvironment`，并加入相关 FOL/dL 前提的证明
+背景；参数既可以出现在 HCSP 表达式中，也可以出现在 Theta refinement 中，还可
+由并行分量共同读取。参数始终只读，不能作为赋值目标、通信输入目标、ODE 左端或
+初始状态键。上例的通道 refinement 只有借助 `limit >= 0` 才能证明，因此也直接
+展示了 TypeChecker 确实使用参数约束，而不只是解析并保存参数字段。省略参数段
+等价于空参数声明与恒真约束。
+
 `HCSPTypeCheckingError.kind` 使用独立的 `TypeCheckingErrorKind`，区分
 `environment`、`type-mismatch`、`rule-application`、`proof-failed` 和
 `proof-unknown`。异常还公开 `phase`、`rule`、`location`、`details`、
@@ -132,7 +238,43 @@ TypeConstructor 相同的可信证明机制。Type 结构不匹配、静态规�
 Type 已被完整消费，`False` 表示明确发现结构不匹配，`None` 表示环境或前提失败
 使检查尚未完整走完。
 
-### 从 Type AST 生成 Table 3 状态图
+Checker 的 `unknown` 与 Constructor 不同：它会继续检查剩余 Type 结构，以便完整
+报告后续是否匹配，但最终仍抛 `HCSPTypeCheckingError`，不会返回一个“暂时接受”的
+Type。
+
+### 3. 从 Type AST 生成 Table 3 状态图
+
+```python
+build_type_transition_graph(
+    type_ast,
+    *,
+    max_states=None,
+    max_transitions=None,
+    output="none",
+    stream=None,
+) -> TypeTransitionGraph
+```
+
+- `type_ast`：由 Constructor 返回、由 Checker 验证，或通过内部审计工具得到的正式
+  `TypeAST`；本接口不接收 HCSP/Type 文本。
+- `max_states`、`max_transitions`：可选的严格正整数规模上限。达到上限即失败，
+  不返回可能被误认为完整结果的部分图；`None` 表示不设置该项上限。
+- 成功返回：完整 `TypeTransitionGraph`。`initial_state` 是初始状态编号，`states`
+  保存规范化 Type 状态，`transitions` 保存动作、目标状态和 Table 3 推导证据。
+- 输出：`result` 打印状态/边数量和初始规范 Type；`full` 打印所有状态、所有转移及
+  规则证据。
+- 失败：输入不是正式 Type、规范化失败或超过图规模上限时抛
+  `HCSPTypeTransitionGraphError`；`kind`、`phase` 和相关限制字段可供程序处理。
+
+最常见的程序化遍历方式是：
+
+```python
+initial = graph.states[graph.initial_state]
+for edge in graph.outgoing(initial.id):
+    print(edge.label, edge.target, edge.derivations)
+```
+
+状态的 `type_ast` 是规范化后的可读展示代表；真正的等递归判重由后端循环项图完成。
 
 ```python
 from hcsp_typechecker import (
@@ -237,6 +379,11 @@ formatter 不从包根公开。完整格式见
 得到的全部轨迹、完整候选类型（如能形成）以及仍待证明的公式。`none` 不打印，
 但异常对象仍提供相应格式化信息。
 
+不要解析中文日志来决定程序分支。输入异常读取 `phase/line/column`；Constructor 和
+Checker 异常读取 `kind/phase/rule/location/details`；图异常读取
+`kind/phase/limit_name/limit`。全部字段、取值和捕获顺序见
+[公共接口使用手册的异常章节](document/PUBLIC_API_GUIDE.md#7-统一异常处理)。
+
 ## 完整用户输入格式
 
 TypeConstructor 输入固定按以下顺序书写：
@@ -290,6 +437,8 @@ process {{data!(x, v)}}
   ODE 向量登记，不是 tuple 状态值。其成员必须在同一 Gamma 中另行声明为
   `Real`。
 - 参数只能具有 `BasicType`，必须与 Gamma 不交，并且在 HCSP 中只读。
+  TypeConstructor 与 TypeChecker 都会把参数约束加入证明背景；并行分量可以共享
+  读取参数，但赋值、通信输入、ODE 演化和初始状态均不能改写参数。
 - 通道至少有一个槽；多槽表示一次通信中的若干独立标量，不表示 tuple 值。
 
 ### 表达式
@@ -316,6 +465,13 @@ process {{data!(x, v)}}
   相等；隐藏时钟不参与比较。
 - 不支持 `wait(d)`。有限等待请显式写空 flow ODE，例如
   `ode(flow(), domain(t < 1), delay(1))`。
+- 三个公开接口的核心树遍历使用显式工作栈，不通过提高 Python 递归上限规避
+  问题；长顺序 Process、深 Type continuation 和规范化项图转换因此不会仅因
+  Python 调用栈深度而失败。项目还以端到端压力测试保证 TypeConstructor 在已测
+  规模生成的深通信 Type 和大并行 Type，可以先按正式 Type 语法交给 TypeChecker
+  重新验证，也可以原样交给状态图接口；三个接口不存在不同的人工 AST 深度上限。
+  状态图仍可用 `max_states`/`max_transitions` 控制 Table 3 可达状态爆炸，达到
+  上限时按接口契约整体报错。
 
 ### 证明边界
 
@@ -349,6 +505,8 @@ Type AST；**TypeChecker** 在这些输入后再接收一个用户 Type，以该
   Table 3 状态图；
 - `python -m unittest discover -s tests -p "test_*.py"`：运行全部自动化测试；
 - `python scripts/check_repository.py`：运行隐私扫描、环境检查和全部测试。
+- [公共接口使用手册](document/PUBLIC_API_GUIDE.md)：三个接口的逐参数契约、完整
+  异常字段、输出模式和可复制示例；
 
 内部架构、真实转换算法、证明后端和测试职责不放在根 README 中，统一从
 [项目文档索引](document/INDEX.md) 进入。

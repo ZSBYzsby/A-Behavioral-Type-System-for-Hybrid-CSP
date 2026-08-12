@@ -298,6 +298,8 @@ class ExpressionTranslator:
         local_symbols: Mapping[str, Any],
     ) -> ExprResult:
         """按项目表达式节点类型递归翻译。"""
+        if isinstance(expression, BinaryExpr):
+            return self._translate_binary_expr(expression, local_symbols)
         if isinstance(expression, Literal):
             value = expression.value
             if isinstance(value, bool):
@@ -361,58 +363,6 @@ class ExpressionTranslator:
                 self._definedness_of(values),
             )
 
-        if isinstance(expression, BinaryExpr):
-            left = self._translate_expr(expression.left, local_symbols)
-            right = self._translate_expr(expression.right, local_symbols)
-            self._require_numeric(left)
-            self._require_numeric(right)
-            result_type = self._join_numeric(
-                left.value_type,
-                right.value_type,
-            )
-            definedness = self._definedness_of((left, right))
-            try:
-                if expression.op == "+":
-                    term = left.term + right.term
-                elif expression.op == "-":
-                    term = left.term - right.term
-                    if result_type == BasicType.NAT:
-                        result_type = BasicType.INT
-                elif expression.op == "*":
-                    term = left.term * right.term
-                elif expression.op == "/":
-                    # ``/`` 是数学实数除法。若两个操作数都是 Z3 Int，必须先
-                    # 提升为 Real，否则 Z3 会构造整数 Euclidean division。
-                    numerator = self._as_real(left.term)
-                    denominator = self._as_real(right.term)
-                    term = numerator / denominator
-                    result_type = BasicType.REAL
-                    definedness += (right.term != 0,)
-                elif expression.op == "%":
-                    if left.value_type not in {BasicType.NAT, BasicType.INT} or (
-                        right.value_type not in {BasicType.NAT, BasicType.INT}
-                    ):
-                        raise ExpressionError(
-                            "Modulo operands must both have Nat or Int type"
-                        )
-                    term = left.term % right.term
-                    result_type = (
-                        BasicType.NAT
-                        if left.value_type == right.value_type == BasicType.NAT
-                        else BasicType.INT
-                    )
-                    definedness += (right.term != 0,)
-                else:
-                    term = left.term**right.term
-                    result_type = BasicType.REAL
-            except ExpressionError:
-                raise
-            except z3.Z3Exception as exc:
-                raise ExpressionError(
-                    f"Invalid operands for {expression.op!r}: {exc}"
-                ) from exc
-            return ExprResult(term, result_type, definedness)
-
         if isinstance(expression, CompareExpr):
             left = self._translate_expr(expression.operands[0], local_symbols)
             comparisons = []
@@ -461,6 +411,94 @@ class ExpressionTranslator:
         raise ExpressionError(
             f"Unsupported project expression node: {type(expression).__name__}"
         )
+
+    def _translate_binary_expr(
+        self,
+        expression: BinaryExpr,
+        local_symbols: Mapping[str, Any],
+    ) -> ExprResult:
+        """用显式后序栈翻译任意深度的二元算术表达式树。"""
+        pending: list[tuple[Expr, bool]] = [(expression, False)]
+        translated: dict[int, ExprResult] = {}
+
+        while pending:
+            current, exiting = pending.pop()
+            if not isinstance(current, BinaryExpr):
+                translated[id(current)] = self._translate_expr(
+                    current,
+                    local_symbols,
+                )
+                continue
+            if not exiting:
+                pending.append((current, True))
+                pending.append((current.right, False))
+                pending.append((current.left, False))
+                continue
+
+            # Expr 是不可变对象，程序化 AST 可以让左右操作数共享同一子树。
+            # 因此结果表不能在第一次读取时 pop；否则 ``BinaryExpr('+', x, x)``
+            # 会在读取第二个 ``x`` 时丢失结果。保留后序结果也与旧递归求值完全等价。
+            left = translated[id(current.left)]
+            right = translated[id(current.right)]
+            translated[id(current)] = self._combine_binary_results(
+                current.op,
+                left,
+                right,
+            )
+
+        return translated[id(expression)]
+
+    def _combine_binary_results(
+        self,
+        operator: str,
+        left: ExprResult,
+        right: ExprResult,
+    ) -> ExprResult:
+        """组合两个已翻译操作数，保持原算术类型和有定义性规则。"""
+        self._require_numeric(left)
+        self._require_numeric(right)
+        result_type = self._join_numeric(left.value_type, right.value_type)
+        definedness = self._definedness_of((left, right))
+        try:
+            if operator == "+":
+                term = left.term + right.term
+            elif operator == "-":
+                term = left.term - right.term
+                if result_type == BasicType.NAT:
+                    result_type = BasicType.INT
+            elif operator == "*":
+                term = left.term * right.term
+            elif operator == "/":
+                # 数学除法统一提升到 Real，避免 Z3 构造整数除法。
+                numerator = self._as_real(left.term)
+                denominator = self._as_real(right.term)
+                term = numerator / denominator
+                result_type = BasicType.REAL
+                definedness += (right.term != 0,)
+            elif operator == "%":
+                if left.value_type not in {BasicType.NAT, BasicType.INT} or (
+                    right.value_type not in {BasicType.NAT, BasicType.INT}
+                ):
+                    raise ExpressionError(
+                        "Modulo operands must both have Nat or Int type"
+                    )
+                term = left.term % right.term
+                result_type = (
+                    BasicType.NAT
+                    if left.value_type == right.value_type == BasicType.NAT
+                    else BasicType.INT
+                )
+                definedness += (right.term != 0,)
+            else:
+                term = left.term**right.term
+                result_type = BasicType.REAL
+        except ExpressionError:
+            raise
+        except z3.Z3Exception as exc:
+            raise ExpressionError(
+                f"Invalid operands for {operator!r}: {exc}"
+            ) from exc
+        return ExprResult(term, result_type, definedness)
 
     def _translate_function(
         self,

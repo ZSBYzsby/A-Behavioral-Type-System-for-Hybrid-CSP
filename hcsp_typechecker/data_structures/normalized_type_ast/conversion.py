@@ -58,98 +58,107 @@ def normalize_type_ast(
 
     if not isinstance(value, ConfigurationType):
         raise TypeError("Type normalization requires a ConfigurationType root")
-    components = _normalize_configuration(value, ())
-    return NormalizedConfigurationType(components)
+    # 先迭代展平顶层并行；过程/angelic 子树随后由统一后序工作栈转换。
+    components: list[ProcessType] = []
+    pending_configurations: list[ConfigurationType] = [value]
+    while pending_configurations:
+        current = pending_configurations.pop()
+        if isinstance(current, ParallelType):
+            pending_configurations.extend(reversed(current.components))
+        elif isinstance(current, ProcessType):
+            components.append(current)
+        else:
+            raise TypeError(
+                f"Unsupported configuration type: {type(current).__name__}"
+            )
+    normalized = tuple(_normalize_subtree(component, ()) for component in components)
+    return NormalizedConfigurationType(normalized)
 
 
-def _normalize_configuration(
-    value: ConfigurationType,
+def _normalization_children(
+    value: ProcessType | AngelicType,
     binders: tuple[str, ...],
-) -> tuple[NormalizedProcessType, ...]:
-    """展平原并行配置并逐个规范化其过程分量。"""
+) -> tuple[tuple[ProcessType | AngelicType, tuple[str, ...]], ...]:
+    """返回规范化后序遍历的子节点及其递归绑定环境。"""
 
-    if isinstance(value, ParallelType):
-        flattened: list[NormalizedProcessType] = []
-        for component in value.components:
-            flattened.extend(_normalize_configuration(component, binders))
-        return tuple(flattened)
-    if isinstance(value, ProcessType):
-        return (_normalize_process(value, binders),)
-    raise TypeError(f"Unsupported configuration type: {type(value).__name__}")
+    if isinstance(value, (InputType, OutputType)):
+        return ((value.continuation, binders),)
+    if isinstance(value, (ExternalChoiceType, InternalChoiceType)):
+        return tuple((branch, binders) for branch in value.branches)
+    if isinstance(value, FiniteDelayType):
+        return ((value.interrupts, binders), (value.continuation, binders))
+    if isinstance(value, InfiniteDelayType):
+        return ((value.interrupts, binders),)
+    if isinstance(value, MuType):
+        return ((value.body, binders + (value.variable,)),)
+    return ()
 
 
-def _normalize_process(
-    value: ProcessType,
+def _normalize_subtree(
+    root: ProcessType,
     binders: tuple[str, ...],
 ) -> NormalizedProcessType:
-    """在当前递归绑定栈下转换过程类型并消除选择与 alpha 差异。"""
+    """使用显式后序栈规范化一棵过程类型，避免深 continuation 递归。"""
 
-    if isinstance(value, EmptyType):
-        return NormalizedEmptyType()
-    if isinstance(value, BottomType):
-        return NormalizedBottomType()
-    if isinstance(value, TypeVar):
-        try:
-            reverse_index = binders[::-1].index(value.name)
-        except ValueError as exc:
-            raise TypeNormalizationError(
-                f"Free type variable {value.name!r} cannot appear in a normalized state"
-            ) from exc
-        return NormalizedBoundTypeVar(reverse_index)
-    if isinstance(value, InternalChoiceType):
-        return make_normalized_internal_choice(
-            _normalize_process(branch, binders) for branch in value.branches
-        )
-    if isinstance(value, FiniteDelayType):
-        return NormalizedFiniteDelayType(
-            value.duration,
-            _normalize_angelic(value.interrupts, binders),
-            _normalize_process(value.continuation, binders),
-        )
-    if isinstance(value, InfiniteDelayType):
-        return NormalizedInfiniteDelayType(
-            _normalize_angelic(value.interrupts, binders)
-        )
-    if isinstance(value, MuType):
-        return NormalizedMuType(
-            _normalize_process(value.body, binders + (value.variable,))
-        )
-    raise TypeError(f"Unsupported process type: {type(value).__name__}")
+    TaskKey = tuple[int, tuple[str, ...]]
+    results: dict[TaskKey, NormalizedProcessType | NormalizedAngelicType] = {}
+    pending: list[
+        tuple[ProcessType | AngelicType, tuple[str, ...], bool]
+    ] = [(root, binders, False)]
+    while pending:
+        current, environment, exiting = pending.pop()
+        key: TaskKey = (id(current), environment)
+        if key in results:
+            continue
+        children = _normalization_children(current, environment)
+        if not exiting and children:
+            pending.append((current, environment, True))
+            pending.extend(
+                (child, child_environment, False)
+                for child, child_environment in reversed(children)
+            )
+            continue
 
-
-def _normalize_angelic(
-    value: AngelicType,
-    binders: tuple[str, ...],
-) -> NormalizedAngelicType:
-    """规范化空、单分支或多分支 angelic type。"""
-
-    if isinstance(value, NoInterruptType):
-        return NormalizedNoInterruptType()
-    if isinstance(value, InputType):
-        return NormalizedInputType(
-            value.channel,
-            _normalize_process(value.continuation, binders),
+        child_values = tuple(
+            results[(id(child), child_environment)]
+            for child, child_environment in children
         )
-    if isinstance(value, OutputType):
-        return NormalizedOutputType(
-            value.channel,
-            _normalize_process(value.continuation, binders),
-        )
-    if isinstance(value, ExternalChoiceType):
-        return make_normalized_external_choice(
-            _normalize_communication(branch, binders)
-            for branch in value.branches
-        )
-    raise TypeError(f"Unsupported angelic type: {type(value).__name__}")
-
-
-def _normalize_communication(
-    value: InputType | OutputType,
-    binders: tuple[str, ...],
-) -> NormalizedInputType | NormalizedOutputType:
-    """转换一个多元外部选择中的输入或输出通信分支。"""
-
-    normalized = _normalize_angelic(value, binders)
-    if not isinstance(normalized, (NormalizedInputType, NormalizedOutputType)):
-        raise TypeError("External-choice branch did not normalize to communication")
-    return normalized
+        if isinstance(current, EmptyType):
+            result: NormalizedProcessType | NormalizedAngelicType = NormalizedEmptyType()
+        elif isinstance(current, BottomType):
+            result = NormalizedBottomType()
+        elif isinstance(current, TypeVar):
+            try:
+                reverse_index = environment[::-1].index(current.name)
+            except ValueError as exc:
+                raise TypeNormalizationError(
+                    f"Free type variable {current.name!r} cannot appear in a normalized state"
+                ) from exc
+            result = NormalizedBoundTypeVar(reverse_index)
+        elif isinstance(current, NoInterruptType):
+            result = NormalizedNoInterruptType()
+        elif isinstance(current, InputType):
+            result = NormalizedInputType(current.channel, child_values[0])
+        elif isinstance(current, OutputType):
+            result = NormalizedOutputType(current.channel, child_values[0])
+        elif isinstance(current, ExternalChoiceType):
+            result = make_normalized_external_choice(child_values)
+        elif isinstance(current, InternalChoiceType):
+            result = make_normalized_internal_choice(child_values)
+        elif isinstance(current, FiniteDelayType):
+            result = NormalizedFiniteDelayType(
+                current.duration, child_values[0], child_values[1]
+            )
+        elif isinstance(current, InfiniteDelayType):
+            result = NormalizedInfiniteDelayType(child_values[0])
+        elif isinstance(current, MuType):
+            result = NormalizedMuType(child_values[0])
+        else:
+            raise TypeError(
+                f"Unsupported behavioral type: {type(current).__name__}"
+            )
+        results[key] = result
+    normalized_root = results[(id(root), binders)]
+    if not isinstance(normalized_root, NormalizedProcessType):
+        raise TypeError("Process normalization produced a non-process root")
+    return normalized_root

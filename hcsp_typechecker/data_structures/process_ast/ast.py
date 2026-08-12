@@ -750,8 +750,24 @@ class Sequence(Process):
             raise TypeError("Sequence.of items must all be Process nodes")
         result: Process = items[-1]
         for item in reversed(items[:-1]):
-            result = _append_sequence_continuation(item, result)
+            if isinstance(item, (If, InternalChoice, ODE, Sequence)):
+                result = _append_sequence_continuation(item, result)
+            else:
+                result = _unchecked_sequence(item, result)
+        # 批量 lowering 只在完整树建立后验证一次。逐层调用 Sequence.__init__
+        # 会对逐渐增长的后继重复扫描，既产生 O(n^2) 开销，也把源码长度转化为
+        # Python 调用栈深度。
+        _validate_assumption21(result)
         return result
+
+
+def _unchecked_sequence(first: Process, second: Process) -> Sequence:
+    """建立已经由批量构造器验证操作数类别的内部 Sequence 节点。"""
+
+    value = object.__new__(Sequence)
+    object.__setattr__(value, "first", first)
+    object.__setattr__(value, "second", second)
+    return value
 
 # --------------------------------------------------------------------------
 # 论文对应：Table 2 可自然推广的 n 分支内部选择，以及等价的
@@ -1254,198 +1270,124 @@ class Mu(Process):
         return set(_assumption21_info(self).bound_value_variables)
 
 
-# 功能：沿 AST 路径递归传播“在到达当前位置前是否已经通信”的状态。
-# 检查/论文关系：Assumption 2.2 要求从绑定 mu X 到每个叶子 X 的语法树路径
-#                至少经过一次输入/输出通信；状态集合保留分支汇合前的所有可能值。
-def _assumption22_exit_states(
-    node: Process,
-    variable: str | None,
-    guarded: bool,
-    location: str,
-) -> frozenset[bool]:
-    """验证目标递归变量，并返回进程正常出口处可能的通信状态。
-
-    ``variable`` 是当前正在检查的外层绑定名；进入同名内层 ``Mu`` 后使用
-    ``None`` 表示该外层绑定已被遮蔽。``guarded`` 是当前路径的入口状态。
-    返回集合中的每个布尔值对应一类正常结束路径，供 ``Sequence`` 的后继
-    继续检查；ODE 事件中断 continuation 是独立路径，不计入自然结束集合。
-    """
-
-    if isinstance(node, Var):
-        # 只有与当前绑定同名的叶子才是本次 Assumption 2.2 所检查的回边。
-        if variable is not None and node.name == variable and not guarded:
-            raise ValueError(
-                "Assumption 2.2 violated: recursion "
-                f"{variable!r} is not communication-guarded at {location}; "
-                "every bound occurrence must be preceded by input or output communication"
-            )
-        return frozenset({guarded})
-
-    if isinstance(node, (Skip, Assign, Assert)):
-        # 这些内部动作不构成通信，也不改变入口保护状态。
-        return frozenset({guarded})
-
-    if isinstance(node, (InputChannel, OutputChannel)):
-        # 任一输入或输出动作都会保护同一路径上后续出现的目标回边。
-        return frozenset({True})
-
-    if isinstance(node, If):
-        # 两个分支从相同入口状态出发；每种分支出口状态随后进入公共后继。
-        then_states = _assumption22_exit_states(
-            node.then_branch,
-            variable,
-            guarded,
-            f"{location}.then",
-        )
-        else_states = _assumption22_exit_states(
-            node.else_branch,
-            variable,
-            guarded,
-            f"{location}.else",
-        )
-        result: set[bool] = set()
-        for state in sorted(then_states | else_states):
-            result.update(
-                _assumption22_exit_states(
-                    node.continuation,
-                    variable,
-                    state,
-                    f"{location}.continuation",
-                )
-            )
-        return frozenset(result)
-
-    if isinstance(node, Sequence):
-        # first 的每种正常出口状态都必须分别传入公共 second；因此只要存在
-        # 未通信出口，second 中的目标回边仍会在 guarded=False 下被检查。
-        first_states = _assumption22_exit_states(
-            node.first,
-            variable,
-            guarded,
-            f"{location}.first",
-        )
-        result: set[bool] = set()
-        for state in sorted(first_states):
-            result.update(
-                _assumption22_exit_states(
-                    node.second,
-                    variable,
-                    state,
-                    f"{location}.second",
-                )
-            )
-        return frozenset(result)
-
-    if isinstance(node, InternalChoice):
-        # 内部选择的一个分支不能借用其他分支的通信；每个分支的所有出口
-        # 状态都必须分别传入同一个 continuation。
-        result: set[bool] = set()
-        for index, branch in enumerate(node.branches):
-            result.update(
-                _assumption22_exit_states(
-                    branch,
-                    variable,
-                    guarded,
-                    f"{location}.branches[{index}]",
-                )
-            )
-        continuation_states = set(result)
-        result.clear()
-        for state in sorted(continuation_states):
-            result.update(
-                _assumption22_exit_states(
-                    node.continuation,
-                    variable,
-                    state,
-                    f"{location}.continuation",
-                )
-            )
-        return frozenset(result)
-
-    if isinstance(node, ODE):
-        # 每个事件 continuation 先由自己的事件通信保护；ODE 自然结束则不
-        # 发生通信。公共后继既要在自然路径上继承入口状态，也要在每条已发生
-        # 通信的中断路径上以 guarded=True 检查。
-        _validate_assumption22_event(
-            node.interrupts,
-            variable,
-            guarded,
-            f"{location}.interrupts",
-            common_continuation=node.continuation,
-        )
-        return _assumption22_exit_states(
-            node.continuation,
-            variable,
-            guarded,
-            f"{location}.continuation",
-        )
-
-    if isinstance(node, Mu):
-        # 同名内层 mu 遮蔽外层目标；不同名内层 mu 不遮蔽，仍检查其中的
-        # 外层变量引用。无论哪种情况，body 的出口状态都传回外部后继。
-        nested_variable = None if node.variable == variable else variable
-        return _assumption22_exit_states(
-            node.body,
-            nested_variable,
-            guarded,
-            f"{location}.mu[{node.variable}].body",
-        )
-
-    raise TypeError(
-        "Assumption 2.2 analysis received an unsupported Process node: "
-        f"{type(node).__name__}"
-    )
-
-
-# 功能：递归检查 ODE 事件反应中由通信前缀引出的 continuation。
-# 检查/论文关系：EventChoice 的每个多标量输入/输出前缀本身满足一次通信；
-#                各分支彼此并列，不能继承其他分支的通信保护状态。
-def _validate_assumption22_event(
-    reaction: EventReaction,
-    variable: str | None,
-    guarded: bool,
-    location: str,
-    *,
-    common_continuation: Process | None = None,
-) -> None:
-    """验证每个 ODE 事件分支，不把事件出口混入 ODE 的自然结束路径。
-
-    当前分支的 continuation 固定以 ``True`` 开始，因为其通信前缀已经发生；
-    递归检查 alternative 时继续传入原 ``guarded``，避免不同事件分支之间共享
-    保护状态。
-    """
-
-    if isinstance(reaction, EmptyEvent):
-        return
-    if isinstance(reaction, EventChoice):
-        for index, (_communication, continuation) in enumerate(reaction.branches):
-            branch_states = _assumption22_exit_states(
-                continuation,
-                variable,
-                True,
-                f"{location}.branches[{index}].continuation",
-            )
-            if common_continuation is not None:
-                for state in sorted(branch_states):
-                    _assumption22_exit_states(
-                        common_continuation,
-                        variable,
-                        state,
-                        f"{location}.branches[{index}].common_continuation",
-                    )
-        return
-    raise TypeError(
-        "Assumption 2.2 analysis received an unsupported EventReaction: "
-        f"{type(reaction).__name__}"
-    )
-
-
-# 功能：作为 Mu 构造器的单一入口，检查该绑定对应的全部递归回边。
+# 功能：以显式任务栈传播“在到达当前位置前是否已经通信”的路径状态。
 # 检查/论文关系：从未通信状态开始分析 body；没有 X 出现时条件真空成立。
 def _validate_assumption22(variable: str, body: Process) -> None:
     """从未通信状态进入递归体，验证绑定 ``variable`` 的全部叶子出现。"""
 
-    _assumption22_exit_states(body, variable, False, "body")
+    results: list[frozenset[bool]] = []
+    pending: list[tuple[object, ...]] = [
+        ("eval", body, False, "body", False)
+    ]
+    while pending:
+        task = pending.pop()
+        tag = task[0]
+        if tag == "union":
+            count = task[1]
+            combined: set[bool] = set()
+            if count:
+                for item in results[-count:]:
+                    combined.update(item)
+                del results[-count:]
+            results.append(frozenset(combined))
+            continue
+        if tag == "chain":
+            _, continuation, location, shadowed = task
+            states = results.pop()
+            pending.append(("union", len(states)))
+            for state in sorted(states, reverse=True):
+                pending.append(
+                    ("eval", continuation, state, location, shadowed)
+                )
+            continue
+        if tag == "discard":
+            results.pop()
+            continue
+
+        _, node, guarded, location, shadowed = task
+        if isinstance(node, Var):
+            if not shadowed and node.name == variable and not guarded:
+                raise ValueError(
+                    "Assumption 2.2 violated: recursion "
+                    f"{variable!r} is not communication-guarded at {location}; "
+                    "every bound occurrence must be preceded by input or output communication"
+                )
+            results.append(frozenset({guarded}))
+            continue
+        if isinstance(node, (Skip, Assign, Assert)):
+            results.append(frozenset({guarded}))
+            continue
+        if isinstance(node, (InputChannel, OutputChannel)):
+            results.append(frozenset({True}))
+            continue
+        if isinstance(node, Sequence):
+            pending.append(("chain", node.second, f"{location}.second", shadowed))
+            pending.append(("eval", node.first, guarded, f"{location}.first", shadowed))
+            continue
+        if isinstance(node, If):
+            pending.append(
+                ("chain", node.continuation, f"{location}.continuation", shadowed)
+            )
+            pending.append(("union", 2))
+            pending.append(("eval", node.else_branch, guarded, f"{location}.else", shadowed))
+            pending.append(("eval", node.then_branch, guarded, f"{location}.then", shadowed))
+            continue
+        if isinstance(node, InternalChoice):
+            pending.append(
+                ("chain", node.continuation, f"{location}.continuation", shadowed)
+            )
+            pending.append(("union", len(node.branches)))
+            for index in reversed(range(len(node.branches))):
+                branch = node.branches[index]
+                pending.append(
+                    (
+                        "eval",
+                        branch,
+                        guarded,
+                        f"{location}.branches[{index}]",
+                        shadowed,
+                    )
+                )
+            continue
+        if isinstance(node, ODE):
+            # 自然结束结果是 ODE 本身的出口；事件路径只需验证，结果随后丢弃。
+            if isinstance(node.interrupts, EventChoice):
+                for index in reversed(range(len(node.interrupts.branches))):
+                    _communication, continuation = node.interrupts.branches[index]
+                    branch_location = f"{location}.interrupts.branches[{index}]"
+                    pending.append(("discard",))
+                    pending.append(
+                        ("chain", node.continuation, branch_location + ".common", shadowed)
+                    )
+                    pending.append(
+                        ("eval", continuation, True, branch_location, shadowed)
+                    )
+            elif not isinstance(node.interrupts, EmptyEvent):
+                raise TypeError(
+                    "Assumption 2.2 analysis received an unsupported EventReaction: "
+                    f"{type(node.interrupts).__name__}"
+                )
+            pending.append(
+                ("eval", node.continuation, guarded, f"{location}.continuation", shadowed)
+            )
+            continue
+        if isinstance(node, Mu):
+            pending.append(
+                (
+                    "eval",
+                    node.body,
+                    guarded,
+                    f"{location}.mu[{node.variable}].body",
+                    shadowed or node.variable == variable,
+                )
+            )
+            continue
+        raise TypeError(
+            "Assumption 2.2 analysis received an unsupported Process node: "
+            f"{type(node).__name__}"
+        )
+    if len(results) != 1:
+        raise RuntimeError("Assumption 2.2 analysis produced an invalid result")
 
 
 # ────────────────── 并行系统与 Assumption 2.1 ──────────────────────────────
@@ -1650,141 +1592,164 @@ def _sequence_assumption21_info(
     )
 
 
-# 功能：按各产生式递归计算 fv、bv、iCh 和 oCh。
-# 检查/论文关系：ch?(x1,...,xn) 绑定全部输入目标；mu X.P 是进程变量绑定；
-#                赋值目标和 ODE 连续状态是用户状态域中的自由值变量；ODE
-#                公式中的 t 由该 ODE 的自动局部时钟绑定，不进入任何集合。
+def _assumption21_children(
+    node: HCSP | EventReaction,
+) -> tuple[HCSP | EventReaction, ...]:
+    """返回 Assumption 2.1 后序求值所需的直接子节点。"""
+
+    if isinstance(node, If):
+        return (node.then_branch, node.else_branch, node.continuation)
+    if isinstance(node, EventChoice):
+        return tuple(
+            child
+            for communication, continuation in node.branches
+            for child in (communication, continuation)
+        )
+    if isinstance(node, Sequence):
+        return (node.first, node.second)
+    if isinstance(node, InternalChoice):
+        return (*node.branches, node.continuation)
+    if isinstance(node, ODE):
+        return (node.interrupts, node.continuation)
+    if isinstance(node, Mu):
+        return (node.body,)
+    if isinstance(node, Parallel):
+        return (node.left, node.right)
+    return ()
+
+
 def _assumption21_info(
     node: HCSP | EventReaction,
 ) -> _Assumption21Info:
-    """严格按 E/P/S 产生式递归计算一个子树的 Assumption 2.1 摘要。"""
+    """迭代计算 fv、bv、iCh 和 oCh，语义等价于逐产生式递归定义。"""
 
-    if isinstance(node, Var):
-        # 裸 X 在遇到所属 Mu 前是自由进程变量；Mu 分支会按名称消去它。
-        return _Assumption21Info(
-            free_process_variables=frozenset({node.name}),
-        )
-    if isinstance(node, Skip):
-        return _Assumption21Info()
-    if isinstance(node, Assign):
-        # 赋值不是本项目 fv/bv 意义下的绑定器；左值和右值变量都属于用户状态域。
-        return _Assumption21Info(
-            free_value_variables=(
-                frozenset({node.target.name})
-                | frozenset(node.expression.get_vars())
-            ),
-        )
-    if isinstance(node, Assert):
-        return _Assumption21Info(
-            free_value_variables=frozenset(node.condition.get_vars()),
-        )
-    if isinstance(node, InputChannel):
-        # 一次多标量输入绑定全部目标，同时把 ch 记入输入通道集合。
-        return _Assumption21Info(
-            bound_value_variables=frozenset(
-                target.name for target in node.targets
-            ),
-            input_channels=frozenset({node.channel.name}),
-        )
-    if isinstance(node, OutputChannel):
-        return _Assumption21Info(
-            free_value_variables=frozenset(node.get_vars()),
-            output_channels=frozenset({node.channel.name}),
-        )
-    if isinstance(node, If):
-        # B 只贡献自由值变量；两个并列分支合并后作为复合顺序前缀绑定公共后继。
-        condition = _Assumption21Info(
-            free_value_variables=frozenset(node.condition.get_vars()),
-        )
-        branches = _merge_assumption21_info(
-            condition,
-            _assumption21_info(node.then_branch),
-            _assumption21_info(node.else_branch),
-        )
-        return _sequence_assumption21_info(
-            branches,
-            _assumption21_info(node.continuation),
-        )
-    if isinstance(node, EmptyEvent):
-        return _Assumption21Info()
-    if isinstance(node, EventChoice):
-        # 输入事件前缀只顺序绑定自己的 continuation；全部事件分支随后
-        # 并列合并，不能互相捕获。
-        return _merge_assumption21_info(
-            *(
-                _sequence_assumption21_info(
-                    _assumption21_info(communication),
-                    _assumption21_info(continuation),
-                )
-                for communication, continuation in node.branches
+    pending: list[tuple[HCSP | EventReaction, bool]] = [(node, False)]
+    results: dict[int, _Assumption21Info] = {}
+    while pending:
+        current, exiting = pending.pop()
+        key = id(current)
+        if key in results:
+            continue
+        children = _assumption21_children(current)
+        if not exiting and children:
+            pending.append((current, True))
+            pending.extend((child, False) for child in reversed(children))
+            continue
+
+        def info(child: HCSP | EventReaction) -> _Assumption21Info:
+            """读取已经在后序遍历中完成的直接子节点摘要。"""
+
+            return results[id(child)]
+
+        if isinstance(current, Var):
+            value = _Assumption21Info(
+                free_process_variables=frozenset({current.name})
             )
-        )
-    if isinstance(node, Sequence):
-        # 只有顺序产生式需要执行前项输入对后项自由值变量的捕获。
-        return _sequence_assumption21_info(
-            _assumption21_info(node.first),
-            _assumption21_info(node.second),
-        )
-    if isinstance(node, InternalChoice):
-        # 全部分支先并列合并，之后作为一个复合顺序前缀绑定公共
-        # continuation；这与表面语法中的 ``InternalChoice(...); Q`` 一致。
-        branches = _merge_assumption21_info(
-            *(_assumption21_info(branch) for branch in node.branches),
-        )
-        return _sequence_assumption21_info(
-            branches,
-            _assumption21_info(node.continuation),
-        )
-    if isinstance(node, ODE):
-        # 方程右端、演化域和 safety 中的 t 由本 ODE 的 local_clock 绑定；
-        # 它既不属于用户 fv/bv，也不参与并行状态所有权集合 V。事件分支不在这个局部
-        # 作用域内，故其中独立出现的 t 仍由事件子树按普通用户变量统计。
-        free_value_variables = set(node.constraint.get_vars())
-        free_value_variables.update(node.annotation.safety.get_vars())
-        for variable, derivative in node.eqs:
-            free_value_variables.add(variable)
-            free_value_variables.update(derivative.get_vars())
-        free_value_variables.discard(node.local_clock.name)
-        continuous = _Assumption21Info(
-            free_value_variables=frozenset(free_value_variables),
-        )
-        ode_prefix = _merge_assumption21_info(
-            continuous,
-            _assumption21_info(node.interrupts),
-        )
-        return _sequence_assumption21_info(
-            ode_prefix,
-            _assumption21_info(node.continuation),
-        )
-    if isinstance(node, Mu):
-        # 仅从 body 的自由进程变量中消去本次绑定名；边界不变量中的名称都是
-        # 值变量，不受进程变量 X 的词法绑定影响。
-        body = _assumption21_info(node.body)
-        return _Assumption21Info(
-            free_value_variables=(
-                body.free_value_variables
-                | frozenset(node.annotation.invariant.get_vars())
-            ),
-            bound_value_variables=body.bound_value_variables,
-            free_process_variables=(
-                body.free_process_variables - {node.variable}
-            ),
-            bound_process_variables=(
-                body.bound_process_variables | {node.variable}
-            ),
-            input_channels=body.input_channels,
-            output_channels=body.output_channels,
-        )
-    if isinstance(node, Parallel):
-        # 此处先汇总整棵系统；左右分量之间的资源冲突由验证函数单独比较。
-        return _merge_assumption21_info(
-            _assumption21_info(node.left),
-            _assumption21_info(node.right),
-        )
-    raise TypeError(
-        "Assumption 2.1 analysis received an unsupported AST node: "
-        f"{type(node).__name__}"
-    )
+        elif isinstance(current, Skip):
+            value = _Assumption21Info()
+        elif isinstance(current, Assign):
+            value = _Assumption21Info(
+                free_value_variables=frozenset(
+                    {current.target.name} | current.expression.get_vars()
+                )
+            )
+        elif isinstance(current, Assert):
+            value = _Assumption21Info(
+                free_value_variables=frozenset(current.condition.get_vars())
+            )
+        elif isinstance(current, InputChannel):
+            value = _Assumption21Info(
+                bound_value_variables=frozenset(
+                    target.name for target in current.targets
+                ),
+                input_channels=frozenset({current.channel.name}),
+            )
+        elif isinstance(current, OutputChannel):
+            variables: set[str] = set()
+            for payload in current.payloads:
+                variables.update(payload.get_vars())
+            value = _Assumption21Info(
+                free_value_variables=frozenset(variables),
+                output_channels=frozenset({current.channel.name}),
+            )
+        elif isinstance(current, If):
+            condition = _Assumption21Info(
+                free_value_variables=frozenset(current.condition.get_vars())
+            )
+            prefix = _merge_assumption21_info(
+                condition,
+                info(current.then_branch),
+                info(current.else_branch),
+            )
+            value = _sequence_assumption21_info(
+                prefix, info(current.continuation)
+            )
+        elif isinstance(current, EmptyEvent):
+            value = _Assumption21Info()
+        elif isinstance(current, EventChoice):
+            value = _merge_assumption21_info(
+                *(
+                    _sequence_assumption21_info(
+                        info(communication), info(continuation)
+                    )
+                    for communication, continuation in current.branches
+                )
+            )
+        elif isinstance(current, Sequence):
+            value = _sequence_assumption21_info(
+                info(current.first), info(current.second)
+            )
+        elif isinstance(current, InternalChoice):
+            prefix = _merge_assumption21_info(
+                *(info(branch) for branch in current.branches)
+            )
+            value = _sequence_assumption21_info(
+                prefix, info(current.continuation)
+            )
+        elif isinstance(current, ODE):
+            variables = set(current.constraint.get_vars())
+            variables.update(current.annotation.safety.get_vars())
+            for variable, derivative in current.eqs:
+                variables.add(variable)
+                variables.update(derivative.get_vars())
+            variables.discard(current.local_clock.name)
+            prefix = _merge_assumption21_info(
+                _Assumption21Info(
+                    free_value_variables=frozenset(variables)
+                ),
+                info(current.interrupts),
+            )
+            value = _sequence_assumption21_info(
+                prefix, info(current.continuation)
+            )
+        elif isinstance(current, Mu):
+            body = info(current.body)
+            value = _Assumption21Info(
+                free_value_variables=(
+                    body.free_value_variables
+                    | frozenset(current.annotation.invariant.get_vars())
+                ),
+                bound_value_variables=body.bound_value_variables,
+                free_process_variables=(
+                    body.free_process_variables - {current.variable}
+                ),
+                bound_process_variables=(
+                    body.bound_process_variables | {current.variable}
+                ),
+                input_channels=body.input_channels,
+                output_channels=body.output_channels,
+            )
+        elif isinstance(current, Parallel):
+            value = _merge_assumption21_info(
+                info(current.left), info(current.right)
+            )
+        else:
+            raise TypeError(
+                "Assumption 2.1 analysis received an unsupported AST node: "
+                f"{type(current).__name__}"
+            )
+        results[key] = value
+    return results[id(node)]
 
 
 # 功能：先检查整棵子树的 fv/bv，再对 Parallel 额外比较左右资源集合。

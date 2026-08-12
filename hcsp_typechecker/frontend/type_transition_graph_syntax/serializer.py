@@ -81,24 +81,39 @@ def _render_derivation(
     value: TransitionDerivation,
     level: int,
 ) -> list[str]:
-    """递归输出一条 Table 3 规则实例及其嵌套前提证据。"""
+    """用显式任务栈输出 Table 3 规则实例及其嵌套前提证据。"""
 
-    arguments: list[str] = []
-    if value.component_indices:
-        arguments.append(
-            "components=" + _format_indices(value.component_indices)
+    lines: list[str] = []
+    pending: list[tuple[str, TransitionDerivation | None, int]] = [
+        ("visit", value, level)
+    ]
+    while pending:
+        action, current, current_level = pending.pop()
+        if action == "close":
+            lines.append(_line(current_level, "}"))
+            continue
+        assert current is not None
+        arguments: list[str] = []
+        if current.component_indices:
+            arguments.append(
+                "components=" + _format_indices(current.component_indices)
+            )
+        if current.branch_indices:
+            arguments.append(
+                "branches=" + _format_indices(current.branch_indices)
+            )
+        if current.channel is not None:
+            arguments.append(f"channel={current.channel!r}")
+        head = current.rule.value + "(" + ", ".join(arguments) + ")"
+        if not current.premises:
+            lines.append(_line(current_level, head))
+            continue
+        lines.append(_line(current_level, head + " {"))
+        pending.append(("close", None, current_level))
+        pending.extend(
+            ("visit", premise, current_level + 1)
+            for premise in reversed(current.premises)
         )
-    if value.branch_indices:
-        arguments.append("branches=" + _format_indices(value.branch_indices))
-    if value.channel is not None:
-        arguments.append(f"channel={value.channel!r}")
-    head = value.rule.value + "(" + ", ".join(arguments) + ")"
-    if not value.premises:
-        return [_line(level, head)]
-    lines = [_line(level, head + " {")]
-    for premise in value.premises:
-        lines.extend(_render_derivation(premise, level + 1))
-    lines.append(_line(level, "}"))
     return lines
 
 

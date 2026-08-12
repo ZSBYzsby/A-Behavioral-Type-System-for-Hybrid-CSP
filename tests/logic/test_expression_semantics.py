@@ -20,11 +20,13 @@ import unittest
 from hcsp_typechecker._internal import (
     Assign,
     BasicType,
+    BinaryExpr,
     ChannelType,
     Configuration,
     If,
     OutputChannel,
     Skip,
+    Variable,
     Verdict,
     construct_type,
 )
@@ -53,6 +55,25 @@ class ExpressionSemanticTests(unittest.TestCase):
         self.assertTrue(z3.is_real(result.term))
         self.assertEqual(engine.valid(result.term == z3.RealVal("1/2"))[0], Verdict.TRUE)
         self.assertEqual(engine.valid(result.term == 0)[0], Verdict.FALSE)
+
+    # 测试输入：左右操作数共享同一个 Variable 对象的 ``x + x`` 表达式 DAG。
+    # 预期行为：显式后序翻译器可重复读取共享子树，结果恰为两个 x 之和。
+    # 检查内容：防止深表达式改写把结果表当成一次性栈并在第二次读取时丢失。
+    # 论文对应：表达式 AST 的对象共享不改变 T-Assign 中 e 的数学含义。
+    def test_shared_expression_subtree_is_translated_twice(self) -> None:
+        """程序化 Expr DAG 与等价的普通表达式树必须具有相同语义。"""
+
+        shared = Variable("x")
+        expression = BinaryExpr("+", shared, shared)
+        translator = ExpressionTranslator({"x": BasicType.INT})
+        result = translator.translate(expression)
+        x_term = translator.symbol("x")
+
+        self.assertEqual(result.value_type, BasicType.INT)
+        self.assertEqual(
+            Z3ProofEngine().valid(result.term == x_term + x_term)[0],
+            Verdict.TRUE,
+        )
 
     # 测试输入：Real 赋值 ``y := 1 / x``，分别在 x!=0 和 x=0 的入口状态运行。
     # 预期行为：前者通过，后者由 T-Assign 的除数非零 premise 判为 false。

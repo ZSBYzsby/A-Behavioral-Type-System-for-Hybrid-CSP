@@ -102,69 +102,151 @@ class _TermGraphBuilder:
         value: NormalizedProcessType,
         binders: tuple[int, ...],
     ) -> int:
-        """递归转换一个规范过程类型并把变量引用解析到 binder 占位符。"""
+        """用显式工作栈转换规范过程类型并解析递归位置。"""
 
-        if isinstance(value, NormalizedEmptyType):
-            return self.node(RegularTypeNodeKind.EMPTY)
-        if isinstance(value, NormalizedBottomType):
-            return self.node(RegularTypeNodeKind.BOTTOM)
-        if isinstance(value, NormalizedBoundTypeVar):
-            if value.index >= len(binders):
-                raise ValueError("Normalized type contains a free recursion position")
-            return binders[-1 - value.index]
-        if isinstance(value, NormalizedInternalChoiceType):
-            return self.node(
-                RegularTypeNodeKind.INTERNAL_CHOICE,
-                children=(self.process(branch, binders) for branch in value.branches),
-            )
-        if isinstance(value, NormalizedFiniteDelayType):
-            return self.node(
-                RegularTypeNodeKind.FINITE_DELAY,
-                value.duration,
-                (
-                    self.angelic(value.interrupts, binders),
-                    self.process(value.continuation, binders),
-                ),
-            )
-        if isinstance(value, NormalizedInfiniteDelayType):
-            return self.node(
-                RegularTypeNodeKind.INFINITE_DELAY,
-                children=(self.angelic(value.interrupts, binders),),
-            )
-        if isinstance(value, NormalizedMuType):
-            binder = self.placeholder()
-            body = self.process(value.body, binders + (binder,))
-            self.aliases[binder] = body
-            return binder
-        raise TypeError(f"Unsupported normalized process type: {type(value).__name__}")
+        return self._build(value, binders, angelic=False)
 
     def angelic(
         self,
         value: NormalizedAngelicType,
         binders: tuple[int, ...],
     ) -> int:
-        """转换空、单通信或多通信 angelic 类型。"""
+        """用同一显式工作栈转换空、单通信或多通信 angelic 类型。"""
 
-        if isinstance(value, NormalizedNoInterruptType):
-            return self.node(RegularTypeNodeKind.NO_INTERRUPT)
-        if isinstance(value, NormalizedInputType):
-            return self.node(
-                RegularTypeNodeKind.INPUT,
-                value.channel,
-                (self.process(value.continuation, binders),),
-            )
-        if isinstance(value, NormalizedOutputType):
-            return self.node(
-                RegularTypeNodeKind.OUTPUT,
-                value.channel,
-                (self.process(value.continuation, binders),),
-            )
-        if isinstance(value, NormalizedExternalChoiceType):
-            return self.node(
-                RegularTypeNodeKind.EXTERNAL_CHOICE,
-                children=(self.angelic(branch, binders) for branch in value.branches),
-            )
-        raise TypeError(f"Unsupported normalized angelic type: {type(value).__name__}")
+        return self._build(value, binders, angelic=True)
+
+    def _build(
+        self,
+        root: NormalizedProcessType | NormalizedAngelicType,
+        binders: tuple[int, ...],
+        *,
+        angelic: bool,
+    ) -> int:
+        """把一棵可能很深的规范类型树迭代地追加到有限项图。"""
+
+        results: list[int] = []
+        # visit: ("visit", value, binders, is_angelic)
+        # finish: ("finish", kind, payload, result_start)
+        # alias: ("alias", binder, result_start)
+        pending: list[tuple[Any, ...]] = [
+            ("visit", root, binders, angelic)
+        ]
+        while pending:
+            task = pending.pop()
+            tag = task[0]
+            if tag == "finish":
+                _, kind, payload, start = task
+                children = tuple(results[start:])
+                del results[start:]
+                results.append(self.node(kind, payload, children))
+                continue
+            if tag == "alias":
+                _, binder, start = task
+                if len(results) != start + 1:
+                    raise RuntimeError("Recursive Type body produced an invalid result")
+                body = results.pop()
+                self.aliases[binder] = body
+                results.append(binder)
+                continue
+
+            _, value, current_binders, is_angelic = task
+            if not is_angelic:
+                if isinstance(value, NormalizedEmptyType):
+                    results.append(self.node(RegularTypeNodeKind.EMPTY))
+                elif isinstance(value, NormalizedBottomType):
+                    results.append(self.node(RegularTypeNodeKind.BOTTOM))
+                elif isinstance(value, NormalizedBoundTypeVar):
+                    if value.index >= len(current_binders):
+                        raise ValueError(
+                            "Normalized type contains a free recursion position"
+                        )
+                    results.append(current_binders[-1 - value.index])
+                elif isinstance(value, NormalizedInternalChoiceType):
+                    start = len(results)
+                    pending.append(
+                        ("finish", RegularTypeNodeKind.INTERNAL_CHOICE, None, start)
+                    )
+                    for branch in reversed(value.branches):
+                        pending.append(
+                            ("visit", branch, current_binders, False)
+                        )
+                elif isinstance(value, NormalizedFiniteDelayType):
+                    start = len(results)
+                    pending.append(
+                        (
+                            "finish",
+                            RegularTypeNodeKind.FINITE_DELAY,
+                            value.duration,
+                            start,
+                        )
+                    )
+                    pending.append(
+                        ("visit", value.continuation, current_binders, False)
+                    )
+                    pending.append(
+                        ("visit", value.interrupts, current_binders, True)
+                    )
+                elif isinstance(value, NormalizedInfiniteDelayType):
+                    start = len(results)
+                    pending.append(
+                        ("finish", RegularTypeNodeKind.INFINITE_DELAY, None, start)
+                    )
+                    pending.append(
+                        ("visit", value.interrupts, current_binders, True)
+                    )
+                elif isinstance(value, NormalizedMuType):
+                    binder = self.placeholder()
+                    start = len(results)
+                    pending.append(("alias", binder, start))
+                    pending.append(
+                        (
+                            "visit",
+                            value.body,
+                            current_binders + (binder,),
+                            False,
+                        )
+                    )
+                else:
+                    raise TypeError(
+                        "Unsupported normalized process type: "
+                        f"{type(value).__name__}"
+                    )
+                continue
+
+            if isinstance(value, NormalizedNoInterruptType):
+                results.append(self.node(RegularTypeNodeKind.NO_INTERRUPT))
+            elif isinstance(value, NormalizedInputType):
+                start = len(results)
+                pending.append(
+                    ("finish", RegularTypeNodeKind.INPUT, value.channel, start)
+                )
+                pending.append(
+                    ("visit", value.continuation, current_binders, False)
+                )
+            elif isinstance(value, NormalizedOutputType):
+                start = len(results)
+                pending.append(
+                    ("finish", RegularTypeNodeKind.OUTPUT, value.channel, start)
+                )
+                pending.append(
+                    ("visit", value.continuation, current_binders, False)
+                )
+            elif isinstance(value, NormalizedExternalChoiceType):
+                start = len(results)
+                pending.append(
+                    ("finish", RegularTypeNodeKind.EXTERNAL_CHOICE, None, start)
+                )
+                for branch in reversed(value.branches):
+                    pending.append(("visit", branch, current_binders, True))
+            else:
+                raise TypeError(
+                    "Unsupported normalized angelic type: "
+                    f"{type(value).__name__}"
+                )
+
+        if len(results) != 1:
+            raise RuntimeError("Regular Type conversion produced an invalid result")
+        return results[0]
 
     def freeze(self, roots: Iterable[int]) -> RegularTypeTermGraph:
         """解析 binder 别名、删除占位编号并冻结全部可达实际结点。"""
@@ -304,9 +386,26 @@ def _bisimulation_colors(graph: RegularTypeTermGraph) -> tuple[int, ...]:
             _node_signature(node, colors) for node in graph.nodes
         )
         next_colors = _assign_colors(signatures)
-        if next_colors == colors:
+        # 颜色编号本身只是实现细节；比较同色关系，避免同一稳定划分因编号
+        # 置换而在两轮之间振荡。
+        if _same_partition(colors, next_colors):
             return colors
         colors = next_colors
+
+
+def _same_partition(left: tuple[int, ...], right: tuple[int, ...]) -> bool:
+    """线性判断两组颜色是否定义同一个等价关系，忽略颜色编号置换。"""
+
+    if len(left) != len(right):
+        return False
+    left_to_right: dict[int, int] = {}
+    right_to_left: dict[int, int] = {}
+    for left_color, right_color in zip(left, right):
+        mapped_right = left_to_right.setdefault(left_color, right_color)
+        mapped_left = right_to_left.setdefault(right_color, left_color)
+        if mapped_right != right_color or mapped_left != left_color:
+            return False
+    return True
 
 
 def _assign_colors(signatures: tuple[tuple[object, ...], ...]) -> tuple[int, ...]:
@@ -438,19 +537,24 @@ def _choice_leaves(
     specs: dict[int, _NodeSpec],
     visiting: frozenset[int],
 ) -> tuple[int, ...]:
-    """沿同类选择边递归收集非选择叶；通信守卫保证不会有纯选择递归环。"""
+    """沿同类选择边迭代收集非选择叶，并保持原深度优先顺序。"""
 
-    if node_id in visiting:
-        return (node_id,)
-    spec = specs[node_id]
-    if spec.kind is not kind:
-        return (node_id,)
-    nested = visiting | {node_id}
-    return tuple(
-        leaf
-        for child in spec.children
-        for leaf in _choice_leaves(child, kind, specs, nested)
-    )
+    leaves: list[int] = []
+    pending: list[tuple[int, frozenset[int]]] = [(node_id, visiting)]
+    while pending:
+        current, current_visiting = pending.pop()
+        if current in current_visiting:
+            leaves.append(current)
+            continue
+        spec = specs[current]
+        if spec.kind is not kind:
+            leaves.append(current)
+            continue
+        nested = current_visiting | {current}
+        pending.extend(
+            (child, nested) for child in reversed(spec.children)
+        )
+    return tuple(leaves)
 
 
 def _resolve_redirect(node_id: int, redirects: dict[int, int]) -> int:
@@ -643,40 +747,9 @@ def _reify_process(
 ) -> NormalizedProcessType:
     """沿当前 DFS 路径把一个过程节点及回边重建为 De Bruijn 语法树。"""
 
-    if node_id in path:
-        return NormalizedBoundTypeVar(len(path) - 1 - path.index(node_id))
-
-    node = graph.nodes[node_id]
-    nested_path = path + (node_id,)
-    if node.kind is RegularTypeNodeKind.EMPTY:
-        return NormalizedEmptyType()
-    if node.kind is RegularTypeNodeKind.BOTTOM:
-        return NormalizedBottomType()
-    if node.kind is RegularTypeNodeKind.INTERNAL_CHOICE:
-        body = make_normalized_internal_choice(
-            _reify_process(graph, child, nested_path)
-            for child in node.children
-        )
-    elif node.kind is RegularTypeNodeKind.FINITE_DELAY:
-        if not isinstance(node.payload, Fraction):
-            raise TypeError("Finite-delay state node has an invalid duration")
-        body = NormalizedFiniteDelayType(
-            node.payload,
-            _reify_angelic(graph, node.children[0], nested_path),
-            _reify_process(graph, node.children[1], nested_path),
-        )
-    elif node.kind is RegularTypeNodeKind.INFINITE_DELAY:
-        body = NormalizedInfiniteDelayType(
-            _reify_angelic(graph, node.children[0], nested_path)
-        )
-    else:
-        raise TypeError(
-            f"Process root has invalid regular-node kind: {node.kind.value!r}"
-        )
-
-    if _references_binder(body, 0):
-        return NormalizedMuType(body)
-    return _remove_unused_binder(body, 0)
+    result = _reify_iterative(graph, node_id, path, angelic=False)
+    assert isinstance(result, NormalizedProcessType)
+    return result
 
 
 def _reify_angelic(
@@ -686,74 +759,162 @@ def _reify_angelic(
 ) -> NormalizedAngelicType:
     """把项图中的 angelic 子结构重建为规范输入、输出或外部选择。"""
 
-    node = graph.nodes[node_id]
-    if node.kind is RegularTypeNodeKind.NO_INTERRUPT:
-        return NormalizedNoInterruptType()
-    if node.kind is RegularTypeNodeKind.INPUT:
-        if not isinstance(node.payload, str):
-            raise TypeError("Input state node has an invalid channel")
-        return NormalizedInputType(
-            node.payload,
-            _reify_process(graph, node.children[0], path),
-        )
-    if node.kind is RegularTypeNodeKind.OUTPUT:
-        if not isinstance(node.payload, str):
-            raise TypeError("Output state node has an invalid channel")
-        return NormalizedOutputType(
-            node.payload,
-            _reify_process(graph, node.children[0], path),
-        )
-    if node.kind is RegularTypeNodeKind.EXTERNAL_CHOICE:
-        branches = tuple(
-            _reify_angelic(graph, child, path) for child in node.children
-        )
-        if not all(
-            isinstance(branch, (NormalizedInputType, NormalizedOutputType))
-            for branch in branches
-        ):
-            raise TypeError("External-choice state node contains a non-communication")
-        return make_normalized_external_choice(branches)
-    raise TypeError(
-        f"Angelic root has invalid regular-node kind: {node.kind.value!r}"
-    )
+    result = _reify_iterative(graph, node_id, path, angelic=True)
+    assert isinstance(result, NormalizedAngelicType)
+    return result
+
+
+def _reify_iterative(
+    graph: EquiRecursiveStateKey,
+    root: int,
+    path: tuple[int, ...],
+    *,
+    angelic: bool,
+) -> NormalizedProcessType | NormalizedAngelicType:
+    """用显式后序栈把有限循环项图重建为用于展示的 De Bruijn AST。"""
+
+    results: list[NormalizedProcessType | NormalizedAngelicType] = []
+    pending: list[tuple[Any, ...]] = [("visit", root, path, angelic)]
+    while pending:
+        task = pending.pop()
+        if task[0] == "finish":
+            _, kind, node, start = task
+            children = tuple(results[start:])
+            del results[start:]
+            if kind == "internal":
+                body = make_normalized_internal_choice(children)
+            elif kind == "finite":
+                if not isinstance(node.payload, Fraction):
+                    raise TypeError("Finite-delay state node has an invalid duration")
+                body = NormalizedFiniteDelayType(
+                    node.payload, children[0], children[1]
+                )
+            elif kind == "infinite":
+                body = NormalizedInfiniteDelayType(children[0])
+            elif kind in {"input", "output"}:
+                if not isinstance(node.payload, str):
+                    raise TypeError("Communication state node has an invalid channel")
+                constructor = (
+                    NormalizedInputType if kind == "input" else NormalizedOutputType
+                )
+                results.append(constructor(node.payload, children[0]))
+                continue
+            elif kind == "external":
+                if not all(
+                    isinstance(child, (NormalizedInputType, NormalizedOutputType))
+                    for child in children
+                ):
+                    raise TypeError(
+                        "External-choice state node contains a non-communication"
+                    )
+                results.append(make_normalized_external_choice(children))
+                continue
+            else:
+                raise RuntimeError(f"Unsupported reification task: {kind}")
+            assert isinstance(body, NormalizedProcessType)
+            if _references_binder(body, 0):
+                results.append(NormalizedMuType(body))
+            else:
+                results.append(_remove_unused_binder(body, 0))
+            continue
+
+        _, current_id, current_path, is_angelic = task
+        if not is_angelic and current_id in current_path:
+            results.append(
+                NormalizedBoundTypeVar(
+                    len(current_path) - 1 - current_path.index(current_id)
+                )
+            )
+            continue
+        node = graph.nodes[current_id]
+        if is_angelic:
+            if node.kind is RegularTypeNodeKind.NO_INTERRUPT:
+                results.append(NormalizedNoInterruptType())
+            elif node.kind in {
+                RegularTypeNodeKind.INPUT,
+                RegularTypeNodeKind.OUTPUT,
+            }:
+                start = len(results)
+                kind = "input" if node.kind is RegularTypeNodeKind.INPUT else "output"
+                pending.append(("finish", kind, node, start))
+                pending.append(("visit", node.children[0], current_path, False))
+            elif node.kind is RegularTypeNodeKind.EXTERNAL_CHOICE:
+                start = len(results)
+                pending.append(("finish", "external", node, start))
+                for child in reversed(node.children):
+                    pending.append(("visit", child, current_path, True))
+            else:
+                raise TypeError(
+                    f"Angelic root has invalid regular-node kind: {node.kind.value!r}"
+                )
+            continue
+
+        nested_path = current_path + (current_id,)
+        if node.kind is RegularTypeNodeKind.EMPTY:
+            results.append(NormalizedEmptyType())
+        elif node.kind is RegularTypeNodeKind.BOTTOM:
+            results.append(NormalizedBottomType())
+        elif node.kind is RegularTypeNodeKind.INTERNAL_CHOICE:
+            start = len(results)
+            pending.append(("finish", "internal", node, start))
+            for child in reversed(node.children):
+                pending.append(("visit", child, nested_path, False))
+        elif node.kind is RegularTypeNodeKind.FINITE_DELAY:
+            start = len(results)
+            pending.append(("finish", "finite", node, start))
+            pending.append(("visit", node.children[1], nested_path, False))
+            pending.append(("visit", node.children[0], nested_path, True))
+        elif node.kind is RegularTypeNodeKind.INFINITE_DELAY:
+            start = len(results)
+            pending.append(("finish", "infinite", node, start))
+            pending.append(("visit", node.children[0], nested_path, True))
+        else:
+            raise TypeError(
+                f"Process root has invalid regular-node kind: {node.kind.value!r}"
+            )
+    if len(results) != 1:
+        raise RuntimeError("Regular Type reification produced an invalid result")
+    return results[0]
 
 
 def _references_binder(value: NormalizedProcessType, depth: int) -> bool:
     """判断过程树是否引用当前待决定是否保留的虚拟 binder。"""
 
-    if isinstance(value, (NormalizedEmptyType, NormalizedBottomType)):
-        return False
-    if isinstance(value, NormalizedBoundTypeVar):
-        return value.index == depth
-    if isinstance(value, NormalizedInternalChoiceType):
-        return any(_references_binder(branch, depth) for branch in value.branches)
-    if isinstance(value, NormalizedFiniteDelayType):
-        return _references_binder_angelic(
-            value.interrupts, depth
-        ) or _references_binder(value.continuation, depth)
-    if isinstance(value, NormalizedInfiniteDelayType):
-        return _references_binder_angelic(value.interrupts, depth)
-    if isinstance(value, NormalizedMuType):
-        return _references_binder(value.body, depth + 1)
-    raise TypeError(f"Unsupported normalized process: {type(value).__name__}")
-
-
-def _references_binder_angelic(
-    value: NormalizedAngelicType,
-    depth: int,
-) -> bool:
-    """在 angelic continuation 中查询目标虚拟 binder。"""
-
-    if isinstance(value, NormalizedNoInterruptType):
-        return False
-    if isinstance(value, (NormalizedInputType, NormalizedOutputType)):
-        return _references_binder(value.continuation, depth)
-    if isinstance(value, NormalizedExternalChoiceType):
-        return any(
-            _references_binder(branch.continuation, depth)
-            for branch in value.branches
-        )
-    raise TypeError(f"Unsupported normalized angelic type: {type(value).__name__}")
+    pending: list[tuple[object, int, bool]] = [(value, depth, False)]
+    while pending:
+        current, current_depth, angelic = pending.pop()
+        if not angelic:
+            if isinstance(current, (NormalizedEmptyType, NormalizedBottomType)):
+                continue
+            if isinstance(current, NormalizedBoundTypeVar):
+                if current.index == current_depth:
+                    return True
+                continue
+            if isinstance(current, NormalizedInternalChoiceType):
+                pending.extend((branch, current_depth, False) for branch in current.branches)
+            elif isinstance(current, NormalizedFiniteDelayType):
+                pending.append((current.continuation, current_depth, False))
+                pending.append((current.interrupts, current_depth, True))
+            elif isinstance(current, NormalizedInfiniteDelayType):
+                pending.append((current.interrupts, current_depth, True))
+            elif isinstance(current, NormalizedMuType):
+                pending.append((current.body, current_depth + 1, False))
+            else:
+                raise TypeError(
+                    f"Unsupported normalized process: {type(current).__name__}"
+                )
+            continue
+        if isinstance(current, NormalizedNoInterruptType):
+            continue
+        if isinstance(current, (NormalizedInputType, NormalizedOutputType)):
+            pending.append((current.continuation, current_depth, False))
+        elif isinstance(current, NormalizedExternalChoiceType):
+            pending.extend((branch, current_depth, True) for branch in current.branches)
+        else:
+            raise TypeError(
+                f"Unsupported normalized angelic type: {type(current).__name__}"
+            )
+    return False
 
 
 def _remove_unused_binder(
@@ -762,31 +923,89 @@ def _remove_unused_binder(
 ) -> NormalizedProcessType:
     """删除一个未被引用的虚拟 binder，并下移其外层 De Bruijn index。"""
 
-    if isinstance(value, (NormalizedEmptyType, NormalizedBottomType)):
-        return value
-    if isinstance(value, NormalizedBoundTypeVar):
-        if value.index == depth:
-            raise ValueError("Cannot remove a referenced recursion binder")
-        if value.index > depth:
-            return NormalizedBoundTypeVar(value.index - 1)
-        return value
-    if isinstance(value, NormalizedInternalChoiceType):
-        return make_normalized_internal_choice(
-            _remove_unused_binder(branch, depth) for branch in value.branches
-        )
-    if isinstance(value, NormalizedFiniteDelayType):
-        return NormalizedFiniteDelayType(
-            value.duration,
-            _remove_unused_binder_angelic(value.interrupts, depth),
-            _remove_unused_binder(value.continuation, depth),
-        )
-    if isinstance(value, NormalizedInfiniteDelayType):
-        return NormalizedInfiniteDelayType(
-            _remove_unused_binder_angelic(value.interrupts, depth)
-        )
-    if isinstance(value, NormalizedMuType):
-        return NormalizedMuType(_remove_unused_binder(value.body, depth + 1))
-    raise TypeError(f"Unsupported normalized process: {type(value).__name__}")
+    results: list[NormalizedProcessType | NormalizedAngelicType] = []
+    pending: list[tuple[Any, ...]] = [("visit", value, depth, False)]
+    while pending:
+        task = pending.pop()
+        if task[0] == "finish":
+            _, kind, current, start = task
+            children = tuple(results[start:])
+            del results[start:]
+            if kind == "internal":
+                results.append(make_normalized_internal_choice(children))
+            elif kind == "finite":
+                results.append(
+                    NormalizedFiniteDelayType(
+                        current.duration, children[0], children[1]
+                    )
+                )
+            elif kind == "infinite":
+                results.append(NormalizedInfiniteDelayType(children[0]))
+            elif kind == "mu":
+                results.append(NormalizedMuType(children[0]))
+            elif kind == "input":
+                results.append(NormalizedInputType(current.channel, children[0]))
+            elif kind == "output":
+                results.append(NormalizedOutputType(current.channel, children[0]))
+            elif kind == "external":
+                results.append(make_normalized_external_choice(children))
+            else:
+                raise RuntimeError(f"Unsupported binder-removal task: {kind}")
+            continue
+        _, current, current_depth, angelic = task
+        if not angelic:
+            if isinstance(current, (NormalizedEmptyType, NormalizedBottomType)):
+                results.append(current)
+            elif isinstance(current, NormalizedBoundTypeVar):
+                if current.index == current_depth:
+                    raise ValueError("Cannot remove a referenced recursion binder")
+                results.append(
+                    NormalizedBoundTypeVar(current.index - 1)
+                    if current.index > current_depth
+                    else current
+                )
+            elif isinstance(current, NormalizedInternalChoiceType):
+                start = len(results)
+                pending.append(("finish", "internal", current, start))
+                for branch in reversed(current.branches):
+                    pending.append(("visit", branch, current_depth, False))
+            elif isinstance(current, NormalizedFiniteDelayType):
+                start = len(results)
+                pending.append(("finish", "finite", current, start))
+                pending.append(("visit", current.continuation, current_depth, False))
+                pending.append(("visit", current.interrupts, current_depth, True))
+            elif isinstance(current, NormalizedInfiniteDelayType):
+                start = len(results)
+                pending.append(("finish", "infinite", current, start))
+                pending.append(("visit", current.interrupts, current_depth, True))
+            elif isinstance(current, NormalizedMuType):
+                start = len(results)
+                pending.append(("finish", "mu", current, start))
+                pending.append(("visit", current.body, current_depth + 1, False))
+            else:
+                raise TypeError(
+                    f"Unsupported normalized process: {type(current).__name__}"
+                )
+            continue
+        if isinstance(current, NormalizedNoInterruptType):
+            results.append(current)
+        elif isinstance(current, (NormalizedInputType, NormalizedOutputType)):
+            start = len(results)
+            kind = "input" if isinstance(current, NormalizedInputType) else "output"
+            pending.append(("finish", kind, current, start))
+            pending.append(("visit", current.continuation, current_depth, False))
+        elif isinstance(current, NormalizedExternalChoiceType):
+            start = len(results)
+            pending.append(("finish", "external", current, start))
+            for branch in reversed(current.branches):
+                pending.append(("visit", branch, current_depth, True))
+        else:
+            raise TypeError(
+                f"Unsupported normalized angelic type: {type(current).__name__}"
+            )
+    if len(results) != 1 or not isinstance(results[0], NormalizedProcessType):
+        raise RuntimeError("Binder removal produced an invalid process result")
+    return results[0]
 
 
 def _remove_unused_binder_angelic(
@@ -795,24 +1014,10 @@ def _remove_unused_binder_angelic(
 ) -> NormalizedAngelicType:
     """在 angelic continuation 中删除同一未使用虚拟 binder。"""
 
-    if isinstance(value, NormalizedNoInterruptType):
-        return value
-    if isinstance(value, NormalizedInputType):
-        return NormalizedInputType(
-            value.channel,
-            _remove_unused_binder(value.continuation, depth),
-        )
-    if isinstance(value, NormalizedOutputType):
-        return NormalizedOutputType(
-            value.channel,
-            _remove_unused_binder(value.continuation, depth),
-        )
-    if isinstance(value, NormalizedExternalChoiceType):
-        return make_normalized_external_choice(
-            _remove_unused_binder_angelic(branch, depth)
-            for branch in value.branches
-        )
-    raise TypeError(f"Unsupported normalized angelic type: {type(value).__name__}")
+    # 复用过程入口的显式工作栈，并取临时无穷时延包装中的 angelic 子树。
+    wrapped = _remove_unused_binder(NormalizedInfiniteDelayType(value), depth)
+    assert isinstance(wrapped, NormalizedInfiniteDelayType)
+    return wrapped.interrupts
 
 
 __all__ = [

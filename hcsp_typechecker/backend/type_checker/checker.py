@@ -479,6 +479,155 @@ class TypeChecker(Table2RuleEngine):
         expected: ProcessType,
         alpha: _AlphaEnvironment,
     ) -> bool:
+        """迭代消费线性规则前缀，并仅对真正分支结构进入分派函数。"""
+
+        deferred_steps: list[tuple[int, _RuleExpansion]] = []
+        current_judgment = judgment
+        current_expected = expected
+        while current_judgment.nodes:
+            head = current_judgment.nodes[0]
+            if not isinstance(
+                head,
+                (Skip, Assert, Assign, InputChannel, OutputChannel),
+            ):
+                break
+            if isinstance(head, Skip) and len(current_judgment.nodes) == 1:
+                matched = self._match_terminal(
+                    current_judgment.terminal,
+                    current_expected,
+                    alpha,
+                    current_judgment.context.location,
+                )
+                self._finish_linear_steps(deferred_steps, matched)
+                return matched
+
+            rule = self._rule_name(head)
+            step = self._start_step(
+                rule,
+                current_judgment.context.location,
+                f"{self._describe_process_node(head)}；给定 Type = "
+                + type(current_expected).__name__,
+                context=current_judgment.context,
+            )
+            before = len(self.diagnostics)
+            next_expected = current_expected
+            if isinstance(head, Skip):
+                expansion = self.rule_t_skip(current_judgment)
+            elif isinstance(head, Assert):
+                expansion = self.rule_t_assert(current_judgment)
+            elif isinstance(head, Assign):
+                expansion = self.rule_t_assign(current_judgment)
+            elif isinstance(head, InputChannel):
+                if not (
+                    isinstance(current_expected, InfiniteDelayType)
+                    and isinstance(current_expected.interrupts, InputType)
+                    and current_expected.interrupts.channel == head.channel.name
+                ):
+                    matched = self._finish_mismatch_step(
+                        step,
+                        "T-In requires forever interrupt input on the same channel",
+                        current_judgment.context.location,
+                    )
+                    self._finish_linear_steps(deferred_steps, matched)
+                    return matched
+                expansion = self.rule_t_in(current_judgment)
+                next_expected = current_expected.interrupts.continuation
+            else:
+                assert isinstance(head, OutputChannel)
+                if not (
+                    isinstance(current_expected, InfiniteDelayType)
+                    and isinstance(current_expected.interrupts, OutputType)
+                    and current_expected.interrupts.channel == head.channel.name
+                ):
+                    matched = self._finish_mismatch_step(
+                        step,
+                        "T-Out requires forever interrupt output on the same channel",
+                        current_judgment.context.location,
+                    )
+                    self._finish_linear_steps(deferred_steps, matched)
+                    return matched
+                expansion = self.rule_t_out(current_judgment)
+                next_expected = current_expected.interrupts.continuation
+
+            child_judgments: list[_ProcessJudgment] = []
+            matched = True
+            for premise in expansion.premises:
+                if isinstance(premise, _FormulaPremise):
+                    if self._decide_proof(premise.request).verdict is Verdict.FALSE:
+                        matched = False
+                        break
+                elif isinstance(premise, _ChildJudgmentPremise):
+                    if not isinstance(premise.judgment, _ProcessJudgment):
+                        raise TypeError(
+                            f"{rule} linear prefix produced a non-process child"
+                        )
+                    child_judgments.append(premise.judgment)
+                else:
+                    raise TypeError(
+                        f"Unsupported premise in {rule}: {type(premise).__name__}"
+                    )
+            if any(
+                item.verdict is Verdict.FALSE
+                for item in self.diagnostics[before:]
+            ):
+                matched = False
+            if not matched or len(child_judgments) != 1:
+                if matched:
+                    self._mismatch(
+                        rule,
+                        "A linear rule must produce exactly one process child",
+                        current_judgment.context.location,
+                    )
+                    matched = False
+                self._finish_step(
+                    step,
+                    "给定 Type 与规则结论不匹配",
+                    self._premise_summary(expansion),
+                )
+                self._finish_linear_steps(deferred_steps, matched)
+                return matched
+            deferred_steps.append((step, expansion))
+            current_judgment = child_judgments[0]
+            current_expected = next_expected
+
+        if current_judgment.nodes:
+            matched = self._check_process_node(
+                current_judgment,
+                current_expected,
+                alpha,
+            )
+        else:
+            matched = self._match_terminal(
+                current_judgment.terminal,
+                current_expected,
+                alpha,
+                current_judgment.context.location,
+            )
+        self._finish_linear_steps(deferred_steps, matched)
+        return matched
+
+    def _finish_linear_steps(
+        self,
+        deferred: Sequence[tuple[int, _RuleExpansion]],
+        matched: bool,
+    ) -> None:
+        """按递归返回顺序完成显式栈消费过的线性规则日志。"""
+
+        for step, expansion in reversed(deferred):
+            self._finish_step(
+                step,
+                "给定 Type 与规则结论匹配"
+                if matched
+                else "给定 Type 与规则结论不匹配",
+                self._premise_summary(expansion),
+            )
+
+    def _check_process_node(
+        self,
+        judgment: _ProcessJudgment,
+        expected: ProcessType,
+        alpha: _AlphaEnvironment,
+    ) -> bool:
         """按当前 Process 头结点拆解并检查给定 ProcessType。"""
 
         nodes = judgment.nodes
@@ -1011,11 +1160,15 @@ class TypeChecker(Table2RuleEngine):
     def _parallel_leaf_count(system: Any) -> int:
         """计算二元 Parallel 系统中的 Process 叶子数。"""
 
-        if isinstance(system, Parallel):
-            return TypeChecker._parallel_leaf_count(
-                system.left
-            ) + TypeChecker._parallel_leaf_count(system.right)
-        return 1
+        count = 0
+        pending = [system]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, Parallel):
+                pending.extend((current.left, current.right))
+            else:
+                count += 1
+        return count
 
     @staticmethod
     def _group_parallel_type(

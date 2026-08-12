@@ -4,6 +4,11 @@
 论文完全一致。人工比对时，应以本文给出的“代码实际行为”为准，再逐条与论文规则
 比较。
 
+若需要把前端 lowering、Gamma/Theta/参数、Constructor、Checker 和 Table 3 放在
+同一条数据流中核对，请先阅读
+[当前代码的实现语义与论文规则落地方式](IMPLEMENTATION_SEMANTICS.md)。本文在此
+基础上继续深入 Constructor 的逐规则证据和示例，不把“Table 2 一致”当作实现说明。
+
 本文描述的功能称为 **TypeConstructor**：输入是带批注的 HCSP、Gamma、Theta、
 参数以及可选初态/路径条件，Type AST 由程序自行构造。用户给定 Type 的
 **TypeChecker** 已作为独立功能实现，详见 [TYPE_CHECKER.md](TYPE_CHECKER.md)；

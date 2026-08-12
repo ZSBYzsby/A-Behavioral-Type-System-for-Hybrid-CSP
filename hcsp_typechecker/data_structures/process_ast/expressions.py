@@ -137,7 +137,7 @@ class Literal(Expr):
     # 检查/语法关系：不重新解析或修改常量。
     def __str__(self) -> str:
         """生成适合诊断的源代码形式。"""
-        return str(self.value)
+        return _format_expression(self)
 
 
 # --------------------------------------------------------------------------
@@ -169,7 +169,7 @@ class Variable(Expr):
     # 检查/语法关系：名称已经由 __post_init__ 验证，不进行额外转义。
     def __str__(self) -> str:
         """返回源变量名。"""
-        return self.name
+        return _format_expression(self)
 
 
 # --------------------------------------------------------------------------
@@ -198,14 +198,13 @@ class UnaryExpr(Expr):
     # 检查/语法关系：一元运算不绑定或引入新变量。
     def get_vars(self) -> set[str]:
         """返回操作数的自由变量。"""
-        return self.operand.get_vars()
+        return _collect_expression_variables(self)
 
     # 功能：用显式括号打印操作数，避免嵌套优先级歧义。
     # 检查/语法关系：not 与算术正负号只在空格形式上有所区别。
     def __str__(self) -> str:
         """使用无歧义括号打印一元表达式。"""
-        separator = " " if self.op == "not" else ""
-        return f"{self.op}{separator}({self.operand})"
+        return _format_expression(self)
 
 
 # --------------------------------------------------------------------------
@@ -236,13 +235,13 @@ class BinaryExpr(Expr):
     # 检查/语法关系：算术运算不改变变量的自由/绑定身份。
     def get_vars(self) -> set[str]:
         """合并左右操作数的自由变量。"""
-        return self.left.get_vars() | self.right.get_vars()
+        return _collect_expression_variables(self)
 
     # 功能：用括号保留二元 AST 的结合顺序。
     # 检查/语法关系：输出面向审计，不依赖读取者自行恢复运算符优先级。
     def __str__(self) -> str:
         """用括号保留原始运算树结构。"""
-        return f"({self.left} {self.op} {self.right})"
+        return _format_expression(self)
 
 
 # --------------------------------------------------------------------------
@@ -274,13 +273,13 @@ class BooleanExpr(Expr):
     # 检查/语法关系：and/or 不产生变量绑定。
     def get_vars(self) -> set[str]:
         """合并所有布尔子式的自由变量。"""
-        return set().union(*(item.get_vars() for item in self.operands))
+        return _collect_expression_variables(self)
 
     # 功能：按保存顺序打印多元布尔连接，并用括号封闭整体。
     # 检查/语法关系：稳定顺序便于逐项核对原表达式 AST。
     def __str__(self) -> str:
         """用括号和操作符连接所有子式。"""
-        return "(" + f" {self.op} ".join(str(item) for item in self.operands) + ")"
+        return _format_expression(self)
 
 
 # --------------------------------------------------------------------------
@@ -319,16 +318,13 @@ class CompareExpr(Expr):
     # 检查/语法关系：关系运算生成 Bool，但不会绑定任何操作数变量。
     def get_vars(self) -> set[str]:
         """合并比较链中所有表达式的自由变量。"""
-        return set().union(*(item.get_vars() for item in self.operands))
+        return _collect_expression_variables(self)
 
     # 功能：按操作数和关系符的交替顺序还原链式比较文本。
     # 检查/语法关系：显式括号确保整个比较式被视为单个 B。
     def __str__(self) -> str:
         """按链式比较顺序打印。"""
-        parts = [str(self.operands[0])]
-        for op, operand in zip(self.operators, self.operands[1:]):
-            parts.extend((op, str(operand)))
-        return "(" + " ".join(parts) + ")"
+        return _format_expression(self)
 
 
 # --------------------------------------------------------------------------
@@ -361,13 +357,13 @@ class CallExpr(Expr):
     # 检查/语法关系：f 是函数符号而非 Gamma 中的普通值变量。
     def get_vars(self) -> set[str]:
         """函数名不是变量，只收集实参中的自由变量。"""
-        return set().union(*(item.get_vars() for item in self.arguments))
+        return _collect_expression_variables(self)
 
     # 功能：生成普通位置实参函数调用形式。
     # 检查/语法关系：名称与实参均已在构造阶段规范化。
     def __str__(self) -> str:
         """生成普通函数调用形式。"""
-        return f"{self.name}(" + ", ".join(str(item) for item in self.arguments) + ")"
+        return _format_expression(self)
 
 
 # 功能：声明无需字符串解析即可成为 Literal 的 Python 标量输入范围。
@@ -398,6 +394,87 @@ def ensure_expr(value: ExprLike) -> Expr:
         "Expression must be a project Expr, scalar literal, or string source; "
         f"got {type(value).__name__}"
     )
+
+
+def _collect_expression_variables(root: Expr) -> set[str]:
+    """使用显式工作栈收集表达式变量，避免深表达式耗尽 Python 栈。"""
+
+    variables: set[str] = set()
+    pending: list[Expr] = [root]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Literal):
+            continue
+        if isinstance(node, Variable):
+            variables.add(node.name)
+            continue
+        if isinstance(node, UnaryExpr):
+            pending.append(node.operand)
+            continue
+        if isinstance(node, BinaryExpr):
+            pending.extend((node.right, node.left))
+            continue
+        if isinstance(node, (BooleanExpr, CompareExpr)):
+            pending.extend(reversed(node.operands))
+            continue
+        if isinstance(node, CallExpr):
+            pending.extend(reversed(node.arguments))
+            continue
+        raise TypeError(
+            "Expression variable analysis received an unsupported node: "
+            f"{type(node).__name__}"
+        )
+    return variables
+
+
+def _format_expression(root: Expr) -> str:
+    """用显式后序栈生成与原节点 ``str`` 约定完全一致的诊断文本。"""
+
+    rendered: dict[int, str] = {}
+    pending: list[tuple[Expr, bool]] = [(root, False)]
+    while pending:
+        node, exiting = pending.pop()
+        key = id(node)
+        if key in rendered:
+            continue
+        if isinstance(node, Literal):
+            rendered[key] = str(node.value)
+            continue
+        if isinstance(node, Variable):
+            rendered[key] = node.name
+            continue
+        if isinstance(node, UnaryExpr):
+            children = (node.operand,)
+        elif isinstance(node, BinaryExpr):
+            children = (node.left, node.right)
+        elif isinstance(node, (BooleanExpr, CompareExpr)):
+            children = node.operands
+        elif isinstance(node, CallExpr):
+            children = node.arguments
+        else:
+            raise TypeError(f"Unsupported expression node: {type(node).__name__}")
+        if not exiting:
+            pending.append((node, True))
+            pending.extend((child, False) for child in reversed(children))
+            continue
+        child_text = tuple(rendered[id(child)] for child in children)
+        if isinstance(node, UnaryExpr):
+            separator = " " if node.op == "not" else ""
+            text = f"{node.op}{separator}({child_text[0]})"
+        elif isinstance(node, BinaryExpr):
+            text = f"({child_text[0]} {node.op} {child_text[1]})"
+        elif isinstance(node, BooleanExpr):
+            text = "(" + f" {node.op} ".join(child_text) + ")"
+        elif isinstance(node, CompareExpr):
+            parts = [child_text[0]]
+            for operator, operand in zip(node.operators, child_text[1:]):
+                parts.extend((operator, operand))
+            text = "(" + " ".join(parts) + ")"
+        else:
+            assert isinstance(node, CallExpr)
+            text = f"{node.name}(" + ", ".join(child_text) + ")"
+        rendered[key] = text
+    return rendered[id(root)]
 
 
 # 功能：把赋值和输入动作的标量左值统一规范化为 Variable。

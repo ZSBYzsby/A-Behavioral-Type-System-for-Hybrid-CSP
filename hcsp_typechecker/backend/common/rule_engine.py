@@ -354,6 +354,16 @@ class _RuleExpansion:
     assignment_post_state: _LazyAssignmentPostState | None = None
 
 
+@dataclass(slots=True)
+class _ConstructionEvalFrame:
+    """显式保存一条 Constructor 规则的求解进度。"""
+
+    expansion: _RuleExpansion
+    premise_index: int = 0
+    child_results: list[Any] = field(default_factory=list)
+    finish: Callable[[Any], None] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _ConstructionFailure:
     r"""表示某个进程片段无法按 Table 2 构造行为类型。
@@ -861,28 +871,220 @@ class Table2RuleEngine:
         含错误子树的父行为类型。
         """
 
-        child_results: list[Any] = []
-        for index, premise in enumerate(expansion.premises):
-            if isinstance(premise, _FormulaPremise):
-                decided = self._decide_proof(premise.request)
-                if decided.verdict is Verdict.FALSE:
-                    return _CONSTRUCTION_FAILURE
-            elif isinstance(premise, _ChildJudgmentPremise):
-                child_result = self._solve_child_judgment(premise.judgment)
-                child_results.append(child_result)
-                if isinstance(child_result, _ConstructionFailure):
-                    child_results.extend(
+        final_result: list[Any] = []
+        stack = [_ConstructionEvalFrame(expansion)]
+        while stack:
+            frame = stack[-1]
+            if frame.premise_index >= len(frame.expansion.premises):
+                result = frame.expansion.conclude(tuple(frame.child_results))
+                stack.pop()
+                if frame.finish is not None:
+                    frame.finish(result)
+                if not stack:
+                    final_result.append(result)
+                    break
+                parent = stack[-1]
+                parent.child_results.append(result)
+                if isinstance(result, _ConstructionFailure):
+                    parent.child_results.extend(
                         _CONSTRUCTION_FAILURE
-                        for remaining in expansion.premises[index + 1 :]
+                        for remaining in parent.expansion.premises[
+                            parent.premise_index:
+                        ]
                         if isinstance(remaining, _ChildJudgmentPremise)
                     )
-                    return expansion.conclude(tuple(child_results))
-            else:  # pragma: no cover - _Premise 是封闭的内部联合类型
-                raise TypeError(
-                    f"Unsupported premise in {expansion.rule}: "
-                    f"{type(premise).__name__}"
+                    parent.premise_index = len(parent.expansion.premises)
+                continue
+
+            premise = frame.expansion.premises[frame.premise_index]
+            frame.premise_index += 1
+            if isinstance(premise, _FormulaPremise):
+                if self._decide_proof(premise.request).verdict is Verdict.FALSE:
+                    result = _CONSTRUCTION_FAILURE
+                    stack.pop()
+                    if frame.finish is not None:
+                        frame.finish(result)
+                    if not stack:
+                        final_result.append(result)
+                        break
+                    parent = stack[-1]
+                    parent.child_results.append(result)
+                    parent.child_results.extend(
+                        _CONSTRUCTION_FAILURE
+                        for remaining in parent.expansion.premises[
+                            parent.premise_index:
+                        ]
+                        if isinstance(remaining, _ChildJudgmentPremise)
+                    )
+                    parent.premise_index = len(parent.expansion.premises)
+                continue
+            if isinstance(premise, _ChildJudgmentPremise):
+                child_expansion, finish = self._prepare_child_judgment(
+                    premise.judgment
                 )
-        return expansion.conclude(tuple(child_results))
+                stack.append(
+                    _ConstructionEvalFrame(child_expansion, finish=finish)
+                )
+                continue
+            raise TypeError(
+                f"Unsupported premise in {frame.expansion.rule}: "
+                f"{type(premise).__name__}"
+            )
+        return final_result[0]
+
+    def _prepare_child_judgment(
+        self,
+        judgment: _ChildJudgment,
+    ) -> tuple[_RuleExpansion, Callable[[Any], None]]:
+        """把子 judgment 准备成显式工作栈帧，并保留原审计步骤语义。"""
+
+        if isinstance(judgment, _ConfigurationJudgment):
+            context = judgment.context
+            step = self._start_step(
+                "T-sigma",
+                context.location,
+                f"检查初始状态 sigma = {dict(judgment.state)!r}",
+                context=context,
+            )
+            expansion = self.rule_t_sigma(judgment)
+            def finish(result: Any) -> None:
+                """完成 T-sigma 审计步骤。"""
+
+                text = (
+                    "推导失败，未构造正式配置类型"
+                    if isinstance(result, _ConstructionFailure)
+                    else "状态前提已当场判定；候选类型 = "
+                    + format_configuration_type(result)
+                )
+                self._finish_step(step, text, self._premise_summary(expansion))
+            return expansion, finish
+
+        if isinstance(judgment, _SystemJudgment):
+            system = judgment.system
+            context = judgment.context
+            if isinstance(system, Process):
+                return self._prepare_child_judgment(
+                    _ProcessJudgment(
+                        tuple(self._as_nodes(system)), context, EmptyType()
+                    )
+                )
+            if isinstance(system, Parallel):
+                step = self._start_step(
+                    "T-||", context.location,
+                    "推导二元系统组合 S || S'", context=context,
+                )
+                expansion = self.rule_t_parallel_system(judgment)
+                def finish(result: Any) -> None:
+                    """完成并行系统审计步骤。"""
+
+                    text = (
+                        "推导失败，至少一个并行系统分支没有正式配置类型"
+                        if isinstance(result, _ConstructionFailure)
+                        else "并行配置类型 = " + format_configuration_type(result)
+                    )
+                    self._finish_step(step, text, self._premise_summary(expansion))
+                return expansion, finish
+            self._diagnose(
+                Verdict.FALSE,
+                "Configuration process is not an HCSP Process or Parallel system: "
+                f"{system.__class__.__name__}", "structural", context.location,
+            )
+            return _RuleExpansion(
+                "structural", (), lambda _children: _CONSTRUCTION_FAILURE
+            ), lambda _result: None
+
+        if isinstance(judgment, _ProcessJudgment):
+            return self._prepare_process_judgment(judgment)
+        if isinstance(judgment, _EventJudgment):
+            node = judgment.reaction
+            context = judgment.context
+            step = self._start_step(
+                "T-&", context.location,
+                "empty event reaction" if isinstance(node, EmptyEvent)
+                else f"事件分支表（{len(node.branches)} 个通信分支）",
+                context=context,
+            )
+            expansion = self.rule_t_external_choice(judgment)
+            def finish(result: Any) -> None:
+                """完成事件反应审计步骤。"""
+
+                if isinstance(result, _ConstructionFailure):
+                    text = "推导失败，事件反应没有正式 angelic type"
+                elif isinstance(node, EmptyEvent):
+                    text = "事件选择递归结束 = " + format_angelic_type(result)
+                else:
+                    text = "事件选择类型 = " + format_angelic_type(result)
+                self._finish_step(step, text, self._premise_summary(expansion))
+            return expansion, finish
+        raise TypeError(f"Unsupported child judgment: {type(judgment).__name__}")
+
+    def _prepare_process_judgment(
+        self,
+        judgment: _ProcessJudgment,
+    ) -> tuple[_RuleExpansion, Callable[[Any], None]]:
+        """准备普通过程规则；ODE 双候选仍交给原有隔离选择逻辑。"""
+
+        nodes = judgment.nodes
+        context = judgment.context
+        if not nodes:
+            step = self._start_step(
+                "T-End", context.location,
+                "顺序后继为空，使用终止类型 0", context=context,
+            )
+            expansion = self.rule_t_end(judgment)
+            def finish(result: Any) -> None:
+                """完成隐含终端行为的审计步骤。"""
+
+                self._finish_step(
+                    step, "候选类型 = " + format_process_type(result),
+                    self._premise_summary(expansion),
+                )
+            return expansion, finish
+
+        head = nodes[0]
+        if isinstance(head, ODE) and self._needs_ode_skip_rule_selection(judgment):
+            # 双候选内部会建立独立证据检查点；它不是由用户顺序深度造成的递归。
+            result = self._solve_ode_skip_rule_candidates(judgment)
+            return _RuleExpansion("T-ODE-select", (), lambda _children: result), lambda _r: None
+
+        terminal_skip = isinstance(head, Skip) and len(nodes) == 1
+        rule = "T-End" if terminal_skip else self._rule_name(head)
+        step = self._start_step(
+            rule, context.location, self._describe_process_node(head), context=context,
+        )
+        if isinstance(head, Skip):
+            expansion = self.rule_t_end(judgment) if terminal_skip else self.rule_t_skip(judgment)
+        elif isinstance(head, Assert): expansion = self.rule_t_assert(judgment)
+        elif isinstance(head, Assign): expansion = self.rule_t_assign(judgment)
+        elif isinstance(head, InputChannel): expansion = self.rule_t_in(judgment)
+        elif isinstance(head, OutputChannel): expansion = self.rule_t_out(judgment)
+        elif isinstance(head, If): expansion = self.rule_t_if(judgment)
+        elif isinstance(head, InternalChoice): expansion = self.rule_t_internal_choice(judgment)
+        elif isinstance(head, ODE): expansion = self.rule_t_ode(judgment)
+        elif isinstance(head, Mu): expansion = self.rule_t_mu(judgment)
+        elif isinstance(head, Var): expansion = self.rule_t_x(judgment)
+        else:
+            self._diagnose(
+                Verdict.FALSE,
+                "Process is not a node from process_ast: "
+                f"{head.__class__.__name__}", "structural", context.location,
+            )
+            expansion = _RuleExpansion(
+                "structural", (), lambda _children: _CONSTRUCTION_FAILURE
+            )
+        def finish(result: Any) -> None:
+            """完成一个普通过程规则的审计步骤。"""
+
+            text = (
+                "推导失败，未构造正式行为类型"
+                if isinstance(result, _ConstructionFailure)
+                else "候选类型 = " + format_process_type(result)
+            )
+            self._finish_step(
+                step, text,
+                self._premise_summary(expansion) + " " + self._rule_explanation(rule),
+            )
+        return expansion, finish
 
     def _solve_child_judgment(self, judgment: _ChildJudgment) -> Any:
         """按 judgment 类别分派；这是推导树递归求解的唯一入口。"""
@@ -3566,11 +3768,18 @@ class Table2RuleEngine:
         )
 
     def _as_nodes(self, process: Process) -> list[Process]:
-        """递归展开论文二元 ``Sequence``，保持从左到右的执行次序。"""
+        """迭代展开论文二元 ``Sequence``，保持从左到右的执行次序。"""
 
-        if isinstance(process, SequenceHP):
-            return self._as_nodes(process.first) + self._as_nodes(process.second)
-        return [process]
+        nodes: list[Process] = []
+        pending: list[Process] = [process]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, SequenceHP):
+                pending.append(current.second)
+                pending.append(current.first)
+            else:
+                nodes.append(current)
+        return nodes
 
     @staticmethod
     def _is_true(formula: Any) -> bool:
@@ -3632,29 +3841,24 @@ class Table2RuleEngine:
         return ()
 
     def _contains_type_var(self, value: ProcessType, name: str) -> bool:
-        """递归判断行为类型中是否含指定自由类型变量。"""
+        """用显式工作栈判断行为类型中是否含指定自由类型变量。"""
 
-        if isinstance(value, TypeVar):
-            return value.name == name
-        if isinstance(value, (InputType, OutputType)):
-            return self._contains_type_var(value.continuation, name)
-        if isinstance(value, (ExternalChoiceType, InternalChoiceType)):
-            return any(
-                self._contains_type_var(branch, name)
-                for branch in value.branches
-            )
-        if isinstance(value, FiniteDelayType):
-            return self._contains_type_var(
-                value.interrupts,
-                name,
-            ) or self._contains_type_var(value.continuation, name)
-        if isinstance(value, InfiniteDelayType):
-            return self._contains_type_var(value.interrupts, name)
-        if isinstance(value, MuType):
-            return value.variable != name and self._contains_type_var(
-                value.body,
-                name,
-            )
+        pending: list[ProcessType | AngelicType] = [value]
+        while pending:
+            current = pending.pop()
+            if isinstance(current, TypeVar):
+                if current.name == name:
+                    return True
+            elif isinstance(current, (InputType, OutputType)):
+                pending.append(current.continuation)
+            elif isinstance(current, (ExternalChoiceType, InternalChoiceType)):
+                pending.extend(current.branches)
+            elif isinstance(current, FiniteDelayType):
+                pending.extend((current.interrupts, current.continuation))
+            elif isinstance(current, InfiniteDelayType):
+                pending.append(current.interrupts)
+            elif isinstance(current, MuType) and current.variable != name:
+                pending.append(current.body)
         return False
 
     def _guarded(
@@ -3670,29 +3874,29 @@ class Table2RuleEngine:
         因为该名字已被新的绑定遮蔽。正常项目 AST 已在 ``Mu`` 构造时通过
         Assumption 2.2；此处防止后续类型转换代码破坏该性质。
         """
-        if isinstance(value, TypeVar):
-            return value.name != name or under_communication
-        if isinstance(value, (InputType, OutputType)):
-            return self._guarded(value.continuation, name, True)
-        if isinstance(value, (ExternalChoiceType, InternalChoiceType)):
-            return all(
-                self._guarded(branch, name, under_communication)
-                for branch in value.branches
-            )
-        if isinstance(value, FiniteDelayType):
-            return self._guarded(
-                value.interrupts,
-                name,
-                under_communication,
-            ) and self._guarded(value.continuation, name, under_communication)
-        if isinstance(value, InfiniteDelayType):
-            return self._guarded(value.interrupts, name, under_communication)
-        if isinstance(value, MuType):
-            return value.variable == name or self._guarded(
-                value.body,
-                name,
-                under_communication,
-            )
+        pending: list[tuple[ProcessType | AngelicType, bool]] = [
+            (value, under_communication)
+        ]
+        while pending:
+            current, protected = pending.pop()
+            if isinstance(current, TypeVar):
+                if current.name == name and not protected:
+                    return False
+            elif isinstance(current, (InputType, OutputType)):
+                pending.append((current.continuation, True))
+            elif isinstance(current, (ExternalChoiceType, InternalChoiceType)):
+                pending.extend((branch, protected) for branch in current.branches)
+            elif isinstance(current, FiniteDelayType):
+                pending.extend(
+                    (
+                        (current.interrupts, protected),
+                        (current.continuation, protected),
+                    )
+                )
+            elif isinstance(current, InfiniteDelayType):
+                pending.append((current.interrupts, protected))
+            elif isinstance(current, MuType) and current.variable != name:
+                pending.append((current.body, protected))
         return True
 
     def _process_vars(self, process: Any) -> set[str]:

@@ -62,52 +62,226 @@ class TypeParser:
     def _parse_configuration_type(self) -> ConfigurationType:
         """解析单进程类型或多分量 ``parallel`` configuration type。"""
 
-        if self.current.kind != "parallel":
-            return self._parse_process_type()
-        start = self._expect("parallel")
-        self._expect("{")
-        components = [self._parse_configuration_type()]
-        self._expect(",")
-        components.append(self._parse_configuration_type())
-        while self._match(",") is not None:
-            components.append(self._parse_configuration_type())
-        self._expect("}")
-        return self._construct(start, lambda: ParallelType(components))
+        values: list[ConfigurationType] = []
+        pending: list[tuple[object, ...]] = [("configuration",)]
+        while pending:
+            task = pending.pop()
+            if task[0] == "configuration":
+                if self.current.kind != "parallel":
+                    values.append(self._parse_process_type())
+                    continue
+                token = self._expect("parallel")
+                self._expect("{")
+                pending.append(("parallel-more", token, len(values)))
+                pending.append(("configuration",))
+                continue
+
+            _, token, start = task
+            component_count = len(values) - start
+            if component_count == 1:
+                self._expect(",")
+                pending.append(("parallel-more", token, start))
+                pending.append(("configuration",))
+                continue
+            if self._match(",") is not None:
+                pending.append(("parallel-more", token, start))
+                pending.append(("configuration",))
+                continue
+            self._expect("}")
+            components = tuple(values[start:])
+            del values[start:]
+            values.append(
+                self._construct(token, lambda: ParallelType(components))
+            )
+
+        if len(values) != 1:
+            raise RuntimeError("configuration Type parsing produced invalid results")
+        return values[0]
 
     def _parse_process_type(self) -> ProcessType:
-        """解析论文过程类型范畴 ``T`` 的一个具体产生式。"""
+        """用显式工作栈解析过程 Type，深 continuation 不占用调用栈。"""
 
-        token = self.current
-        if self._match("empty") is not None:
-            return EmptyType()
-        if self._match("bottom") is not None:
-            return BottomType()
-        if self.current.kind == "(":
-            return self._parse_parenthesized_process_type()
-        if self.current.kind == "internal":
-            return self._parse_internal_choice()
-        if self.current.kind == "delay":
-            return self._parse_finite_delay()
-        if self.current.kind == "forever":
-            return self._parse_infinite_delay()
-        if self.current.kind == "mu":
-            return self._parse_mu()
-        if self.current.kind == "IDENT":
-            self.index += 1
-            return self._construct(token, lambda: TypeVariable(token.text))
-        raise self._syntax_error(
-            "expected a process type",
-            expected=(
-                "empty",
-                "bottom",
-                "(",
-                "internal",
-                "delay",
-                "forever",
-                "mu",
-                "type variable",
-            ),
-        )
+        values: list[ProcessType | AngelicType] = []
+        pending: list[tuple[object, ...]] = [("process",)]
+        while pending:
+            task = pending.pop()
+            tag = task[0]
+            if tag == "expect":
+                self._expect(task[1])
+                continue
+            if tag == "finish-unary":
+                _, kind, start, token, payload = task
+                children = values[start:]
+                del values[start:]
+                if kind == "mu":
+                    built = self._construct(
+                        token, lambda: MuType(payload, children[0])
+                    )
+                elif kind == "infinite":
+                    built = self._construct(
+                        token, lambda: InfiniteDelayType(children[0])
+                    )
+                elif kind == "communication":
+                    channel, direction = payload
+                    constructor = InputType if direction == "?" else OutputType
+                    built = self._construct(
+                        token, lambda: constructor(channel, children[0])
+                    )
+                else:
+                    raise RuntimeError(f"unsupported unary Type task: {kind}")
+                values.append(built)
+                continue
+            if tag == "finish-finite":
+                _, start, token, duration, has_interrupt = task
+                children = values[start:]
+                del values[start:]
+                interrupts = children[0] if has_interrupt else NoInterruptType()
+                continuation = children[1] if has_interrupt else children[0]
+                values.append(
+                    self._construct(
+                        token,
+                        lambda: FiniteDelayType(
+                            duration, interrupts, continuation
+                        ),
+                    )
+                )
+                continue
+            if tag == "internal-more":
+                _, start, token = task
+                if self._match(",") is not None:
+                    pending.append(task)
+                    pending.append(("expect", ")"))
+                    pending.append(("process",))
+                    pending.append(("expect", "("))
+                    continue
+                self._expect("}")
+                branches = tuple(values[start:])
+                del values[start:]
+                if len(branches) < 2:
+                    raise self._validation_error(
+                        "internal choice requires at least two branches", token
+                    )
+                values.append(
+                    self._construct(token, lambda: InternalChoiceType(branches))
+                )
+                continue
+            if tag == "angelic-more":
+                _, start, token = task
+                if self._match(",") is not None:
+                    if self.current.kind == "}":
+                        raise self._syntax_error(
+                            "trailing comma is not allowed in angelic branches",
+                            expected=("communication branch",),
+                        )
+                    pending.append(task)
+                    pending.append(("communication",))
+                    continue
+                self._expect("}")
+                branches = tuple(values[start:])
+                del values[start:]
+                values.append(
+                    self._construct(token, lambda: make_external_choice(branches))
+                )
+                continue
+            if tag == "angelic":
+                start_token = self._expect("angelic")
+                self._expect("{")
+                start = len(values)
+                if self._match("}") is not None:
+                    values.append(NoInterruptType())
+                else:
+                    pending.append(("angelic-more", start, start_token))
+                    pending.append(("communication",))
+                continue
+            if tag == "communication":
+                channel = self._expect("IDENT")
+                direction = self.current
+                if direction.kind not in {"?", "!"}:
+                    raise self._syntax_error(
+                        "expected '?' or '!' after an angelic channel name",
+                        expected=("?", "!"),
+                    )
+                self.index += 1
+                self._expect("->")
+                start = len(values)
+                pending.append(
+                    (
+                        "finish-unary",
+                        "communication",
+                        start,
+                        channel,
+                        (channel.text, direction.kind),
+                    )
+                )
+                pending.append(("process",))
+                continue
+
+            token = self.current
+            if self._match("empty") is not None:
+                values.append(EmptyType())
+            elif self._match("bottom") is not None:
+                values.append(BottomType())
+            elif self._match("(") is not None:
+                pending.append(("expect", ")"))
+                pending.append(("process",))
+            elif self._match("internal") is not None:
+                self._expect("{")
+                start = len(values)
+                if self.current.kind != "(":
+                    raise self._syntax_error(
+                        "each internal-choice branch must be parenthesized",
+                        expected=("(",),
+                    )
+                pending.append(("internal-more", start, token))
+                pending.append(("expect", ")"))
+                pending.append(("process",))
+                pending.append(("expect", "("))
+            elif self._match("delay") is not None:
+                self._expect("(")
+                duration = self._parse_duration()
+                self._expect(")")
+                start = len(values)
+                has_interrupt = self._match("interrupt") is not None
+                pending.append(
+                    ("finish-finite", start, token, duration, has_interrupt)
+                )
+                pending.append(("process",))
+                pending.append(("expect", "then"))
+                if has_interrupt:
+                    pending.append(("angelic",))
+            elif self._match("forever") is not None:
+                start = len(values)
+                if self._match("interrupt") is None:
+                    values.append(InfiniteDelayType(NoInterruptType()))
+                else:
+                    pending.append(
+                        ("finish-unary", "infinite", start, token, None)
+                    )
+                    pending.append(("angelic",))
+            elif self._match("mu") is not None:
+                variable = self._expect("IDENT")
+                self._expect(".")
+                start = len(values)
+                pending.append(
+                    ("finish-unary", "mu", start, token, variable.text)
+                )
+                pending.append(("process",))
+            elif self.current.kind == "IDENT":
+                self.index += 1
+                values.append(
+                    self._construct(token, lambda: TypeVariable(token.text))
+                )
+            else:
+                raise self._syntax_error(
+                    "expected a process type",
+                    expected=(
+                        "empty", "bottom", "(", "internal", "delay",
+                        "forever", "mu", "type variable",
+                    ),
+                )
+        if len(values) != 1 or not isinstance(values[0], ProcessType):
+            raise RuntimeError("Type parser produced an invalid process result")
+        return values[0]
 
     def _parse_internal_choice(self) -> ProcessType:
         """解析至少两个带圆括号分块的多元内部选择。"""

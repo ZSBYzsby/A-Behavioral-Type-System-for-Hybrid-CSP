@@ -1,7 +1,11 @@
-r"""通过新版 TypeConstructor 接口构造改良后的 Section 5 Vehicle/Controller 案例。
+r"""构造改良版 Section 5 Type，并继续生成其 Table 3 状态迁移图。
 
 本文件生成一份符合项目用户输入语法的完整 source，并通过
 ``construct_hcsp_type(source) -> TypeAST`` 一次完成解析、类型构造和必要公式证明。
+只有 Constructor 正常返回可信 Type AST 后，脚本才调用
+``build_type_transition_graph(type_ast) -> TypeTransitionGraph``：第三接口先规范化
+Type、建立等递归循环项图，再穷尽项目 Table 3 的全部可达迁移。Process AST、
+规范 Type AST 和循环项图仍是内部对象，不需要由本脚本手工构造。
 
 ``end``、``vmax``、``amin``、``amax`` 是 source 中声明的共享只读 Real
 参数，不属于任一并行分量的状态 Gamma，也不会被替换成具体数值。统一约束为：
@@ -17,9 +21,10 @@ r"""通过新版 TypeConstructor 接口构造改良后的 Section 5 Vehicle/Cont
 
 本例使用加强后的 ``phi_a``：除了周期终点的 ``phi_p``、``phi_v``，还检查区间
 内部可能出现的速度转向点。Vehicle 收到新加速度后检查该性质，不安全时回退到
-共享参数 ``amin``。默认 ``result`` 模式只显示最终摘要；把 ``OUTPUT_MODE`` 改为
-``"full"`` 后，接口会显示实际 source、环境摘要、FOL/dL 公式、证明结果、规则
-轨迹和最终 Type AST 的可信性；内部 Process AST 不会暴露。
+共享参数 ``amin``。Constructor 默认 ``result`` 模式只显示最终 Type 摘要；改成
+``"full"`` 可查看 source、环境、FOL/dL 公式、证明结果和规则轨迹。状态图默认也
+使用 ``result``，显示图规模和初始规范 Type；把 ``GRAPH_OUTPUT_MODE`` 改为
+``"full"`` 可查看全部状态、迁移标签和 Table 3 推导证据。
 """
 
 from __future__ import annotations
@@ -41,7 +46,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from hcsp_typechecker import (
     HCSPInputError,
     HCSPTypeConstructionError,
+    HCSPTypeTransitionGraphError,
     HCSPUntrustedTypeConstructionError,
+    build_type_transition_graph,
     construct_hcsp_type,
 )
 
@@ -58,6 +65,9 @@ KEYMAERAX_HOME_DIRECTORY = (
 
 # 设为 "full" 可查看每条公式、证明器说明和完整规则轨迹。
 OUTPUT_MODE = "result"
+
+# 设为 "full" 可查看所有状态、边标签以及合并后的 Table 3 推导证据。
+GRAPH_OUTPUT_MODE = "result"
 
 
 def _number_text(value: Fraction) -> str:
@@ -265,7 +275,7 @@ def parse_period(argv: Sequence[str] | None = None) -> Fraction:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """用单一稳定公共接口完成 source 到 Type AST 的构造。"""
+    """先构造可信 Type AST，再用第三个稳定接口生成完整状态迁移图。"""
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -280,7 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     os.environ["KEYMAERAX_ARTIFACTS"] = str(ARTIFACTS_DIRECTORY)
 
     try:
-        construct_hcsp_type(
+        type_ast = construct_hcsp_type(
             source,
             source_name=(
                 f"case_study/new_case.py --d {_number_text(period)}"
@@ -308,7 +318,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"位置 {error.location or '-'}。"
         )
         return 1
-    print("案例通过：Type 构造完成，全部证明义务均已验证。")
+    print("案例第一阶段通过：Type 构造完成，全部证明义务均已验证。")
+
+    try:
+        graph = build_type_transition_graph(
+            type_ast,
+            output=GRAPH_OUTPUT_MODE,
+        )
+    except HCSPTypeTransitionGraphError as error:
+        print(
+            "案例第二阶段失败：无法构造完整状态迁移图 "
+            f"[{error.kind.value}/{error.phase}]。"
+        )
+        return 1
+
+    print(
+        "案例第二阶段通过：已从可信 Type AST 构造完整状态迁移图；"
+        f"状态 {len(graph.states)} 个，转移 {len(graph.transitions)} 条。"
+    )
     return 0
 
 

@@ -268,57 +268,69 @@ def make_normalized_external_choice(
 
 
 def normalized_process_key(value: NormalizedProcessType) -> tuple[Any, ...]:
-    """返回规范过程类型的稳定全序键，供集合规范化和确定性遍历使用。"""
+    """返回规范过程类型的稳定全序键，使用迭代后序遍历。"""
 
-    if isinstance(value, NormalizedEmptyType):
-        return ("00-empty",)
-    if isinstance(value, NormalizedBottomType):
-        return ("01-bottom",)
-    if isinstance(value, NormalizedBoundTypeVar):
-        return ("02-bound", value.index)
-    if isinstance(value, NormalizedInternalChoiceType):
-        return (
-            "03-internal",
-            tuple(normalized_process_key(branch) for branch in value.branches),
-        )
-    if isinstance(value, NormalizedFiniteDelayType):
-        return (
-            "04-finite",
-            value.duration.numerator,
-            value.duration.denominator,
-            normalized_angelic_key(value.interrupts),
-            normalized_process_key(value.continuation),
-        )
-    if isinstance(value, NormalizedInfiniteDelayType):
-        return ("05-infinite", normalized_angelic_key(value.interrupts))
-    if isinstance(value, NormalizedMuType):
-        return ("06-mu", normalized_process_key(value.body))
-    raise TypeError(f"Unsupported normalized process type: {type(value).__name__}")
+    return _normalized_key(value)
 
 
 def normalized_angelic_key(value: NormalizedAngelicType) -> tuple[Any, ...]:
-    """返回规范 angelic type 的稳定全序键。"""
+    """返回规范 angelic type 的稳定全序键，使用迭代后序遍历。"""
 
-    if isinstance(value, NormalizedNoInterruptType):
-        return ("00-none",)
-    if isinstance(value, NormalizedInputType):
-        return (
-            "01-input",
-            value.channel,
-            normalized_process_key(value.continuation),
-        )
-    if isinstance(value, NormalizedOutputType):
-        return (
-            "02-output",
-            value.channel,
-            normalized_process_key(value.continuation),
-        )
-    if isinstance(value, NormalizedExternalChoiceType):
-        return (
-            "03-external",
-            tuple(normalized_angelic_key(branch) for branch in value.branches),
-        )
-    raise TypeError(f"Unsupported normalized angelic type: {type(value).__name__}")
+    return _normalized_key(value)
+
+
+def _normalized_children(
+    value: NormalizedProcessType | NormalizedAngelicType,
+) -> tuple[NormalizedProcessType | NormalizedAngelicType, ...]:
+    """返回稳定键计算所需的直接子节点。"""
+
+    if isinstance(value, (NormalizedInputType, NormalizedOutputType)):
+        return (value.continuation,)
+    if isinstance(value, (NormalizedExternalChoiceType, NormalizedInternalChoiceType)):
+        return value.branches
+    if isinstance(value, NormalizedFiniteDelayType):
+        return (value.interrupts, value.continuation)
+    if isinstance(value, NormalizedInfiniteDelayType):
+        return (value.interrupts,)
+    if isinstance(value, NormalizedMuType):
+        return (value.body,)
+    return ()
+
+
+def _normalized_key(
+    root: NormalizedProcessType | NormalizedAngelicType,
+) -> tuple[Any, ...]:
+    """以显式栈构造深层规范 Type 的不可变结构键。"""
+
+    results: dict[int, tuple[Any, ...]] = {}
+    pending = [(root, False)]
+    while pending:
+        current, exiting = pending.pop()
+        key = id(current)
+        if key in results:
+            continue
+        children = _normalized_children(current)
+        if not exiting and children:
+            pending.append((current, True))
+            pending.extend((child, False) for child in reversed(children))
+            continue
+        child_keys = tuple(results[id(child)] for child in children)
+        if isinstance(current, NormalizedEmptyType): value = ("00-empty",)
+        elif isinstance(current, NormalizedBottomType): value = ("01-bottom",)
+        elif isinstance(current, NormalizedBoundTypeVar): value = ("02-bound", current.index)
+        elif isinstance(current, NormalizedInternalChoiceType): value = ("03-internal", child_keys)
+        elif isinstance(current, NormalizedFiniteDelayType):
+            value = ("04-finite", current.duration.numerator, current.duration.denominator, child_keys[0], child_keys[1])
+        elif isinstance(current, NormalizedInfiniteDelayType): value = ("05-infinite", child_keys[0])
+        elif isinstance(current, NormalizedMuType): value = ("06-mu", child_keys[0])
+        elif isinstance(current, NormalizedNoInterruptType): value = ("00-none",)
+        elif isinstance(current, NormalizedInputType): value = ("01-input", current.channel, child_keys[0])
+        elif isinstance(current, NormalizedOutputType): value = ("02-output", current.channel, child_keys[0])
+        elif isinstance(current, NormalizedExternalChoiceType): value = ("03-external", child_keys)
+        else:
+            raise TypeError(f"Unsupported normalized type: {type(current).__name__}")
+        results[key] = value
+    return results[id(root)]
 
 
 def _target_binder_guarded(
@@ -328,65 +340,53 @@ def _target_binder_guarded(
 ) -> bool:
     """检查目标外层 mu 的引用在所有路径上均先经过一次通信。"""
 
-    if isinstance(value, (NormalizedEmptyType, NormalizedBottomType)):
-        return True
-    if isinstance(value, NormalizedBoundTypeVar):
-        return value.index != nested_depth or under_communication
-    if isinstance(value, NormalizedInternalChoiceType):
-        return all(
-            _target_binder_guarded(branch, nested_depth, under_communication)
-            for branch in value.branches
-        )
-    if isinstance(value, NormalizedFiniteDelayType):
-        return _target_binder_guarded_angelic(
-            value.interrupts,
-            nested_depth,
-            under_communication,
-        ) and _target_binder_guarded(
-            value.continuation,
-            nested_depth,
-            under_communication,
-        )
-    if isinstance(value, NormalizedInfiniteDelayType):
-        return _target_binder_guarded_angelic(
-            value.interrupts,
-            nested_depth,
-            under_communication,
-        )
-    if isinstance(value, NormalizedMuType):
-        return _target_binder_guarded(
-            value.body,
-            nested_depth + 1,
-            under_communication,
-        )
-    raise TypeError(f"Unsupported normalized process type: {type(value).__name__}")
-
-
-def _target_binder_guarded_angelic(
-    value: NormalizedAngelicType,
-    nested_depth: int,
-    under_communication: bool,
-) -> bool:
-    """在 angelic 分支中把通信 continuation 标记为已受保护。"""
-
-    if isinstance(value, NormalizedNoInterruptType):
-        return True
-    if isinstance(value, (NormalizedInputType, NormalizedOutputType)):
-        return _target_binder_guarded(
-            value.continuation,
-            nested_depth,
-            True,
-        )
-    if isinstance(value, NormalizedExternalChoiceType):
-        return all(
-            _target_binder_guarded_angelic(
-                branch,
-                nested_depth,
-                under_communication,
+    pending: list[tuple[object, int, bool, bool]] = [
+        (value, nested_depth, under_communication, False)
+    ]
+    while pending:
+        current, depth, protected, angelic = pending.pop()
+        if not angelic:
+            if isinstance(current, (NormalizedEmptyType, NormalizedBottomType)):
+                continue
+            if isinstance(current, NormalizedBoundTypeVar):
+                if current.index == depth and not protected:
+                    return False
+                continue
+            if isinstance(current, NormalizedInternalChoiceType):
+                pending.extend(
+                    (branch, depth, protected, False)
+                    for branch in current.branches
+                )
+                continue
+            if isinstance(current, NormalizedFiniteDelayType):
+                pending.append((current.continuation, depth, protected, False))
+                pending.append((current.interrupts, depth, protected, True))
+                continue
+            if isinstance(current, NormalizedInfiniteDelayType):
+                pending.append((current.interrupts, depth, protected, True))
+                continue
+            if isinstance(current, NormalizedMuType):
+                pending.append((current.body, depth + 1, protected, False))
+                continue
+            raise TypeError(
+                f"Unsupported normalized process type: {type(current).__name__}"
             )
-            for branch in value.branches
+
+        if isinstance(current, NormalizedNoInterruptType):
+            continue
+        if isinstance(current, (NormalizedInputType, NormalizedOutputType)):
+            pending.append((current.continuation, depth, True, False))
+            continue
+        if isinstance(current, NormalizedExternalChoiceType):
+            pending.extend(
+                (branch, depth, protected, True)
+                for branch in current.branches
+            )
+            continue
+        raise TypeError(
+            f"Unsupported normalized angelic type: {type(current).__name__}"
         )
-    raise TypeError(f"Unsupported normalized angelic type: {type(value).__name__}")
+    return True
 
 
 @dataclass(frozen=True, slots=True, init=False)

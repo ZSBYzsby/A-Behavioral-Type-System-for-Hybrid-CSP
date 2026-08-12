@@ -76,15 +76,22 @@ class ParsedHCSPSource:
         """
 
         def flatten(system: HCSP) -> tuple[Process, ...]:
-            """递归展平顶层二元 Parallel，其他节点必须是 Process。"""
+            """用显式栈展平顶层二元 Parallel，其他节点必须是 Process。"""
 
-            if isinstance(system, Parallel):
-                return flatten(system.left) + flatten(system.right)
-            if not isinstance(system, Process):
-                raise TypeError(
-                    "Parsed process system has a non-Process Parallel leaf: "
-                    f"{type(system).__name__}"
-                )
-            return (system,)
+            components: list[Process] = []
+            pending: list[HCSP] = [system]
+            while pending:
+                current = pending.pop()
+                if isinstance(current, Parallel):
+                    pending.append(current.right)
+                    pending.append(current.left)
+                    continue
+                if not isinstance(current, Process):
+                    raise TypeError(
+                        "Parsed process system has a non-Process Parallel leaf: "
+                        f"{type(current).__name__}"
+                    )
+                components.append(current)
+            return tuple(components)
 
         return flatten(self.process)

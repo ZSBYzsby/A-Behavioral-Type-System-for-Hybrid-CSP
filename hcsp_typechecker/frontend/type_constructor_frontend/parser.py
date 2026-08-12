@@ -428,32 +428,135 @@ class Parser:
         return self.tokens[self.index]
 
     def _parse_statement_block(self) -> Process:
-        """解析非空语句块，并用唯一顺序规范形组合全部语句。"""
+        """用显式任务栈解析非空语句块及任意深度控制语句。"""
 
-        start = self._expect("{")
-        if self.current.kind == "}":
-            raise self._syntax_error(
-                "statement block cannot be empty; use skip for no behavior",
-                expected=("statement",),
-            )
-        statement_tokens = [self.current]
-        statements = [self._parse_statement()]
-        while self._match(";") is not None:
-            if self.current.kind in {";", "}"}:
-                raise self._syntax_error(
-                    "semicolon must be followed by another statement",
-                    expected=("statement",),
+        values: list[Process] = []
+        pending: list[tuple[object, ...]] = [("block",)]
+        while pending:
+            task = pending.pop()
+            tag = task[0]
+            if tag == "expect":
+                self._expect(task[1])
+                continue
+            if tag == "finish-control":
+                _, kind, start, token, payload = task
+                children = tuple(values[start:])
+                del values[start:]
+                if kind == "if":
+                    built = self._construct(
+                        token, lambda: If(payload, children[0], children[1])
+                    )
+                elif kind == "mu":
+                    variable, invariant = payload
+                    built = self._construct(
+                        token,
+                        lambda: Mu(
+                            variable,
+                            children[0],
+                            annotation=RecursionAnnotation(invariant),
+                        ),
+                    )
+                else:
+                    raise RuntimeError(f"unsupported control task: {kind}")
+                values.append(built)
+                continue
+            if tag == "choice-more":
+                _, start, token = task
+                if self._match("or") is not None:
+                    pending.append(task)
+                    pending.append(("block",))
+                    continue
+                branches = tuple(values[start:])
+                del values[start:]
+                values.append(
+                    self._construct(token, lambda: InternalChoice.of(*branches))
                 )
-            statement_tokens.append(self.current)
-            statements.append(self._parse_statement())
-        self._expect("}")
-        if isinstance(statements[-1], ODE):
-            raise self._validation_error(
-                "an ODE must have an explicit sequential successor; append "
-                "'; skip' when it has no actual successor",
-                statement_tokens[-1],
-            )
-        return self._construct(start, lambda: Sequence.of(*statements))
+                continue
+            if tag == "block-more":
+                _, start, block_token, statement_tokens = task
+                if self._match(";") is not None:
+                    if self.current.kind in {";", "}"}:
+                        raise self._syntax_error(
+                            "semicolon must be followed by another statement",
+                            expected=("statement",),
+                        )
+                    statement_tokens.append(self.current)
+                    pending.append(task)
+                    pending.append(("statement",))
+                    continue
+                self._expect("}")
+                statements = tuple(values[start:])
+                del values[start:]
+                if isinstance(statements[-1], ODE):
+                    raise self._validation_error(
+                        "an ODE must have an explicit sequential successor; append "
+                        "'; skip' when it has no actual successor",
+                        statement_tokens[-1],
+                    )
+                values.append(
+                    self._construct(
+                        block_token, lambda: Sequence.of(*statements)
+                    )
+                )
+                continue
+            if tag == "block":
+                start_token = self._expect("{")
+                if self.current.kind == "}":
+                    raise self._syntax_error(
+                        "statement block cannot be empty; use skip for no behavior",
+                        expected=("statement",),
+                    )
+                start = len(values)
+                statement_tokens = [self.current]
+                pending.append(
+                    ("block-more", start, start_token, statement_tokens)
+                )
+                pending.append(("statement",))
+                continue
+
+            kind = self.current.kind
+            if kind == "if":
+                start_token = self._expect("if")
+                self._expect("(")
+                condition = self._parse_expression()
+                self._expect(")")
+                start = len(values)
+                pending.append(
+                    ("finish-control", "if", start, start_token, condition)
+                )
+                pending.append(("block",))
+                pending.append(("expect", "else"))
+                pending.append(("block",))
+            elif kind == "choose":
+                start_token = self._expect("choose")
+                start = len(values)
+                pending.append(("choice-more", start, start_token))
+                pending.append(("block",))
+                pending.append(("expect", "or"))
+                pending.append(("block",))
+            elif kind == "mu":
+                start_token = self._expect("mu")
+                variable = self._expect("IDENT")
+                self._expect("invariant")
+                self._expect("(")
+                invariant = self._parse_expression()
+                self._expect(")")
+                start = len(values)
+                pending.append(
+                    (
+                        "finish-control",
+                        "mu",
+                        start,
+                        start_token,
+                        (variable.text, invariant),
+                    )
+                )
+                pending.append(("block",))
+            else:
+                values.append(self._parse_statement())
+        if len(values) != 1:
+            raise RuntimeError("statement-block parser produced an invalid result")
+        return values[0]
 
     def _parse_statement(self) -> Process:
         """按首 token 分派并解析一条完整 Process 语句。"""

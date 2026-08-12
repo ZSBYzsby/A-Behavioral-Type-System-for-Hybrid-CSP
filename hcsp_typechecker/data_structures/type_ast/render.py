@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fractions import Fraction
+from typing import Any
 
 from .ast import (
     AngelicType,
@@ -44,17 +45,7 @@ def _render_configuration_type(
 ) -> str:
     """在指定缩进层级渲染 configuration type。"""
 
-    if isinstance(value, ParallelType):
-        components = [
-            _render_configuration_type(component, level + 1)
-            for component in value.components
-        ]
-        return _render_block("parallel", components, level)
-    if isinstance(value, ProcessType):
-        return _render_process_type(value, level)
-    raise TypeError(
-        f"unsupported configuration type: {type(value).__name__}"
-    )
+    return _render_iterative(value, level, "configuration")
 
 
 def format_process_type(value: ProcessType) -> str:
@@ -66,43 +57,7 @@ def format_process_type(value: ProcessType) -> str:
 def _render_process_type(value: ProcessType, level: int) -> str:
     """在指定缩进层级渲染过程类型 ``T``。"""
 
-    if isinstance(value, EmptyType):
-        return _line(level, "empty")
-    if isinstance(value, BottomType):
-        return _line(level, "bottom")
-    if isinstance(value, InternalChoiceType):
-        branches = [
-            _render_parenthesized_process(branch, level + 1)
-            for branch in value.branches
-        ]
-        return _render_block("internal", branches, level)
-    if isinstance(value, FiniteDelayType):
-        prefix = f"delay({_format_duration(value.duration)})"
-        if isinstance(value.interrupts, NoInterruptType):
-            rendered = _render_process_type(value.continuation, level)
-            return _prepend_to_first_line(prefix + " then ", rendered)
-        interrupt = _render_angelic_type(value.interrupts, level)
-        rendered = _prepend_to_first_line(prefix + " interrupt ", interrupt)
-        return _append_document(
-            rendered,
-            " then ",
-            _render_process_type(value.continuation, level),
-        )
-    if isinstance(value, InfiniteDelayType):
-        if isinstance(value.interrupts, NoInterruptType):
-            return _line(level, "forever")
-        return _prepend_to_first_line(
-            "forever interrupt ",
-            _render_angelic_type(value.interrupts, level),
-        )
-    if isinstance(value, MuType):
-        return _prepend_to_first_line(
-            f"mu {value.variable}. ",
-            _render_process_type(value.body, level),
-        )
-    if isinstance(value, TypeVar):
-        return _line(level, value.name)
-    raise TypeError(f"unsupported process type: {type(value).__name__}")
+    return _render_iterative(value, level, "process")
 
 
 def format_angelic_type(value: AngelicType) -> str:
@@ -114,31 +69,18 @@ def format_angelic_type(value: AngelicType) -> str:
 def _render_angelic_type(value: AngelicType, level: int) -> str:
     """在指定缩进层级渲染中断类型 ``A``。"""
 
-    if isinstance(value, NoInterruptType):
-        return _line(level, "angelic {}")
-    if isinstance(value, (InputType, OutputType)):
-        branch_values = (value,)
-    elif isinstance(value, ExternalChoiceType):
-        branch_values = value.branches
-    else:
-        raise TypeError(f"unsupported angelic type: {type(value).__name__}")
-
-    branches: list[str] = []
-    for branch in branch_values:
-        marker = "?" if isinstance(branch, InputType) else "!"
-        branches.append(
-            _prepend_to_first_line(
-                f"{branch.channel}{marker} -> ",
-                _render_process_type(branch.continuation, level + 1),
-            )
-        )
-    return _render_block("angelic", branches, level)
+    return _render_iterative(value, level, "angelic")
 
 
 def _render_parenthesized_process(value: ProcessType, level: int) -> str:
     """给一个 internal 分支添加保持规则分块所需的圆括号。"""
 
-    rendered = _render_process_type(value, level)
+    return _render_iterative(value, level, "parenthesized")
+
+
+def _parenthesize_rendered(rendered: str, level: int) -> str:
+    """给已经渲染的 internal 分支补上保持分组所需的圆括号。"""
+
     lines = rendered.splitlines()
     indentation = _indent(level)
     first = lines[0][len(indentation) :]
@@ -151,6 +93,154 @@ def _render_parenthesized_process(value: ProcessType, level: int) -> str:
             indentation + ")",
         )
     )
+
+
+def _render_iterative(value: Any, level: int, mode: str) -> str:
+    """用显式后序工作栈渲染 Type，避免深 continuation 消耗调用栈。"""
+
+    results: list[str] = []
+    pending: list[tuple[Any, ...]] = [("visit", value, level, mode)]
+    while pending:
+        task = pending.pop()
+        if task[0] == "finish":
+            _, kind, current, current_level, start = task
+            if kind == "communication":
+                if not results:
+                    raise RuntimeError("communication rendering lost its continuation")
+                children = [results.pop()]
+            else:
+                children = results[start:]
+                del results[start:]
+            if kind == "parallel":
+                rendered = _render_block("parallel", children, current_level)
+            elif kind == "internal":
+                rendered = _render_block("internal", children, current_level)
+            elif kind == "finite-simple":
+                prefix = f"delay({_format_duration(current.duration)})"
+                rendered = _prepend_to_first_line(prefix + " then ", children[0])
+            elif kind == "finite-interrupt":
+                prefix = f"delay({_format_duration(current.duration)})"
+                rendered = _append_document(
+                    _prepend_to_first_line(prefix + " interrupt ", children[0]),
+                    " then ",
+                    children[1],
+                )
+            elif kind == "infinite":
+                rendered = _prepend_to_first_line("forever interrupt ", children[0])
+            elif kind == "mu":
+                rendered = _prepend_to_first_line(
+                    f"mu {current.variable}. ", children[0]
+                )
+            elif kind == "angelic":
+                rendered = _render_block("angelic", children, current_level)
+            elif kind == "communication":
+                marker = "?" if isinstance(current, InputType) else "!"
+                rendered = _prepend_to_first_line(
+                    f"{current.channel}{marker} -> ", children[0]
+                )
+            elif kind == "parenthesized":
+                rendered = _parenthesize_rendered(children[0], current_level)
+            else:
+                raise RuntimeError(f"unsupported render task: {kind}")
+            results.append(rendered)
+            continue
+
+        _, current, current_level, current_mode = task
+        if current_mode == "configuration":
+            if isinstance(current, ParallelType):
+                start = len(results)
+                pending.append(("finish", "parallel", current, current_level, start))
+                for component in reversed(current.components):
+                    pending.append(
+                        ("visit", component, current_level + 1, "configuration")
+                    )
+            elif isinstance(current, ProcessType):
+                pending.append(("visit", current, current_level, "process"))
+            else:
+                raise TypeError(
+                    f"unsupported configuration type: {type(current).__name__}"
+                )
+            continue
+        if current_mode == "parenthesized":
+            start = len(results)
+            pending.append(
+                ("finish", "parenthesized", current, current_level, start)
+            )
+            pending.append(("visit", current, current_level, "process"))
+            continue
+        if current_mode == "angelic":
+            if isinstance(current, NoInterruptType):
+                results.append(_line(current_level, "angelic {}"))
+                continue
+            if isinstance(current, (InputType, OutputType)):
+                branches = (current,)
+            elif isinstance(current, ExternalChoiceType):
+                branches = current.branches
+            else:
+                raise TypeError(
+                    f"unsupported angelic type: {type(current).__name__}"
+                )
+            start = len(results)
+            pending.append(("finish", "angelic", current, current_level, start))
+            for branch in reversed(branches):
+                pending.append(
+                    ("finish", "communication", branch, current_level + 1, -1)
+                )
+                pending.append(
+                    ("visit", branch.continuation, current_level + 1, "process")
+                )
+            continue
+
+        if isinstance(current, EmptyType):
+            results.append(_line(current_level, "empty"))
+        elif isinstance(current, BottomType):
+            results.append(_line(current_level, "bottom"))
+        elif isinstance(current, InternalChoiceType):
+            start = len(results)
+            pending.append(("finish", "internal", current, current_level, start))
+            for branch in reversed(current.branches):
+                pending.append(
+                    ("visit", branch, current_level + 1, "parenthesized")
+                )
+        elif isinstance(current, FiniteDelayType):
+            start = len(results)
+            if isinstance(current.interrupts, NoInterruptType):
+                pending.append(
+                    ("finish", "finite-simple", current, current_level, start)
+                )
+                pending.append(
+                    ("visit", current.continuation, current_level, "process")
+                )
+            else:
+                pending.append(
+                    ("finish", "finite-interrupt", current, current_level, start)
+                )
+                pending.append(
+                    ("visit", current.continuation, current_level, "process")
+                )
+                pending.append(
+                    ("visit", current.interrupts, current_level, "angelic")
+                )
+        elif isinstance(current, InfiniteDelayType):
+            if isinstance(current.interrupts, NoInterruptType):
+                results.append(_line(current_level, "forever"))
+            else:
+                start = len(results)
+                pending.append(("finish", "infinite", current, current_level, start))
+                pending.append(
+                    ("visit", current.interrupts, current_level, "angelic")
+                )
+        elif isinstance(current, MuType):
+            start = len(results)
+            pending.append(("finish", "mu", current, current_level, start))
+            pending.append(("visit", current.body, current_level, "process"))
+        elif isinstance(current, TypeVar):
+            results.append(_line(current_level, current.name))
+        else:
+            raise TypeError(f"unsupported process type: {type(current).__name__}")
+    if len(results) != 1:
+        raise RuntimeError("Type rendering produced an invalid result")
+    return results[0]
 
 
 def _render_block(name: str, entries: list[str], level: int) -> str:

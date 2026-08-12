@@ -56,68 +56,127 @@ def _render_configuration(
 def _render_process(value: NormalizedProcessType, level: int) -> str:
     """渲染一个规范过程类型，并显式显示扁平选择和 De Bruijn 位置。"""
 
-    if isinstance(value, NormalizedEmptyType):
-        return _line(level, "empty")
-    if isinstance(value, NormalizedBottomType):
-        return _line(level, "bottom")
-    if isinstance(value, NormalizedBoundTypeVar):
-        return _line(level, f"recursion_position({value.index})")
-    if isinstance(value, NormalizedInternalChoiceType):
-        branches = tuple(
-            _render_process(branch, level + 1)
-            for branch in value.branches
-        )
-        return _render_block("internal", branches, level)
-    if isinstance(value, NormalizedFiniteDelayType):
-        prefix = f"delay({_format_duration(value.duration)})"
-        continuation = _render_process(value.continuation, level)
-        if isinstance(value.interrupts, NormalizedNoInterruptType):
-            return _prepend_to_first_line(prefix + " then ", continuation)
-        interrupt = _prepend_to_first_line(
-            prefix + " interrupt ",
-            _render_angelic(value.interrupts, level),
-        )
-        return _append_document(interrupt, " then ", continuation)
-    if isinstance(value, NormalizedInfiniteDelayType):
-        if isinstance(value.interrupts, NormalizedNoInterruptType):
-            return _line(level, "forever")
-        return _prepend_to_first_line(
-            "forever interrupt ",
-            _render_angelic(value.interrupts, level),
-        )
-    if isinstance(value, NormalizedMuType):
-        return _render_block(
-            "mu",
-            (_render_process(value.body, level + 1),),
-            level,
-        )
-    raise TypeError(f"unsupported normalized process type: {type(value).__name__}")
+    return _render_iterative(value, level, is_angelic=False)
 
 
 def _render_angelic(value: NormalizedAngelicType, level: int) -> str:
     """按原 ``angelic { ch? -> T, ... }`` 风格输出规范通信集合。"""
 
-    if isinstance(value, NormalizedNoInterruptType):
-        return _line(level, "angelic {}")
-    if isinstance(value, (NormalizedInputType, NormalizedOutputType)):
-        branches = (value,)
-    elif isinstance(value, NormalizedExternalChoiceType):
-        branches = value.branches
-    else:
-        raise TypeError(
-            f"unsupported normalized angelic type: {type(value).__name__}"
-        )
+    return _render_iterative(value, level, is_angelic=True)
 
-    rendered_branches: list[str] = []
-    for branch in branches:
-        marker = "?" if isinstance(branch, NormalizedInputType) else "!"
-        rendered_branches.append(
-            _prepend_to_first_line(
-                f"{branch.channel}{marker} -> ",
-                _render_process(branch.continuation, level + 1),
+
+def _render_iterative(
+    value: NormalizedProcessType | NormalizedAngelicType,
+    level: int,
+    *,
+    is_angelic: bool,
+) -> str:
+    """用显式后序工作栈渲染深层 continuation 和递归体。"""
+
+    results: list[str] = []
+    pending: list[tuple[object, ...]] = [
+        ("angelic" if is_angelic else "process", value, level)
+    ]
+    while pending:
+        task = pending.pop()
+        tag = task[0]
+        if tag == "finish":
+            _, kind, node, node_level, start = task
+            children = tuple(results[start:])
+            del results[start:]
+            if kind == "internal":
+                results.append(_render_block("internal", children, node_level))
+            elif kind == "finite":
+                prefix = f"delay({_format_duration(node.duration)})"
+                if isinstance(node.interrupts, NormalizedNoInterruptType):
+                    results.append(
+                        _prepend_to_first_line(prefix + " then ", children[0])
+                    )
+                else:
+                    interrupt = _prepend_to_first_line(
+                        prefix + " interrupt ", children[0]
+                    )
+                    results.append(_append_document(interrupt, " then ", children[1]))
+            elif kind == "infinite":
+                results.append(
+                    _prepend_to_first_line("forever interrupt ", children[0])
+                )
+            elif kind == "mu":
+                results.append(_render_block("mu", children, node_level))
+            elif kind == "angelic":
+                rendered_branches = []
+                for branch, continuation in zip(node, children):
+                    marker = (
+                        "?" if isinstance(branch, NormalizedInputType) else "!"
+                    )
+                    rendered_branches.append(
+                        _prepend_to_first_line(
+                            f"{branch.channel}{marker} -> ", continuation
+                        )
+                    )
+                results.append(
+                    _render_block("angelic", tuple(rendered_branches), node_level)
+                )
+            else:
+                raise RuntimeError(f"unsupported normalized render task: {kind}")
+            continue
+
+        _, node, node_level = task
+        if tag == "angelic":
+            if isinstance(node, NormalizedNoInterruptType):
+                results.append(_line(node_level, "angelic {}"))
+                continue
+            if isinstance(node, (NormalizedInputType, NormalizedOutputType)):
+                branches = (node,)
+            elif isinstance(node, NormalizedExternalChoiceType):
+                branches = node.branches
+            else:
+                raise TypeError(
+                    "unsupported normalized angelic type: "
+                    f"{type(node).__name__}"
+                )
+            start = len(results)
+            pending.append(("finish", "angelic", branches, node_level, start))
+            for branch in reversed(branches):
+                pending.append(("process", branch.continuation, node_level + 1))
+            continue
+
+        if isinstance(node, NormalizedEmptyType):
+            results.append(_line(node_level, "empty"))
+        elif isinstance(node, NormalizedBottomType):
+            results.append(_line(node_level, "bottom"))
+        elif isinstance(node, NormalizedBoundTypeVar):
+            results.append(_line(node_level, f"recursion_position({node.index})"))
+        elif isinstance(node, NormalizedInternalChoiceType):
+            start = len(results)
+            pending.append(("finish", "internal", node, node_level, start))
+            for branch in reversed(node.branches):
+                pending.append(("process", branch, node_level + 1))
+        elif isinstance(node, NormalizedFiniteDelayType):
+            start = len(results)
+            pending.append(("finish", "finite", node, node_level, start))
+            pending.append(("process", node.continuation, node_level))
+            if not isinstance(node.interrupts, NormalizedNoInterruptType):
+                pending.append(("angelic", node.interrupts, node_level))
+        elif isinstance(node, NormalizedInfiniteDelayType):
+            if isinstance(node.interrupts, NormalizedNoInterruptType):
+                results.append(_line(node_level, "forever"))
+            else:
+                start = len(results)
+                pending.append(("finish", "infinite", node, node_level, start))
+                pending.append(("angelic", node.interrupts, node_level))
+        elif isinstance(node, NormalizedMuType):
+            start = len(results)
+            pending.append(("finish", "mu", node, node_level, start))
+            pending.append(("process", node.body, node_level + 1))
+        else:
+            raise TypeError(
+                f"unsupported normalized process type: {type(node).__name__}"
             )
-        )
-    return _render_block("angelic", tuple(rendered_branches), level)
+
+    if len(results) != 1:
+        raise RuntimeError("normalized Type rendering produced invalid results")
+    return results[0]
 
 
 def _render_block(name: str, entries: tuple[str, ...], level: int) -> str:

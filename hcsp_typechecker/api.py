@@ -82,7 +82,12 @@ TypeAST: TypeAlias = ConfigurationType
 
 
 class OutputMode(str, Enum):
-    """控制各公共业务接口的结果展示详细程度。"""
+    """控制三个公共接口的文本输出详细程度。
+
+    ``NONE`` 不写任何文本，适合把返回值和异常交给上层程序自行处理；``RESULT``
+    只写最终结论、正式 Type 或首要错误；``FULL`` 还写输入、规则推导、证明义务，
+    或状态图的全部状态与边。输出模式从不改变解析、证明、返回值和异常类型。
+    """
 
     NONE = "none"
     RESULT = "result"
@@ -100,7 +105,13 @@ class TypeTransitionGraphErrorKind(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class HCSPErrorDetail:
-    """一条可由程序读取、也可直接展示给用户的错误证据。"""
+    """一条可由程序读取、也可直接展示给用户的错误证据。
+
+    ``category`` 和 ``verdict`` 用于稳定分类；``message`` 是人类可读原因；
+    ``rule``/``location`` 指向失败的推导规则和内部判断位置。证明相关错误还会在
+    ``proof_kind``、``formula``、``backend_detail`` 中保存 FOL/dL 类别、实际待证
+    公式和证明器说明。非证明错误的后三个字段为空字符串。
+    """
 
     category: str
     verdict: str
@@ -569,6 +580,10 @@ class HCSPTypeConstructionError(RuntimeError):
     全部有效错误证据；``partial_types`` 保留各配置已经形成的分量类型。
     ``format_full()`` 可用于在捕获异常后再次读取全部规则、FOL/dL 公式和证明器
     证据。内部 Process AST 与内部构造报告没有公共属性。
+
+    ``kind`` 的稳定取值为 ``environment``、``derivation``、``proof-failed`` 和
+    ``proof-unknown``。需要读取完整未验证候选时，应先单独捕获子类
+    :class:`HCSPUntrustedTypeConstructionError`，再访问 ``untrusted_type``。
     """
 
     def __init__(
@@ -652,7 +667,14 @@ class HCSPTypeCheckingError(RuntimeError):
     """用户给定 Type 未被 Table 2 规则验证时抛出的结构化公共异常。
 
     ``kind`` 和 ``phase`` 可供程序区分环境错误、Type 结构不匹配、规则应用
-    错误、证明反例与证明未决；``details`` 保留所有参与最终结论的错误证据。
+    错误、证明反例与证明未决；对应稳定值为 ``environment``、
+    ``type-mismatch``、``rule-application``、``proof-failed`` 与
+    ``proof-unknown``。``details`` 保留所有参与最终结论的错误证据。
+
+    ``expected_type`` 保存用户给定的正式 Type AST；
+    ``type_mismatch_detected`` 表示是否明确发现结构不匹配；三值字段
+    ``type_structure_matched`` 为 ``True`` 时结构已完整消费，为 ``False`` 时已经
+    明确不匹配，为 ``None`` 时环境或规则前提使结构检查没有走完。
     """
 
     def __init__(
@@ -973,19 +995,56 @@ def construct_hcsp_type(
     z3_timeout_ms: int = 5_000,
     keymaerax_timeout_seconds: float | None = None,
 ) -> TypeAST:
-    """把完整用户 source 直接转换成可信 Type AST。
+    """解析一份完整 HCSP 输入，构造并证明其行为 Type AST。
 
-    source 必须依次包含 Gamma、可选 Parameters、Theta 和 Process 分节。单进程可
-    用一个 mapping 指定部分初态；并行系统必须按源码分量顺序提供同样数量的
-    mapping。字符串 ``path_condition`` 使用 source 的严格表达式语法解析。
+    输入文本必须按 ``gamma [parameters] theta process`` 的顺序包含全部分节，且
+    不能包含用户 ``type`` 分节。接口在内部完成词法/语法分析、运行上下文和
+    Process AST 构造、Table 2 规则推导，以及各条 FOL/dL 前提的证明。中间
+    Process AST 不作为公共结果暴露。
 
-    输入解析失败会在启动类型构造前抛出 :class:`HCSPInputError`。仅当结构检查、
-    静态类型前提和全部 FOL/dL 证明义务均为 true 时返回 :class:`TypeAST`。
-    无法形成完整类型或 verdict 为 false 时抛出
-    :class:`HCSPTypeConstructionError`；构造完成但 verdict 为 unknown 时抛出
-    :class:`HCSPUntrustedTypeConstructionError`，其
-    ``untrusted_type`` 属性保留完整但不可信的候选类型。``output`` 只选择
-    ``none``、``result`` 或 ``full`` 展示层级，不改变返回对象和逻辑结论。
+    Parameters
+    ----------
+    source:
+        完整用户输入字符串。
+    source_name:
+        出现在输入诊断和完整日志中的来源名称；不参与数学语义。
+    initial_states:
+        可选部分初态。单个顶层 Process 传一个 ``变量 -> Python 值`` mapping；
+        并行系统按源码顶层分量顺序传等长的 mapping 序列；``None`` 为每个分量
+        建立空初态。状态键必须是 Gamma 中的标量变量，不能是参数或连续向量标签。
+    path_condition:
+        全局初始路径条件。可传 Python ``bool``，或使用严格表达式语法的字符串。
+    output:
+        ``none``、``result``、``full`` 或相应 :class:`OutputMode`。
+    stream:
+        接收输出文本的文件式对象；``None`` 表示 ``sys.stdout``。
+    z3_timeout_ms:
+        每次 Z3 查询的毫秒超时。
+    keymaerax_timeout_seconds:
+        本次调用覆盖的 KeYmaera X 单次证明秒数；``None`` 使用环境配置。
+
+    Returns
+    -------
+    TypeAST
+        规则推导完整、且全部必要证明义务均为 ``true`` 的可信配置类型。
+
+    Raises
+    ------
+    HCSPInputError
+        ``source`` 或字符串路径条件存在词法、语法或前端良构错误；类型构造不会启动。
+    HCSPUntrustedTypeConstructionError
+        已形成完整候选 Type，但至少一条必要义务为 ``unknown``。候选只保存在
+        ``error.untrusted_type``，不会伪装成可信返回值。
+    HCSPTypeConstructionError
+        环境无效、规则无法应用、未形成完整类型，或必要公式被证明为 ``false``。
+    TypeError, ValueError
+        Python 调用参数本身不符合接口形状，例如并行初态数量错误或输出模式非法。
+
+    Notes
+    -----
+    证明器返回 ``unknown`` 时，Constructor 会保留证据并继续推导，以尽量形成
+    完整候选；只有 ``false`` 或无法应用规则才会立即阻止该推导继续。输出模式仅
+    影响展示，不影响这一逻辑。
     """
 
     mode = _normalize_output_mode(output)
@@ -1114,17 +1173,52 @@ def check_hcsp_type(
     z3_timeout_ms: int = 5_000,
     keymaerax_timeout_seconds: float | None = None,
 ) -> TypeAST:
-    """检查完整 ``gamma [parameters] theta process type`` 输入中的给定 Type。
+    """验证用户给出的 Type 是否对应同一输入中的 HCSP Process。
 
-    输入 Type 必须使用 ``frontend.type_syntax`` 的规范语法；初态与路径条件的
-    约束和 TypeConstructor 入口一致。检查器按源码顺序
-    展开 Process 的 Table 2 规则、生成同样的 FOL/dL 前提，并将每个规则结论与
-    用户给定 Type AST 比对；内部选择按用户圆括号保留的当前层分块逐项检查，
-    外部中断按 AST 分支顺序逐项检查。公式 ``FALSE`` 会立即使当前规则失败；
-    ``UNKNOWN`` 会保留证据并继续检查剩余 Type 结构，但最终仍视为未通过。
-    只有结构完整匹配且全部前提均证明为真时才返回原用户 Type AST；其他检查失败
-    抛出 :class:`HCSPTypeCheckingError`。``output`` 仅控制 ``none``、``result``、
-    ``full`` 三档文本展示，不改变检查结论。
+    输入文本必须按 ``gamma [parameters] theta process type`` 的顺序书写。接口会
+    把 Process 与 Type 分别解析为内部 AST，再把用户 Type 当作每个 Table 2 判断
+    的给定结论逐层消费；它不会先调用 TypeConstructor 构造另一棵 Type 后做整树
+    比较。内部选择和外部中断均按用户语法保留的当前层分组、元数和书写顺序检查。
+
+    Parameters
+    ----------
+    source:
+        含用户 ``type`` 分节的完整输入字符串。
+    source_name:
+        只用于输入诊断与日志的来源名称。
+    initial_states:
+        可选部分初态；单进程传一个 mapping，并行系统传与顶层分量等长的序列。
+    path_condition:
+        Python ``bool`` 或严格表达式语法字符串形式的全局初始路径条件。
+    output, stream:
+        文本详细程度和目标文本流；语义与 :func:`construct_hcsp_type` 相同。
+    z3_timeout_ms:
+        每次 Z3 查询的毫秒超时。
+    keymaerax_timeout_seconds:
+        本次调用覆盖的 KeYmaera X 单次证明秒数；``None`` 使用环境配置。
+
+    Returns
+    -------
+    TypeAST
+        输入 ``type`` 分节解析出的同一个正式 Type AST。正常返回表示 Type 结构被
+        全部规则完整消费，并且所有必要证明义务均为 ``true``。
+
+    Raises
+    ------
+    HCSPInputError
+        Process、上下文、Type 或字符串路径条件存在前端输入错误。
+    HCSPTypeCheckingError
+        环境无效、Type 结构不匹配、规则不适用、证明为 ``false`` 或证明为
+        ``unknown``。可用 ``kind``、``phase``、``rule``、``location`` 和
+        ``details`` 区分原因。
+    TypeError, ValueError
+        Python 调用参数不符合接口形状。
+
+    Notes
+    -----
+    ``unknown`` 时 Checker 会继续核对剩余 Type 结构以产生更完整的审计证据，但
+    最终仍抛出 ``HCSPTypeCheckingError(kind="proof-unknown")``；它不会返回一个
+    “暂时接受”的 Type。
     """
 
     mode = _normalize_output_mode(output)
@@ -1241,15 +1335,43 @@ def build_type_transition_graph(
     output: OutputMode | str = OutputMode.NONE,
     stream: TextIO | None = None,
 ) -> TypeTransitionGraph:
-    """按 Table 3 的关键-deadline约化关系构造完整可达状态图。
+    """从正式 Type AST 构造 Table 3 关键-deadline完整可达图。
 
-    接口先把现有 Type AST 单向转换为规范化 Type AST和等递归循环项图，再以最大
-    关键 deadline 策略生成完整可达图。非法输入、规范化失败或触及规模上限时抛出
-    :class:`HCSPTypeTransitionGraphError`；``kind`` 与 ``phase`` 可供程序区分原因，
-    且不会返回可能被误解为完整结果的部分图。
+    接口先验证配置类型根，单向转换为规范化 Type AST，再建立等递归循环项图并按
+    双模拟状态取商，最后穷尽 Table 3 的 ``tau``、通信、timeout、内部选择和共同
+    时间转移。时间边只走到下一个关键 deadline，而不是枚举任意更短时间片。
 
-    ``result`` 输出图规模和初始规范类型；``full`` 输出全部状态、转移和规则证据；
-    ``none`` 保持静默。输出模式不改变图的状态集合、边集合或异常语义。
+    Parameters
+    ----------
+    type_ast:
+        正式配置 ``TypeAST``，通常来自 :func:`construct_hcsp_type`，或已经由
+        :func:`check_hcsp_type` 验证。本接口不接收 Type 文本或规范化 Type AST。
+    max_states, max_transitions:
+        可选严格正整数上限。任一上限被触及时整个调用失败，不返回部分图；
+        ``None`` 表示不限制该计数。
+    output:
+        ``none`` 静默；``result`` 打印图规模和初始规范 Type；``full`` 打印全部
+        状态、边标签以及 Table 3 推导证据。
+    stream:
+        输出目标；``None`` 表示 ``sys.stdout``。
+
+    Returns
+    -------
+    TypeTransitionGraph
+        从 ``initial_state`` 可达的完整状态闭包。``states`` 按连续编号保存规范
+        Type 展示代表；``transitions`` 保存标签和全部合并后的规则推导证据。
+
+    Raises
+    ------
+    HCSPTypeTransitionGraphError
+        输入根非法、规模选项非法、Type 无法规范化，或状态/边数量超过上限。异常
+        不携带部分图，可按 ``kind`` 和 ``phase`` 稳定区分阶段。
+
+    Notes
+    -----
+    图状态身份来自等递归循环项图，而不是展示 AST 的 Python 结构相等性。因此
+    ``mu t.T`` 与其有限次展开不会产生重复状态。当前接口只构造图，不执行死锁、
+    活锁或其他图上性质分析。
     """
 
     mode = _normalize_output_mode(output)

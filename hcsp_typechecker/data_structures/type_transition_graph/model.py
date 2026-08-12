@@ -188,6 +188,12 @@ class TypeTransitionGraph:
 
     ``states`` 必须按 ``0..n-1`` 连续编号，``initial_state`` 和每条边端点必须引用
     其中的状态。正常公共构造保证 ``transitions`` 是从初态出发的完整可达闭包。
+
+    普通遍历从 ``states[initial_state]`` 开始，并用 :meth:`outgoing` 取得一个状态
+    的稳定有序出边。每个 ``TypeState.type_ast`` 是用于展示的规范 Type；每条
+    ``TypeTransition`` 的 ``label`` 区分无耗时 ``tau`` 与带 ``duration/ready`` 的
+    时间边，``derivations`` 保存产生该边的全部 Table 3 规则实例。对象不可变，
+    但不预先建立邻接表；需要大量重复查询时，调用方可自行缓存 ``outgoing`` 结果。
     """
 
     initial_state: int

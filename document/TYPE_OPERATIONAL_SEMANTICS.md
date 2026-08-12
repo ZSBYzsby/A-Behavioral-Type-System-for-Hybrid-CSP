@@ -8,6 +8,10 @@ TypeConstructor 返回，或先由 TypeChecker 验证。
 
 ## 稳定接口
 
+普通用户需要返回图字段、异常种类、规模限制和遍历示例时，可先阅读
+[公共接口使用手册](PUBLIC_API_GUIDE.md#5-状态图接口)；本文件重点说明规范化、
+等递归状态身份与 Table 3 后端算法。
+
 ```python
 from hcsp_typechecker import (
     HCSPTypeTransitionGraphError,

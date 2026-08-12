@@ -545,28 +545,26 @@ class ParallelType(ConfigurationType):
 # 功能：判断类型中是否存在指定名称的自由类型变量引用。
 # 检查/论文关系：遇到同名 MuType 时停止，以遵守 mu t.T 的词法遮蔽。
 def _contains_type_var(value: BehavioralType, name: str) -> bool:
-    """递归查找未被同名内层 ``mu`` 遮蔽的类型变量。"""
+    """迭代查找未被同名内层 ``mu`` 遮蔽的类型变量。"""
 
-    if isinstance(value, TypeVar):
-        return value.name == name
-    if isinstance(value, (InputType, OutputType)):
-        return _contains_type_var(value.continuation, name)
-    if isinstance(value, (ExternalChoiceType, InternalChoiceType)):
-        return any(_contains_type_var(branch, name) for branch in value.branches)
-    if isinstance(value, FiniteDelayType):
-        return _contains_type_var(
-            value.interrupts,
-            name,
-        ) or _contains_type_var(value.continuation, name)
-    if isinstance(value, InfiniteDelayType):
-        return _contains_type_var(value.interrupts, name)
-    if isinstance(value, MuType):
-        return value.variable != name and _contains_type_var(value.body, name)
-    if isinstance(value, ParallelType):
-        return any(
-            _contains_type_var(component, name)
-            for component in value.components
-        )
+    pending: list[BehavioralType] = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, TypeVar):
+            if current.name == name:
+                return True
+        elif isinstance(current, (InputType, OutputType)):
+            pending.append(current.continuation)
+        elif isinstance(current, (ExternalChoiceType, InternalChoiceType)):
+            pending.extend(reversed(current.branches))
+        elif isinstance(current, FiniteDelayType):
+            pending.extend((current.continuation, current.interrupts))
+        elif isinstance(current, InfiniteDelayType):
+            pending.append(current.interrupts)
+        elif isinstance(current, MuType) and current.variable != name:
+            pending.append(current.body)
+        elif isinstance(current, ParallelType):
+            pending.extend(reversed(current.components))
     return False
 
 
@@ -577,36 +575,28 @@ def _type_var_guarded(
     name: str,
     under_communication: bool = False,
 ) -> bool:
-    """递归验证指定类型变量的全部自由出现均受通信保护。"""
+    """迭代验证指定类型变量的全部自由出现均受通信保护。"""
 
-    if isinstance(value, TypeVar):
-        return value.name != name or under_communication
-    if isinstance(value, (InputType, OutputType)):
-        return _type_var_guarded(value.continuation, name, True)
-    if isinstance(value, (ExternalChoiceType, InternalChoiceType)):
-        return all(
-            _type_var_guarded(branch, name, under_communication)
-            for branch in value.branches
-        )
-    if isinstance(value, FiniteDelayType):
-        return _type_var_guarded(
-            value.interrupts,
-            name,
-            under_communication,
-        ) and _type_var_guarded(value.continuation, name, under_communication)
-    if isinstance(value, InfiniteDelayType):
-        return _type_var_guarded(value.interrupts, name, under_communication)
-    if isinstance(value, MuType):
-        return value.variable == name or _type_var_guarded(
-            value.body,
-            name,
-            under_communication,
-        )
-    if isinstance(value, ParallelType):
-        return all(
-            _type_var_guarded(component, name, under_communication)
-            for component in value.components
-        )
+    pending: list[tuple[BehavioralType, bool]] = [(value, under_communication)]
+    while pending:
+        current, guarded = pending.pop()
+        if isinstance(current, TypeVar):
+            if current.name == name and not guarded:
+                return False
+        elif isinstance(current, (InputType, OutputType)):
+            pending.append((current.continuation, True))
+        elif isinstance(current, (ExternalChoiceType, InternalChoiceType)):
+            pending.extend((branch, guarded) for branch in current.branches)
+        elif isinstance(current, FiniteDelayType):
+            pending.extend(
+                ((current.interrupts, guarded), (current.continuation, guarded))
+            )
+        elif isinstance(current, InfiniteDelayType):
+            pending.append((current.interrupts, guarded))
+        elif isinstance(current, MuType) and current.variable != name:
+            pending.append((current.body, guarded))
+        elif isinstance(current, ParallelType):
+            pending.extend((component, guarded) for component in current.components)
     return True
 
 
@@ -621,63 +611,86 @@ def _duration_key(duration: Fraction) -> tuple[int, int]:
 # 功能：递归编码全部规范节点，用绑定层级替代受绑定变量的具体名称。
 # 检查/论文关系：只实现 alpha 等价；选择和并行仍按保存顺序比较。
 def _type_key(value: BehavioralType, bound: Mapping[str, int] | None = None) -> Any:
-    """递归生成忽略递归绑定变量改名的规范结构键。"""
+    """用显式工作栈生成忽略递归绑定变量改名的规范结构键。"""
 
-    current_bound = {} if bound is None else dict(bound)
-    if isinstance(value, NoInterruptType):
-        return ("no-interrupt",)
-    if isinstance(value, EmptyType):
-        return ("empty",)
-    if isinstance(value, BottomType):
-        return ("bottom",)
-    if isinstance(value, TypeVar):
-        if value.name in current_bound:
-            return ("bound", current_bound[value.name])
-        return ("free", value.name)
-    if isinstance(value, InputType):
-        return (
-            "in",
-            value.channel,
-            _type_key(value.continuation, current_bound),
-        )
-    if isinstance(value, OutputType):
-        return (
-            "out",
-            value.channel,
-            _type_key(value.continuation, current_bound),
-        )
-    if isinstance(value, ExternalChoiceType):
-        return (
-            "external",
-            tuple(_type_key(branch, current_bound) for branch in value.branches),
-        )
-    if isinstance(value, InternalChoiceType):
-        return (
-            "internal",
-            tuple(_type_key(branch, current_bound) for branch in value.branches),
-        )
-    if isinstance(value, FiniteDelayType):
-        return (
-            "finite-delay",
-            _duration_key(value.duration),
-            _type_key(value.interrupts, current_bound),
-            _type_key(value.continuation, current_bound),
-        )
-    if isinstance(value, InfiniteDelayType):
-        return ("infinite-delay", _type_key(value.interrupts, current_bound))
-    if isinstance(value, MuType):
-        nested_bound = dict(current_bound)
-        nested_bound[value.variable] = len(current_bound)
-        return ("mu", _type_key(value.body, nested_bound))
-    if isinstance(value, ParallelType):
-        return (
-            "parallel",
-            tuple(
-                _type_key(component, current_bound)
-                for component in value.components
-            ),
-        )
-    raise TypeError(f"Unsupported behavioral type: {type(value).__name__}")
+    initial_bound = {} if bound is None else dict(bound)
+    results: list[Any] = []
+    # ``finish`` 任务保存本节点开始前的结果栈长度，从而按原顺序收集子键。
+    pending: list[tuple[Any, ...]] = [("visit", value, initial_bound)]
+    while pending:
+        task = pending.pop()
+        if task[0] == "finish":
+            _, tag, payload, start = task
+            children = tuple(results[start:])
+            del results[start:]
+            if tag in {"in", "out"}:
+                results.append((tag, payload, children[0]))
+            elif tag in {"external", "internal", "parallel"}:
+                results.append((tag, children))
+            elif tag == "finite-delay":
+                results.append((tag, payload, children[0], children[1]))
+            elif tag in {"infinite-delay", "mu"}:
+                results.append((tag, children[0]))
+            else:
+                raise RuntimeError(f"Unsupported Type key task: {tag}")
+            continue
+
+        _, current, current_bound = task
+        if isinstance(current, NoInterruptType):
+            results.append(("no-interrupt",))
+        elif isinstance(current, EmptyType):
+            results.append(("empty",))
+        elif isinstance(current, BottomType):
+            results.append(("bottom",))
+        elif isinstance(current, TypeVar):
+            if current.name in current_bound:
+                results.append(("bound", current_bound[current.name]))
+            else:
+                results.append(("free", current.name))
+        elif isinstance(current, (InputType, OutputType)):
+            tag = "in" if isinstance(current, InputType) else "out"
+            start = len(results)
+            pending.append(("finish", tag, current.channel, start))
+            pending.append(("visit", current.continuation, current_bound))
+        elif isinstance(current, (ExternalChoiceType, InternalChoiceType)):
+            tag = (
+                "external"
+                if isinstance(current, ExternalChoiceType)
+                else "internal"
+            )
+            start = len(results)
+            pending.append(("finish", tag, None, start))
+            for branch in reversed(current.branches):
+                pending.append(("visit", branch, current_bound))
+        elif isinstance(current, FiniteDelayType):
+            start = len(results)
+            pending.append(
+                ("finish", "finite-delay", _duration_key(current.duration), start)
+            )
+            pending.append(("visit", current.continuation, current_bound))
+            pending.append(("visit", current.interrupts, current_bound))
+        elif isinstance(current, InfiniteDelayType):
+            start = len(results)
+            pending.append(("finish", "infinite-delay", None, start))
+            pending.append(("visit", current.interrupts, current_bound))
+        elif isinstance(current, MuType):
+            nested_bound = dict(current_bound)
+            nested_bound[current.variable] = len(current_bound)
+            start = len(results)
+            pending.append(("finish", "mu", None, start))
+            pending.append(("visit", current.body, nested_bound))
+        elif isinstance(current, ParallelType):
+            start = len(results)
+            pending.append(("finish", "parallel", None, start))
+            for component in reversed(current.components):
+                pending.append(("visit", component, current_bound))
+        else:
+            raise TypeError(
+                f"Unsupported behavioral type: {type(current).__name__}"
+            )
+    if len(results) != 1:
+        raise RuntimeError("Type key construction produced an invalid result")
+    return results[0]
 
 
 # 论文对应：比较 Section 4.1/4.2 规范类型是否仅有 mu 绑定变量改名差异。

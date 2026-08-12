@@ -457,8 +457,9 @@ type_ast = construct_hcsp_type(
 [TYPE_INPUT_SYNTAX.md](TYPE_INPUT_SYNTAX.md)，检查算法见
 [TYPE_CHECKER.md](TYPE_CHECKER.md)。
 
-两个公共接口的参数、输出模式、返回值和异常只在
-[README 的稳定用户接口](../README.md#稳定用户接口) 与
+Constructor/Checker 的参数、输出模式、返回值和异常只在
+[README 的稳定用户接口](../README.md#稳定用户接口)、
+[公共接口使用手册](PUBLIC_API_GUIDE.md)与
 [完整功能参考](PROJECT_FUNCTION_REFERENCE.md#公共接口的输入和输出) 中集中说明，
 本语法文档不再复制这些展示层规则。
 

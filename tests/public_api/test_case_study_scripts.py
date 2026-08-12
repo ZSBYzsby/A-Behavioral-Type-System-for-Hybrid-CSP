@@ -2,8 +2,9 @@
 
 测试内容
 --------
-1. ``case.py`` 与 ``new_case.py`` 只能从包根导入 ``construct_hcsp_type``、公共
-   异常及稳定错误枚举，不能重新依赖旧两阶段入口、内部 AST 构造器或低层构造器；
+1. ``case.py`` 与 ``new_case.py`` 只能从包根导入稳定业务入口和公共异常；
+   ``new_case.py`` 在可信构造成功后还会把 Type AST 交给第三接口生成状态图，
+   但不能重新依赖旧两阶段入口、内部 AST 构造器或低层构造器；
 2. 两个脚本生成的完整用户 source 都必须能通过同一个公开入口越过解析阶段。
    为避免在接口契约测试中重复执行昂贵 dL 证明，测试用恒假路径条件让推导在
    T-sigma 处稳定停止，并以 ``HCSPTypeConstructionError``（而非输入错误）证明解析成功。
@@ -43,7 +44,11 @@ EXPECTED_PUBLIC_IMPORTS = {
         "TypeConstructionErrorKind",
     },
     "new_case.py": COMMON_PUBLIC_IMPORTS
-    | {"HCSPUntrustedTypeConstructionError"},
+    | {
+        "HCSPTypeTransitionGraphError",
+        "HCSPUntrustedTypeConstructionError",
+        "build_type_transition_graph",
+    },
 }
 
 

@@ -3,6 +3,12 @@
 TypeChecker 接收一份依次包含 Gamma、可选 Parameters、Theta、批注 HCSP Process
 和用户 Type 的完整输入，检查该 Type 是否能够成为项目实际 Table 2 规则的结论。
 
+这里的“项目实际规则”包括多槽通信、控制节点自持公共后继、共享全 Gamma、只读
+参数、ODE 隐式时钟、`ODE;skip` 双候选、三值证明和尾递归限制，并不等于把论文
+排版中的规则逐字翻译成 Python。各项真实算法和相对论文表面的差异统一列在
+[当前代码的实现语义与论文规则落地方式](IMPLEMENTATION_SEMANTICS.md)；本文重点
+说明 Checker 怎样消费用户 Type，而不是重复 Constructor 的每条公式推导。
+
 相关实现按后端职责分布在：
 
 - `hcsp_typechecker/backend/type_checker/checker.py`：TypeChecker 的类型定向递归；
@@ -23,10 +29,33 @@ from hcsp_typechecker import check_hcsp_type
 type_ast = check_hcsp_type(source, output="result")
 ```
 
+完整签名为：
+
+```python
+check_hcsp_type(
+    source,
+    *,
+    source_name="<input>",
+    initial_states=None,
+    path_condition=True,
+    output="none",
+    stream=None,
+    z3_timeout_ms=5000,
+    keymaerax_timeout_seconds=None,
+) -> TypeAST
+```
+
 成功时返回解析后的用户 `TypeAST`。输入语法错误抛出 `HCSPInputError`；Type
 结构与规则不匹配、静态前提失败、公式被否证或证明未决时抛出
 `HCSPTypeCheckingError`。`output` 支持 `none`、`result`、`full`，只影响展示。
 `initial_states` 与 `path_condition` 的含义和 TypeConstructor 相同。
+
+完整 source 必须依次包含 `gamma`、可选 `parameters`、`theta`、`process` 和
+`type`。`source_name` 只用于诊断；`initial_states` 对单分量是一个部分状态 mapping，
+对并行系统是与顶层分量等长的 mapping 序列；`path_condition` 可以是 bool 或项目
+表达式字符串。`z3_timeout_ms` 和 `keymaerax_timeout_seconds` 分别控制一阶逻辑和
+dL 证明等待时间。所有逐参数约束和可复制示例见
+[公共接口使用手册](PUBLIC_API_GUIDE.md#4-checker-接口)。
 
 ## 错误分类与诊断
 
