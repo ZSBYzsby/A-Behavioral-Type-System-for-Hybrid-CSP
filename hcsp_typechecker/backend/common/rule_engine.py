@@ -54,6 +54,7 @@ from .logic import (
     negation,
     simplify,
     z3,
+    z3_available,
 )
 from .keymaerax import KeYmaeraXBackend, KeYmaeraXConfig
 from ...data_structures.type_ast.ast import (
@@ -385,6 +386,17 @@ class Table2RuleEngine:
                 Verdict.FALSE,
                 f"Invalid typing environment: {exc}",
                 "environment",
+            )
+            return None
+
+        if not z3_available():
+            self._diagnose(
+                Verdict.UNKNOWN,
+                "z3-solver is not installed; install the required dependency "
+                "to translate expressions and verify Table 2 premises. "
+                "Type derivation cannot start.",
+                "proof-backend",
+                "judgment",
             )
             return None
 

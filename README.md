@@ -47,6 +47,47 @@ Run the demos from the repository root.
 
 ## Quick start
 
+### A minimal example
+
+One process sends the integer `1` on channel `ch`; another receives it as `x`.
+The tool constructs their behavioral type, builds its transition graph, and
+checks for deadlocks, livelocks, and error termination. This example only needs
+Python and Z3.
+
+```python
+from hcsp_typechecker import (
+    construct_hcsp_type,
+    build_type_transition_graph,
+    analyze_type_lock_freedom,
+)
+
+source = """
+gamma(x: Int)
+theta(ch: channel(value: Int))
+process {{ch!(1)}, {ch?(x)}}
+"""
+
+type_ast = construct_hcsp_type(source)
+graph = build_type_transition_graph(type_ast)
+report = analyze_type_lock_freedom(graph)
+
+print(f"States: {len(graph.states)}, transitions: {len(graph.transitions)}")
+print(f"Behavior correct: {report.behavior_correct}")
+```
+
+Expected output:
+
+```text
+States: 2, transitions: 1
+Behavior correct: True
+```
+
+The processes synchronize on `ch` and then terminate. `Behavior correct: True`
+means the graph is free of deadlocks, livelocks, and reachable error termination.
+For detailed type output, use `construct_hcsp_type(source, output="result")`.
+
+### Runnable demos
+
 Run the type-construction demo:
 
 ```sh

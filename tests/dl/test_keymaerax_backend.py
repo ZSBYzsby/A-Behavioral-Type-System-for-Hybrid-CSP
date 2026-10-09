@@ -274,6 +274,44 @@ class KeYmaeraXBackendTests(unittest.TestCase):
         self.assertIn("3 seconds", result.detail)
 
 
+    def test_interrupted_process_does_not_trust_captured_status(self) -> None:
+        """A timeout invalidates positive and negative statuses from partial output."""
+
+        backend, obligation = self._fixture(self.runtime)
+        for status in ("PROVED T-ODE-test", "UNFINISHED (CEX) T-ODE-test"):
+            with self.subTest(status=status), patch(
+                "hcsp_typechecker.backend.common.keymaerax.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["java"], 3, output=status),
+            ):
+                result = backend.check(obligation)
+                self.assertIs(result.verdict, Verdict.UNKNOWN)
+                self.assertIn("3 seconds", result.detail)
+
+
+    def test_abnormal_exit_conflicting_statuses_and_log_prefixes_are_unknown(self) -> None:
+        """Only consistent official statuses can decide a proof obligation."""
+
+        backend, obligation = self._fixture(self.runtime)
+        outputs = (
+            (1, "PROVED T-ODE-test", "runtime failure", "exited abnormally"),
+            (0, "PROVED T-ODE-test\nDISPROVED T-ODE-test", "", "conflicting"),
+            (0, "PROVED T-ODE-test\nFAILED T-ODE-test", "", "conflicting"),
+            (0, "PROVED T-ODE-test\nUNFINISHED T-ODE-test", "", "conflicting"),
+            (0, "PROVED T-ODE-test\nTIMEOUT T-ODE-test", "", "timeout"),
+            (0, "PROVEDNESS is incidental log text", "", "no recognized"),
+            (0, "DISPROVEDNESS is incidental log text", "", "no recognized"),
+            (0, "PROVED T-ODE-test", "HCSP_BACKEND_OS_ERROR: failed", "OS_ERROR"),
+        )
+        for code, stdout, stderr, reason in outputs:
+            with self.subTest(stdout=stdout, code=code), patch(
+                "hcsp_typechecker.backend.common.keymaerax.subprocess.run",
+                return_value=subprocess.CompletedProcess(["java"], code, stdout, stderr),
+            ):
+                result = backend.check(obligation)
+                self.assertIs(result.verdict, Verdict.UNKNOWN)
+                self.assertIn(reason, result.detail)
+
+
     def test_auto_cli_retries_modern_style_only_after_usage_error(self) -> None:
         r"""Verify auto cli retries modern style only after usage error."""
 
@@ -413,7 +451,7 @@ class KeYmaeraXBackendTests(unittest.TestCase):
     def test_timeout_must_be_finite_and_positive(self) -> None:
         r"""Verify timeout must be finite and positive."""
 
-        for timeout in (0, float("inf"), float("-inf"), float("nan")):
+        for timeout in (0, -1, True, False, float("inf"), float("-inf"), float("nan")):
             with self.subTest(timeout=timeout):
                 with self.assertRaises(ValueError):
                     KeYmaeraXConfig(timeout_seconds=timeout)

@@ -178,7 +178,10 @@ class DetailedReportTests(unittest.TestCase):
             "T-ODE-domain",
             "T-ODE-boundary",
             "[T-unrhd-prime]",
-            'Proof obligations : 5',
+            'Proof records : 5',
+            'Active proof obligations : 3',
+            'Proof obligations : 3 (true=1, false=0, unknown=2)',
+            'Inactive candidate obligations : 2',
             'Outstanding obligations : 2',
         )
         for fragment in expected_fragments:

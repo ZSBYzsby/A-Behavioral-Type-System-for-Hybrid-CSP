@@ -77,7 +77,11 @@ class KeYmaeraXConfig:
             raise ValueError(
                 "KeYmaera X timeout_seconds must be a finite positive number"
             ) from exc
-        if not math.isfinite(timeout) or timeout <= 0:
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not math.isfinite(timeout)
+            or timeout <= 0
+        ):
             raise ValueError(
                 "KeYmaera X timeout_seconds must be a finite positive number"
             )
@@ -387,52 +391,63 @@ class KeYmaeraXBackend:
         combined = "\n".join(
             part for part in (result.stdout, result.stderr) if part
         )
-        statuses = [
-            line.strip().upper()
-            for line in combined.splitlines()
-            if line.strip().upper().startswith(
-                (
-                    "PROVED",
-                    "DISPROVED",
-                    "UNFINISHED",
-                    "FAILED",
-                    "TIMEOUT",
-                )
-            )
-        ]
-        if any(line.startswith("PROVED") for line in statuses):
-            return DLCheckResult(
-                Verdict.TRUE,
-                f"KeYmaera X proved the dL formula ({style} CLI)",
-            )
-        if any(
-            line.startswith("DISPROVED")
-            or line.startswith("UNFINISHED (CEX)")
-            for line in statuses
-        ):
-            return DLCheckResult(
-                Verdict.FALSE,
-                "KeYmaera X produced a counterexample to validity "
-                f"({style} CLI)",
-            )
+        # A process failure invalidates any status captured before it stopped.
         if "HCSP_BACKEND_TIMEOUT" in combined:
             return DLCheckResult(
                 Verdict.UNKNOWN,
                 f"KeYmaera X exceeded {self.config.timeout_seconds:g} seconds",
             )
-        if any(line.startswith("TIMEOUT") for line in statuses):
+        if "HCSP_BACKEND_OS_ERROR" in combined:
+            return DLCheckResult(Verdict.UNKNOWN, combined.strip())
+
+        statuses: set[str] = set()
+        for line in combined.splitlines():
+            normalized = line.strip().upper()
+            match = re.match(
+                r"^(PROVED|DISPROVED|UNFINISHED|FAILED|TIMEOUT)(?=$|[\s(:])",
+                normalized,
+            )
+            if match is None:
+                continue
+            status = match.group(1)
+            if re.match(r"^UNFINISHED\s+\(CEX\)(?=$|[\s:])", normalized):
+                status = "DISPROVED"
+            statuses.add(status)
+
+        if "TIMEOUT" in statuses:
             return DLCheckResult(
                 Verdict.UNKNOWN,
                 "KeYmaera X reported a proof-search timeout",
             )
-        if "HCSP_BACKEND_OS_ERROR" in combined:
-            return DLCheckResult(Verdict.UNKNOWN, combined.strip())
-        if any(line.startswith("UNFINISHED") for line in statuses):
+        if len(statuses) > 1:
+            return DLCheckResult(
+                Verdict.UNKNOWN,
+                "KeYmaera X returned conflicting proof statuses: "
+                + ", ".join(sorted(statuses)),
+            )
+        if "PROVED" in statuses:
+            if result.returncode != 0:
+                return DLCheckResult(
+                    Verdict.UNKNOWN,
+                    "KeYmaera X reported PROVED but exited abnormally "
+                    f"(exit {result.returncode}, {style} CLI)",
+                )
+            return DLCheckResult(
+                Verdict.TRUE,
+                f"KeYmaera X proved the dL formula ({style} CLI)",
+            )
+        if "DISPROVED" in statuses:
+            return DLCheckResult(
+                Verdict.FALSE,
+                "KeYmaera X produced a counterexample to validity "
+                f"({style} CLI)",
+            )
+        if "UNFINISHED" in statuses:
             return DLCheckResult(
                 Verdict.UNKNOWN,
                 "KeYmaera X proof search was unfinished",
             )
-        if any(line.startswith("FAILED") for line in statuses):
+        if "FAILED" in statuses:
             return DLCheckResult(
                 Verdict.UNKNOWN,
                 "KeYmaera X failed while processing the obligation",

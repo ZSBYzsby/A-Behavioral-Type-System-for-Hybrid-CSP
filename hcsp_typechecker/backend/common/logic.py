@@ -618,7 +618,14 @@ class Z3ProofEngine:
 
     def __init__(self, timeout_ms: int = 5_000) -> None:
         r"""Set the timeout used independently for each obligation."""
-        self.timeout_ms = int(timeout_ms)
+        if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int):
+            raise TypeError("z3_timeout_ms must be an integer, not a Boolean")
+        if not 0 <= timeout_ms <= 4_294_967_295:
+            raise ValueError(
+                "z3_timeout_ms must be between 0 and 4294967295; "
+                "0 disables the timeout"
+            )
+        self.timeout_ms = timeout_ms
 
     def valid(self, formula: Any) -> tuple[Verdict, str]:
         r"""Decide universal validity with a counterexample or unknown reason."""
@@ -626,15 +633,18 @@ class Z3ProofEngine:
             return Verdict.UNKNOWN, "z3-solver is not installed"
         if not z3.is_bool(formula):
             return Verdict.FALSE, f"proof obligation is not Boolean: {formula}"
-        solver = z3.Solver()
-        solver.set(timeout=self.timeout_ms)
-        solver.add(z3.Not(z3.simplify(formula)))
-        result = solver.check()
-        if result == z3.unsat:
-            return Verdict.TRUE, "negation is unsatisfiable"
-        if result == z3.sat:
-            return Verdict.FALSE, f"counterexample: {solver.model()}"
-        return Verdict.UNKNOWN, solver.reason_unknown() or "Z3 returned unknown"
+        try:
+            solver = z3.Solver()
+            solver.set(timeout=self.timeout_ms)
+            solver.add(z3.Not(z3.simplify(formula)))
+            result = solver.check()
+            if result == z3.unsat:
+                return Verdict.TRUE, "negation is unsatisfiable"
+            if result == z3.sat:
+                return Verdict.FALSE, f"counterexample: {solver.model()}"
+            return Verdict.UNKNOWN, solver.reason_unknown() or "Z3 returned unknown"
+        except z3.Z3Exception as exc:
+            return Verdict.UNKNOWN, f"Z3 validity query failed: {exc}"
 
     def satisfiable(self, formula: Any) -> tuple[Verdict, str]:
         r"""Check whether the shared parameter constraint has a satisfying valuation."""
@@ -643,15 +653,18 @@ class Z3ProofEngine:
             return Verdict.UNKNOWN, "z3-solver is not installed"
         if not z3.is_bool(formula):
             return Verdict.FALSE, f"parameter constraint is not Boolean: {formula}"
-        solver = z3.Solver()
-        solver.set(timeout=self.timeout_ms)
-        solver.add(z3.simplify(formula))
-        result = solver.check()
-        if result == z3.sat:
-            return Verdict.TRUE, "constraint has at least one admissible assignment"
-        if result == z3.unsat:
-            return Verdict.FALSE, "constraint is unsatisfiable"
-        return Verdict.UNKNOWN, solver.reason_unknown() or "Z3 returned unknown"
+        try:
+            solver = z3.Solver()
+            solver.set(timeout=self.timeout_ms)
+            solver.add(z3.simplify(formula))
+            result = solver.check()
+            if result == z3.sat:
+                return Verdict.TRUE, "constraint has at least one admissible assignment"
+            if result == z3.unsat:
+                return Verdict.FALSE, "constraint is unsatisfiable"
+            return Verdict.UNKNOWN, solver.reason_unknown() or "Z3 returned unknown"
+        except z3.Z3Exception as exc:
+            return Verdict.UNKNOWN, f"Z3 satisfiability query failed: {exc}"
 
     def state_satisfies(
         self,

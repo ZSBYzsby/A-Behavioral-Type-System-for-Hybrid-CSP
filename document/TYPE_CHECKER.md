@@ -108,6 +108,13 @@ can take precedence in the final error category. The checker does not
 deliver a newly constructed untrusted Type through an exception; its report records
 progress through the supplied Type.
 
+An `unknown` result is displayed as `Check result : unverified`. A completely
+matched Type structure is reported separately from its unresolved proof status.
+Missing Z3 stops translation with `proof-unknown` and no completed rule checking;
+a Z3 query failure retains its backend explanation without claiming refutation.
+See [Failure recovery](PUBLIC_API_GUIDE.md#87-handling-failures-in-an-application)
+for caller actions and the boundary between Type-graph analysis and verified HCSP behavior.
+
 The main rule mappings are:
 
 - Terminal `skip` and an empty sequence tail require `EmptyType` (`empty` in user syntax).

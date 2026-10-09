@@ -98,6 +98,11 @@ Z3 handles expression, state, and first-order logic obligations. KeYmaera X
 handles nontrivial dL obligations. Discrete examples and obligations discharged
 locally remain usable without the external prover.
 
+Z3 is required for expression translation as well as proofs. If `z3-solver` is
+missing, construction/checking stops with `proof-unknown` and no complete Type
+candidate. Reinstall the Python requirements before retrying. A solver query
+failure is also reported as unresolved verification with its backend explanation.
+
 When an external proof is required, a missing prover, a timeout, or an
 unreliable translation yields `unknown`. Construction may produce a complete
 unverified candidate, exposed through `HCSPUntrustedTypeConstructionError`;

@@ -453,6 +453,8 @@ class RuleDerivationReport:
 
         # Expand prover inputs once by logic kind; ordered records reference their formula
         # identifiers.
+        active_count = proved + disproved + unknown
+        inactive_count = len(self.obligations) - active_count
         formula_references = self._append_formula_inventory(
             lines,
             title=(
@@ -480,7 +482,9 @@ class RuleDerivationReport:
             (
                 "",
                 '=== Sequential formula decisions ===',
-                f"Proof obligations : {len(self.obligations)}",
+                f"Proof records : {len(self.obligations)}",
+                f"Active proof obligations : {active_count}",
+                f"Inactive candidate obligations : {inactive_count}",
                 f"Proved   : {proved}",
                 f"Failed   : {disproved}",
                 f"Unproved : {unknown}",
@@ -644,8 +648,9 @@ class RuleDerivationReport:
                 '=== Summary ===',
                 f"Rule steps : {len(self.steps)}",
                 f"Proof records : {len(self.obligations)}",
-                f"Proof obligations : {len(self.obligations)} "
+                f"Proof obligations : {active_count} "
                 f"(true={proved}, false={disproved}, unknown={unknown})",
+                f"Inactive candidate obligations : {inactive_count}",
                 f"Outstanding obligations : {len(unresolved)} "
                 f"(failed={disproved}, unproved={unknown})",
                 f"Diagnostic count : {len(self.diagnostics)}",

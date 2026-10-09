@@ -227,14 +227,15 @@ def _first_report_reason(report: TypeConstructionReport) -> str:
             return diagnostic.message
     for obligation in report.obligations:
         if (
-            obligation.verdict is report.verdict
+            obligation.active
+            and obligation.verdict is report.verdict
             and obligation.verdict is not Verdict.TRUE
         ):
             return obligation.detail or obligation.description
     if report.diagnostics:
         return report.diagnostics[0].message
     for obligation in report.obligations:
-        if obligation.verdict is not Verdict.TRUE:
+        if obligation.active and obligation.verdict is not Verdict.TRUE:
             return obligation.detail or obligation.description
     if report.verdict is Verdict.UNKNOWN:
         return 'Some premises remain unproved'
@@ -256,7 +257,9 @@ def _report_error_details(
     for diagnostic in report.diagnostics:
         if diagnostic.verdict is Verdict.TRUE:
             continue
-        if diagnostic.rule in _ENVIRONMENT_RULES:
+        if diagnostic.verdict is Verdict.UNKNOWN:
+            category = "proof-unknown"
+        elif diagnostic.rule in _ENVIRONMENT_RULES:
             category = "environment"
         elif mismatch and diagnostic.message == mismatch:
             category = "type-mismatch"
@@ -385,18 +388,18 @@ def _format_partial_progress(
     r"""Summarize partial progress and the stopping point."""
 
     proved = sum(
-        item.verdict is Verdict.TRUE for item in report.obligations
+        item.active and item.verdict is Verdict.TRUE for item in report.obligations
     )
     failed = sum(
-        item.verdict is Verdict.FALSE for item in report.obligations
+        item.active and item.verdict is Verdict.FALSE for item in report.obligations
     )
     unknown = sum(
-        item.verdict is Verdict.UNKNOWN for item in report.obligations
+        item.active and item.verdict is Verdict.UNKNOWN for item in report.obligations
     )
     lines = [
         f"Partial types : {_format_partial_types(report)}",
         f"Derivation steps : {len(report.steps)} steps executed",
-        'Proof obligations : '
+        'Active proof obligations : '
         f"true={proved}, false={failed}, unknown={unknown}",
     ]
     if report.steps:
@@ -419,7 +422,7 @@ def _format_type_result(
     constructed_type = report.constructed_type
     proof_counts = {
         verdict: sum(
-            obligation.verdict is verdict
+            obligation.active and obligation.verdict is verdict
             for obligation in report.obligations
         )
         for verdict in Verdict
@@ -475,7 +478,7 @@ def _format_type_result(
                 'Complete candidate Type source : '
                 + format_type_source(constructed_type),
                 'Outcome : the candidate is available only as error.untrusted_type; it is not returned as a trusted Type AST',
-                f"Proof obligations : {proof_summary}",
+                f"Active proof obligations : {proof_summary}",
             )
         )
     elif constructed_type is not None and report.verdict is Verdict.TRUE:
@@ -491,6 +494,12 @@ def _format_type_result(
     else:
         lines.append('Type source : (none)')
         lines.extend(_format_partial_progress(report))
+    inactive_count = sum(not item.active for item in report.obligations)
+    if inactive_count:
+        lines.append(
+            f"Inactive candidate obligations : {inactive_count} "
+            "(excluded from the verdict; see the full log)"
+        )
     if primary_detail is not None:
         lines.extend(_render_primary_detail(primary_detail))
     return "\n".join(lines)
@@ -670,12 +679,15 @@ class HCSPTypeCheckingError(RuntimeError):
             structure_status = 'not started (invalid environment)'
         elif self.kind is TypeCheckingErrorKind.TYPE_MISMATCH:
             structure_status = 'mismatch'
+        elif self.type_structure_matched is True:
+            structure_status = 'matches all rule conclusions'
         else:
-            structure_status = 'checked against the rules; final result failed'
+            structure_status = 'incomplete (rule processing stopped)'
         lines = [
             '=== HCSP type checking result ===',
             f"Verdict : {self.verdict}",
-            'Check result : failed',
+            'Check result : '
+            + ('unverified' if self.verdict == "unknown" else 'failed'),
             f"Error kind : {self.kind.value}",
             f"Error phase : {self.phase}",
             'Kind explanation : ' + _error_category_explanation(self.kind.value),

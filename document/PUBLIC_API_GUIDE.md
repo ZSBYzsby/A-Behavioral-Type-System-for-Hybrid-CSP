@@ -344,6 +344,12 @@ False properties return normally, with finite witnesses in `deadlock_witness`,
 `HCSPTypeLockAnalysisError`. See [Lock and Bottom-error analysis](TYPE_LOCK_ANALYSIS.md)
 for definitions, algorithms, and complexity.
 
+These properties concern the supplied Type graph. The graph and analysis
+interfaces do not carry or recheck the Type's proof provenance. To apply the
+result to the original HCSP program, use a Type returned successfully by
+construction or checking. Analyzing an `error.untrusted_type` candidate can help
+inspection, but does not establish verified behavior of the source program.
+
 ## 7. Output modes
 
 All four interfaces share the presentation contract:
@@ -450,11 +456,37 @@ programmatic handling without parsing complete logs.
 
 Invalid Python argument shapes can also raise `TypeError` or `ValueError`.
 
+### 8.7 Handling failures in an application
+
+| Condition | Meaning | Caller action |
+|---|---|---|
+| Input/environment/rule error | The source or typing premises cannot be accepted | Correct the reported source, declaration, state, or rule premise before retrying |
+| `proof-failed` | A required formula was refuted | Inspect the formula and counterexample; revise the program or annotation |
+| `proof-unknown`, complete candidate | Structure was derived, but verification is incomplete | Retain `untrusted_type` for inspection; configure or retry the prover before claiming success |
+| `proof-unknown`, no complete candidate | Verification or translation could not proceed far enough | Inspect `reason` and `details`; repair the dependency or backend issue and retry |
+| Graph size limit | The full reachable graph was not constructed | Increase the limit if resources permit; no partial graph is returned |
+| A false behavioral property | Analysis completed and found a witness | Inspect the report's witness and revise the behavior |
+
+Only continue the ordinary construction-to-graph-to-analysis pipeline after
+construction or checking returns normally. `partial_types` records completed
+components for diagnostics; it is not a successful type for the whole program.
+Never substitute `empty` or `bottom` for a failed or unresolved derivation.
+`unknown` means no verified conclusion was obtained, not that the program is
+necessarily incorrect. A later definite mismatch or refutation overrides an
+earlier unresolved proof in the final error category.
+
+Result output counts only active proof obligations. Unselected ODE attempts
+remain in the full log and are explicitly marked as excluded from the verdict.
+Checking output uses `Check result : unverified` for `unknown`, while keeping
+the structural matching status separate.
+
 ## 9. Provers and `unknown`
 
 Z3 handles expression, state, and FOL obligations; KeYmaera X handles nontrivial
 ODE dL obligations. Without KeYmaera X, discrete programs still work, but
 obligations requiring the dL backend generally become `unknown`.
+Z3 is a required dependency: if it is missing, translation and rule derivation
+stop with `proof-unknown` and no complete candidate, rather than an input error.
 
 See [Environment configuration](ENVIRONMENT_SETUP.md) for setup commands,
 the full environment-variable table, and dependency diagnostics.
@@ -462,6 +494,18 @@ the full environment-variable table, and dependency diagnostics.
 `keymaerax_timeout_seconds` overrides the timeout for one call; other settings
 come from the environment. Missing provers, timeouts, or unreliable translation
 conservatively yield `unknown`, never an assumed true result.
+Z3 query failures, external process failures, conflicting prover statuses, and
+unrecognized status text also yield `unknown` with diagnostic evidence. A
+KeYmaera X `PROVED` status is accepted only after a normal process exit with no
+conflicting or interrupted status; a captured status from a timed-out process
+does not establish either proof or refutation.
+
+`z3_timeout_ms` must be an integer in `0..4294967295`; `0` explicitly disables
+the Z3 timeout. Booleans, strings, and fractional values raise `TypeError`;
+out-of-range integers raise `ValueError`. The default is 5000 milliseconds per
+query. `keymaerax_timeout_seconds` must be a finite positive number, excluding
+Booleans. Invalid timeout arguments are configuration errors, rather than
+unresolved mathematical obligations.
 
 ## 10. Input restrictions at a glance
 

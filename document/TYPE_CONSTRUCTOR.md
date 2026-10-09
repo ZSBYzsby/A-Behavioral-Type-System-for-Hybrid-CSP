@@ -59,6 +59,13 @@ verdict: true is trusted, unknown has unresolved required proofs. Neither is
 BottomType, which represents unreachable formal behavior. Construction produces
 Bottom in T-unrhd conclusions but never uses it for failed derivations or recovery.
 
+Missing Z3 prevents expression translation and yields `unknown` without a complete
+candidate. Query failures and unresolved dL proofs also yield `unknown`; when
+derivation can continue, the public API exposes the candidate only through
+`HCSPUntrustedTypeConstructionError.untrusted_type`. It never returns that
+candidate as a trusted result. See [Failure recovery](PUBLIC_API_GUIDE.md#87-handling-failures-in-an-application)
+for the required caller handling.
+
 ---
 
 ## 2. Checks already performed during Process AST construction
