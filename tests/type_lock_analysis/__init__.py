@@ -1,1 +1,1 @@
-"""Type 状态迁移图死锁/活锁分析测试包。"""
+r"""Regression tests for type lock analysis."""

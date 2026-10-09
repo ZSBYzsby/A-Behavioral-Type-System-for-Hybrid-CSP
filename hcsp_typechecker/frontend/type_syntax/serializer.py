@@ -1,4 +1,4 @@
-"""将共享 Type AST 渲染函数作为 Type 前端的序列化入口。"""
+r"""Expose shared Type rendering through the frontend serializer."""
 
 from __future__ import annotations
 
@@ -9,6 +9,6 @@ from ...data_structures.type_ast.render import (
 
 
 def format_type_source(value: ConfigurationType) -> str:
-    """输出以 ``type`` 开头、可由 :func:`parse_type_source` 无损读回的文本。"""
+    r"""Render type-prefixed source that parses back without loss."""
 
     return _format_type_source(value)

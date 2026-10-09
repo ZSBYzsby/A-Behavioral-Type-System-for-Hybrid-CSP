@@ -1,1 +1,1 @@
-"""Table 3 单步操作语义和状态图生成测试包。"""
+r"""Regression tests for type operational semantics. Paper reference: Table 3."""

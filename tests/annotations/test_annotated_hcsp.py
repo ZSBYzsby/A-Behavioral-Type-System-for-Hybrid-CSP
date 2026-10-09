@@ -1,26 +1,4 @@
-r"""Section 4.2/4.3 带批注 HCSP 的构造与类型转换测试。
-
-本文件专门覆盖原始 Section 2.1 语法之外的两类输入信息：
-
-* ODE 的安全性质 ``phi``、外部延迟 ``d`` 与自动局部时钟；
-* ``mu`` 绑定的过程变量 ``X`` 的边界不变量 ``phi``。
-
-测试既检查批注对象的规范化与拒绝条件，也检查批注确实进入证明义务、路径
-条件和最终行为类型，并包含 ODE 与递归组合的场景。
-
-测试内容
---------
-1. safety/invariant 默认值、强类型字段、唯一批注路径和自动局部时钟。
-2. 必填 delay 的精确有理数、正无穷规范化与全部非法边界。
-3. 按 ODE 形状生成 safety/domain/boundary 义务和规范化时延类型节点。
-4. 递归不变量在 T-mu 入口、T-X 回边的成立与失败路径。
-5. ODE 批注和递归批注在同一循环中的组合推导。
-
-论文对应
---------
-对应 Section 4.2/4.3 的带批注 ODE、过程变量边界不变量和 Table 2 中
-T-ODE、T-\unrhd、T-mu、T-X 等规则；delay 还对应 Remark 4.1。
-"""
+r"""Regression tests for annotated HCSP. Paper reference: Section 4.2/4.3, Section 2.1, Table 2."""
 
 from __future__ import annotations
 
@@ -63,27 +41,24 @@ from hcsp_typechecker._internal import (
 
 
 def _approve_dl(_obligation: object) -> Verdict:
-    """模拟已经验证全部动态逻辑义务的可信后端。"""
+    r"""Approve dL goals with a mock backend to isolate rule structure."""
 
     return Verdict.TRUE
 
 
 def _select_communication_only(obligation: object) -> Verdict:
-    """证明纯通信候选，并否证具有真实 deadline 后继的候选。"""
+    r"""Approve the domain candidate and reject the timeout candidate."""
 
     role = getattr(getattr(obligation, "formula", None), "role", "")
     return Verdict.FALSE if role == "boundary" else Verdict.TRUE
 
 
 class AnnotationAstTests(unittest.TestCase):
-    """检查批注是强类型字段，而不是额外 HCSP 语法节点。"""
+    r"""Tests for Annotation AST."""
 
-    # 测试输入：safety="x <= limit"、delay=2 的 ODEAnnotation。
-    # 预期行为：safety/delay 成为 Expr，有限时延精确保存为 Fraction(2)。
-    # 检查内容：同时核对 safety 的变量收集结果。
-    # 论文对应：Section 4.3 给 ODE 附加安全性质 phi 和外部时延 d。
+
     def test_ode_annotation_normalizes_safety_and_delay(self) -> None:
-        """字符串安全式和有限延迟必须立即转成精确项目表达式。"""
+        r"""Verify ODE annotation normalizes safety and delay."""
 
         annotation = ODEAnnotation(safety="x <= limit", delay=2)
         self.assertIsInstance(annotation.safety, Expr)
@@ -91,34 +66,25 @@ class AnnotationAstTests(unittest.TestCase):
         self.assertEqual(annotation.delay, Literal(Fraction(2)))
         self.assertEqual(annotation.get_vars(), {"x", "limit"})
 
-    # 测试输入：只提供 delay=1，省略 safety。
-    # 预期行为：safety 字段明确规范化为 Literal(True)。
-    # 检查内容：避免用 None 表示论文中的恒真省略约定。
-    # 论文对应：Section 4.3 规定省略批注公式时含义为 true。
+
     def test_omitted_safety_means_true(self) -> None:
-        """论文约定省略安全性质等价于恒真，而不是缺失值。"""
+        r"""Verify omitted safety means true."""
 
         annotation = ODEAnnotation(delay=1)
         self.assertEqual(annotation.safety, Literal(True))
 
-    # 测试输入：缺少 delay 的批注，以及完全缺失 annotation 的 ODE。
-    # 预期行为：两种输入都在 AST 构造阶段抛出明确 ValueError。
-    # 检查内容：分别覆盖批注内部字段缺失和整个批注对象缺失。
-    # 论文对应：项目落实 Section 4.3/Remark 4.1 时要求每个 ODE 给出 d。
+
     def test_delay_and_ode_annotation_are_both_required(self) -> None:
-        """缺少 d 或整个 ODE 批注必须在 AST 构造边界立即报错。"""
+        r"""Verify delay and ODE annotation are both required."""
 
         with self.assertRaisesRegex(ValueError, "explicit delay"):
             ODEAnnotation()
         with self.assertRaisesRegex(ValueError, "Every ODE requires"):
             ODE([("x", 1)], True)
 
-    # 测试输入：int、float、Decimal、Fraction 和常量有理算式六种 d。
-    # 预期行为：全部精确规范化为期望 Fraction Literal。
-    # 检查内容：逐项覆盖小数、除法、负指数而不引入浮点近似。
-    # 论文对应：类型中的有限 delay(d) 需要稳定的非负有理常量。
+
     def test_finite_rational_forms_are_normalized_exactly(self) -> None:
-        """整数、十进制、Fraction 和常量算式都应归一为精确 Fraction。"""
+        r"""Verify finite rational forms are normalized exactly."""
 
         examples = (
             (3, Fraction(3)),
@@ -133,24 +99,18 @@ class AnnotationAstTests(unittest.TestCase):
                 annotation = ODEAnnotation(delay=source)
                 self.assertEqual(annotation.delay, Literal(expected))
 
-    # 测试输入：float 和 Decimal 两种正无穷。
-    # 预期行为：两者统一保存为 math.inf。
-    # 检查内容：确认无限等待批注不依赖调用方的数值对象类型。
-    # 论文对应：连续类型允许 ``d = infinity`` 的纯通信等待情况。
+
     def test_positive_infinity_is_a_valid_delay(self) -> None:
-        """浮点或 Decimal 正无穷都统一保存为 math.inf。"""
+        r"""Verify positive infinity is a valid delay."""
 
         for value in (math.inf, Decimal("Infinity")):
             with self.subTest(value=value):
                 annotation = ODEAnnotation(delay=value)
                 self.assertEqual(annotation.delay, math.inf)
 
-    # 测试输入：负数、变量、无理函数、Bool、NaN、负无穷、除零等 d。
-    # 预期行为：每个非法时延都由 ODEAnnotation 抛出 ValueError。
-    # 检查内容：覆盖符号性、符号方向、非有理性和未定义算术边界。
-    # 论文对应：项目只接受 Remark 4.1 所需的非负有理数或正无穷。
+
     def test_invalid_delays_are_rejected_at_construction(self) -> None:
-        """负数、符号量、非有理式、Bool、NaN 和负无穷都必须立即失败。"""
+        r"""Verify invalid delays are rejected at construction."""
 
         invalid_values = (
             -1,
@@ -170,12 +130,9 @@ class AnnotationAstTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ODEAnnotation(delay=value)
 
-    # 测试输入：正确/互换的 ODEAnnotation 与 RecursionAnnotation。
-    # 预期行为：正确对象保持身份；互换类型的两个调用都被拒绝。
-    # 检查内容：防止 safety/delay 和递归 invariant 混入错误节点。
-    # 论文对应：Section 4.3 分别给 ODE 与 X_phi 定义不同批注内容。
+
     def test_ode_and_mu_hold_dedicated_annotation_objects(self) -> None:
-        """原 HCSP 节点只接受各自对应的批注类型。"""
+        r"""Verify ODE and mu hold dedicated annotation objects."""
 
         ode_annotation = ODEAnnotation(safety=True, delay=1)
         recursion_annotation = RecursionAnnotation("x >= 0")
@@ -188,23 +145,16 @@ class AnnotationAstTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             Mu("X", Skip(), annotation=ode_annotation)  # type: ignore[arg-type]
 
-    # 测试输入：省略 RecursionAnnotation 的 ``Mu("X", Skip())``。
-    # 预期行为：自动得到 invariant=Literal(True)。
-    # 检查内容：核对默认对象已经规范化，而不是在检查器中临时猜测。
-    # 论文对应：Section 4.3 对省略递归边界不变量采用 true 约定。
+
     def test_recursion_annotation_omission_means_true(self) -> None:
-        """递归不变量省略时也按论文约定解释为 true。"""
+        r"""Verify recursion annotation omission means true."""
 
         recursion = Mu("X", Skip())
         self.assertEqual(recursion.annotation.invariant, Literal(True))
 
-    # 测试输入：当前 ODE dataclass 的完整字段定义。
-    # 预期行为：annotation 仍是唯一批注入口，local_clock 是独立的语义字段。
-    # 检查内容：正向比较当前 ODE 的完整字段集合，防止隐藏时钟混进批注。
-    # 论文对应：Section 2.1 的 ODE 主体、Section 4.3 的 phi/d 批注以及
-    #           Table 2 前提中的新鲜局部 t 分别有唯一位置。
+
     def test_ode_has_one_annotation_storage_path(self) -> None:
-        """ODE 的批注与自动局部时钟应位于不同的唯一字段。"""
+        r"""Verify ODE has one annotation storage path."""
 
         self.assertEqual(
             tuple(field.name for field in fields(ODE)),
@@ -221,12 +171,9 @@ class AnnotationAstTests(unittest.TestCase):
         self.assertFalse(clock_field.init)
         self.assertFalse(clock_field.compare)
 
-    # 测试输入：构造两个没有用户方程的 ODE，不传入任何时钟参数。
-    # 预期行为：两者自动获得不同 ODELocalClock，且名称/初值/导数固定为 t/0/1。
-    # 检查内容：同时确认 ODE 构造器不接受用户注入 local_clock 或 deadline。
-    # 论文对应：Table 2 的 ODE 前提要求每个 ODE 使用新鲜局部时钟 t。
+
     def test_every_ode_owns_a_fresh_fixed_local_clock(self) -> None:
-        """ODE 自动时钟应独立、不可配置，并固定从零以单位速率演化。"""
+        r"""Verify every ODE owns a fresh fixed local clock."""
 
         first = ODE([], True, annotation=ODEAnnotation(delay=1))
         second = ODE([], True, annotation=ODEAnnotation(delay=2))
@@ -247,14 +194,11 @@ class AnnotationAstTests(unittest.TestCase):
 
 
 class ODEAnnotationTypingTests(unittest.TestCase):
-    """检查 safety/delay 如何生成证明义务与互斥的规范时延类型。"""
+    r"""Tests for ODE Annotation Typing."""
 
-    # 测试输入：静止 ODE、safety=true、delay=infinity，且不配置 dL 后端。
-    # 预期行为：总结果为 true，并记录一条本地通过的 safety 义务。
-    # 检查内容：核对恒真安全式不被错误降级为 unknown。
-    # 论文对应：T-ODE 的 phi=true 特例及无限延迟纯通信类型。
+
     def test_true_safety_is_accepted_without_a_dl_backend(self) -> None:
-        """安全性质 true 应本地判真，不能因为没有外部证明器变成 unknown。"""
+        r"""Verify true safety is accepted without a dL backend."""
 
         process = Sequence.of(
             ODE(
@@ -280,13 +224,9 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         self.assertEqual(len(safety_obligations), 1)
         self.assertEqual(safety_obligations[0].verdict, Verdict.TRUE)
 
-    # 测试输入：静止 ODE，批注明确给出精确有理 delay=1/2。
-    # 预期行为：可信 dL 后端批准域前提后，得到以 BottomType 表示不可达
-    #           deadline 后继的 FiniteDelayType。
-    # 检查内容：显式 skip 的两条候选都被审计，规范 Type 精确保留有理时延。
-    # 论文对应：Section 4.3 的有限 ODE 候选规则与统一时延类型。
+
     def test_delay_annotation_appears_in_the_constructed_type(self) -> None:
-        """有限有理 d 必须精确形成 delay(d)，而不是由检查器重新计算。"""
+        r"""Verify delay annotation appears in the constructed type."""
 
         process = Sequence.of(
             ODE(
@@ -315,12 +255,9 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         self.assertNotIn("T-ODE-boundary", rules)
         self.assertNotIn("T-ODE-delay", rules)
 
-    # 测试输入：x'=1、域 x<=10、安全式 x<=8、delay=2。
-    # 预期行为：可信 mock 后端批准后结果为 true。
-    # 检查内容：报告必须同时含 T-ODE-safety 和 T-ODE-domain 义务。
-    # 论文对应：无后继的 T-ODE 与纯通信规则需要 safety/domain 验证。
+
     def test_nontrivial_safety_generates_a_dl_obligation(self) -> None:
-        """非恒真安全性质必须交给 dL 后端验证。"""
+        r"""Verify nontrivial safety generates a dL obligation."""
 
         process = Sequence.of(
             ODE(
@@ -343,12 +280,9 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         self.assertIn("T-ODE-domain", rules)
         self.assertNotIn("T-ODE-boundary", rules)
 
-    # 测试输入：有限时延 ODE 后顺序连接具有 Int 载荷的 ``done!0``。
-    # 预期行为：无通信中断使结果成为 FiniteDelayType，continuation 是 done!。
-    # 检查内容：比较 duration 和 OutputType continuation 的完整结构。
-    # 论文对应：新版 Table 2 带自然结束后继的第二条 T-\unrhd 规则。
+
     def test_outer_sequence_becomes_the_ode_fallback(self) -> None:
-        """ODE; P 使用带 fallback 的规则，并把 d 写入该类型。"""
+        r"""Verify outer sequence becomes the ODE fallback."""
 
         process = Sequence.of(
             ODE(
@@ -373,12 +307,9 @@ class ODEAnnotationTypingTests(unittest.TestCase):
         self.assertEqual(report.verdict, Verdict.TRUE)
         self.assertTrue(types_equivalent(report.constructed_type, expected))
 
-    # 测试输入：delay=infinity 的无中断 ODE 后仍顺序连接 Skip。
-    # 预期行为：结果为 true，超时后继 Skip 被设置为 bottom，最终 A 为 0。
-    # 检查内容：不生成有限边界义务，也不把不可达 tail 保存在 timeout fallback。
-    # 论文对应：A := delay(infinity) \unrhd A \triangleright bottom；本例 A=0。
+
     def test_infinite_delay_discards_sequential_timeout_fallback(self) -> None:
-        """无限时延后的顺序项不能成为一个永远不会触发的超时分支。"""
+        r"""Verify infinite delay discards sequential timeout fallback."""
 
         process = Sequence.of(
             ODE(
@@ -405,14 +336,11 @@ class ODEAnnotationTypingTests(unittest.TestCase):
 
 
 class RecursionAnnotationTypingTests(unittest.TestCase):
-    """检查过程变量边界不变量的入口与回边义务。"""
+    r"""Tests for Recursion Annotation Typing."""
 
-    # 测试输入：tick 输出后 x:=x+1 并回到 X，invariant 为 x>=0。
-    # 预期行为：结果 true，类型 alpha 等价于 mu T.tick!.T。
-    # 检查内容：报告必须同时出现通过的 T-mu 入口和 T-X 回边义务。
-    # 论文对应：Section 4.3 的边界不变量及 Table 2 T-mu/T-X。
+
     def test_invariant_holds_at_entry_and_after_one_unfolding(self) -> None:
-        """T-mu 与 T-X 应分别验证入口和递归回边。"""
+        r"""Verify invariant holds at entry and after one unfolding."""
 
         process = Mu(
             "X",
@@ -443,12 +371,9 @@ class RecursionAnnotationTypingTests(unittest.TestCase):
         self.assertIn("T-mu", rules)
         self.assertIn("T-X", rules)
 
-    # 测试输入：tick 后执行 x:=-1，再回到要求 x>=0 的 X。
-    # 预期行为：总结果 false，唯一 T-X 义务也为 false。
-    # 检查内容：隔离递归出口无法重新建立边界不变量的失败。
-    # 论文对应：T-X 要求每次递归回边重新满足 X_phi 的 phi。
+
     def test_invariant_violation_at_recursion_boundary_is_rejected(self) -> None:
-        """递归体若不能重新建立 phi，T-X 必须产生反例。"""
+        r"""Verify invariant violation at recursion boundary is rejected."""
 
         process = Mu(
             "X",
@@ -470,12 +395,9 @@ class RecursionAnnotationTypingTests(unittest.TestCase):
         self.assertEqual(len(boundary), 1)
         self.assertEqual(boundary[0].verdict, Verdict.FALSE)
 
-    # 测试输入：带 safety/delay 的 ODE、tick 输出和递归 X 的组合循环。
-    # 预期行为：可信 dL 后端下整体结果为 true。
-    # 检查内容：同时要求 T-mu、T-X、ODE-safety、ODE-boundary 四类义务。
-    # 论文对应：Section 4.3 两种批注在同一 HCSP 进程中的组合推导。
+
     def test_ode_and_recursion_annotations_work_together(self) -> None:
-        """组合场景同时使用 ODE safety/d 与 X 的边界不变量。"""
+        r"""Verify ODE and recursion annotations work together."""
 
         process = Mu(
             "X",

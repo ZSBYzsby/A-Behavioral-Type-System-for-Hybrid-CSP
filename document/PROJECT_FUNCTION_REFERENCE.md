@@ -1,39 +1,40 @@
-# HCSP Behavioral Type Constructor and Checker：完整功能参考
+# HCSP Behavioral Type Constructor and Checker: complete reference
 
-本项目以论文 *A Behavioral Type System for Hybrid CSP* 的 Table 2 为规则
-来源，但当前代码不是对论文排版的逐字翻译。多标量通信、控制节点自持公共后继、
-共享 Gamma、全局只读参数、ODE 隐式时钟和双候选、三值证明等都是实际实现的一
-部分。需要审计每条规则真正执行的数学操作时，应先阅读
-[当前代码的实现语义与论文规则落地方式](IMPLEMENTATION_SEMANTICS.md)，再用本文
-查询模块、输入和接口。项目使用 Section 2.1 的 HCSP 语法范畴，并把 Section
-4.2/4.3 要求的安全、时延和递归不变量批注随 AST 一同输入：
+Table 2 of *A Behavioral Type System for Hybrid CSP* supplies the rules.
+The implementation makes explicit choices for multiple scalar communication
+slots, control-node continuations, shared Gamma, read-only parameters, implicit
+ODE clocks, candidate rules, and three-valued proofs. For rule-level mathematical
+operations, start with [Implementation semantics](IMPLEMENTATION_SEMANTICS.md),
+then use this reference for modules, input, and interfaces. The project uses
+Section 2.1 syntax and carries Section 4.2/4.3 safety, delay, and recursion annotations:
 
-- 用户把共享参数、`Gamma`、`Theta` 和 HCSP process 写在同一份完整 source 中；
-- 两个公共业务接口都在内部解析 source：TypeConstructor 主动构造 Type AST，
-  TypeChecker 递归验证用户在末尾给出的 Type；
-- Gamma 的连续项只登记允许出现的完整 ODE 演化向量；轨迹 `phi` 只由 ODE safety 定义；
-- 把待构造对象表示成 configuration、system、process 或 event conclusion judgment；
-- 每个 `rule_t_*` 只返回显式 `RuleExpansion(premises, conclude)`，不在规则内递归；
-- `T-Assign` 在规则展开时确定性地生成惰性最强后置状态，不把未知 `phi'` 留给证明器综合；
-- 统一求解器递归处理 child judgment premises，并自底向上组合行为类型；
-- 已经具体化的 formula premises（state、FOL、dL）按规则书写顺序立即化简并交给 Z3/KeYmaera X；结果为 `false` 时立即短路，结果为 `unknown` 时记录义务并继续规则构造；
-- 有限 ``ODE;skip`` 顺序试用两条 Table 2 规则，并根据各自 premise 的即时结果选择唯一可行结论；
-- 内部判定区分 `true`、`false` 和 `unknown`；公共接口只在 `true` 时返回可信
-  Type AST。`false` 或无法形成类型的失败通过 `HCSPTypeConstructionError` 报告；
-  `unknown` 且构造完整时通过
-  `HCSPUntrustedTypeConstructionError.untrusted_type` 提供不可信候选供审计。
+- Shared parameters, Gamma, Theta, and HCSP Process appear in one complete source.
+- The two HCSP interfaces parse internally: construction produces a Type AST;
+  checking verifies a supplied final Type section.
+- Continuous Gamma entries register complete ODE vectors; trajectory properties come from ODE safety.
+- Internal conclusions are configuration, system, Process, or event judgments.
+- Each `rule_t_*` returns `RuleExpansion(premises, conclude)` without recursive rule execution.
+- T-Assign deterministically creates a lazy strongest post-state, without synthesizing unknown phi'.
+- An explicit-stack evaluator handles child judgments and combines Types bottom-up.
+- Concrete state/FOL/dL formulas are simplified and proved in premise order by
+  Z3/KeYmaera X. False short-circuits; unknown retains evidence and continues construction.
+- Finite `ODE;skip` tries two Table 2 rules in order and selects using immediate premise results.
+- Only true returns a trusted Type AST. False or incomplete construction raises
+  `HCSPTypeConstructionError`; complete unknown candidates are available through
+  `HCSPUntrustedTypeConstructionError.untrusted_type` for review.
 
-主动生成 Type 的功能称为 **TypeConstructor**；检查用户给定 Type 的功能称为
-**TypeChecker**。二者已经分别实现，并共享 Table 2 规则展开、表达式语义和证明
-后端，但两个业务后端彼此不导入。具体公共入口见“公共接口的输入和输出”。
+**TypeConstructor** constructs Types; **TypeChecker** checks supplied Types.
+Both are implemented and share expansion, expression semantics, and provers,
+without importing each other. See Public interface inputs and outputs below.
 
-## 获取源码并准备环境
+## Obtain source and prepare the environment
 
-项目支持 Python 3.10–3.13。把源码上传到 GitHub 后，合作者只需克隆仓库、
-建立独立虚拟环境并安装 `requirements.txt`；不需要构建 wheel 或 sdist。
-以下命令都应在仓库根目录执行。
+Python 3.10–3.13 is supported. Clone the repository, create a virtual environment,
+and install `requirements.txt` to run from source, without building a wheel/sdist.
+Alternatively, editable installation is documented in the root README.
+Run the following commands from the repository root.
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 py -m venv .venv
@@ -42,7 +43,7 @@ py -m venv .venv
 .\.venv\Scripts\python -m hcsp_typechecker
 ```
 
-Linux/macOS：
+Linux/macOS:
 
 ```bash
 python3 -m venv .venv
@@ -52,21 +53,22 @@ python -m pip install -r requirements.txt
 python -m hcsp_typechecker
 ```
 
-运行时 Python 依赖只有 `z3-solver`。HCSP 和表达式 AST 均由项目自身定义，
-不接受外部工具对象，也不依赖 `.type` 标签或同名字段进行鸭子类型转换。
+The only Python runtime dependency is `z3-solver`. HCSP and expression ASTs are
+project-defined; external tool objects or duck-typed objects with `.type` or
+similar fields are not accepted.
 
-从源码运行时存在两个明确的能力层次：
+Source execution has two capability levels:
 
-1. **核心模式**只要求 Python 和 Z3，可以构造 Process AST、按规则构造 Type AST、
-   检查离散规则并生成 ODE 的 dL 证明义务；
-2. **完整模式**额外要求 Java 17+ 和 KeYmaera X，用于真正证明 dL 义务。
+1. **Core mode** needs Python and Z3: Process ASTs, Type construction, discrete
+   checking, and generation of ODE dL obligations.
+2. **Full mode** additionally needs Java 17+ and KeYmaera X to prove external dL goals.
 
-KeYmaera X 是独立外部工具，本仓库不提交 `keymaerax.jar`。从其官方发行渠道
-取得 jar 后，通过环境变量配置，不需要修改任何 Python 文件。Java 已通过
-`JAVA_HOME` 配置或已在 `PATH` 中时，可以省略 `KEYMAERAX_JAVA`。查找顺序为
-`KEYMAERAX_JAVA`、`JAVA_HOME/bin/java`、`PATH`。
+KeYmaera X is external, and the repository does not include `keymaerax.jar`.
+Obtain its official distribution and configure environment variables without
+editing Python source. Java lookup uses `KEYMAERAX_JAVA`, then
+`JAVA_HOME/bin/java`, then `PATH`; explicit `KEYMAERAX_JAVA` is optional when Java is discoverable.
 
-Windows PowerShell：
+Windows PowerShell:
 
 ```powershell
 $env:KEYMAERAX_JAR = "C:\tools\keymaerax.jar"
@@ -76,7 +78,7 @@ $env:KEYMAERAX_TIMEOUT = "60"
 python -m hcsp_typechecker --require-keymaerax
 ```
 
-Linux/macOS：
+Linux/macOS:
 
 ```bash
 export KEYMAERAX_JAR="$HOME/tools/keymaerax.jar"
@@ -86,25 +88,24 @@ export KEYMAERAX_TIMEOUT=60
 python -m hcsp_typechecker --require-keymaerax
 ```
 
-若希望保留每次证明生成的 `.kyx/.kyp` 证据，还可以设置：
+To retain generated `.kyx/.kyp` evidence, also set:
 
 ```text
 KEYMAERAX_KEEP_ARTIFACTS=true
-KEYMAERAX_ARTIFACTS=<可写输出目录>
+KEYMAERAX_ARTIFACTS=<writable-output-directory>
 KEYMAERAX_CLI_STYLE=auto
 KEYMAERAX_TACTIC=auto
 KEYMAERAX_ARITHMETIC_TOOL=Z3
 ```
 
-若未配置 KeYmaera X，核心模式和全部不需要真实外部证明器的自动化测试仍可
-运行；需要外部 dL 证明的义务会明确返回 `unknown`，不会被猜成 `true` 或
-`false`。环境诊断在这种情况下仍以成功状态退出；只有对
-`python -m hcsp_typechecker` 显式加入
-`--require-keymaerax` 才把缺少 Java/jar 视为部署错误。
+Without KeYmaera X, core mode and tests using controlled prover fixtures still
+work. Goals requiring external dL proof explicitly become unknown, rather than
+assumed true/false. The doctor exits successfully for a usable core environment;
+`python -m hcsp_typechecker --require-keymaerax` additionally requires Java and the jar.
 
-## Section 2.1 语法
+## Section 2.1 syntax
 
-核心 AST 逐项对应论文产生式：
+Core ASTs correspond to the paper's productions:
 
 ```text
 E ::= empty
@@ -120,10 +121,9 @@ P ::= skip | x := e | assert(B)
 S ::= P | S || S'
 ```
 
-需要主动构造类型时，普通用户使用包根的 `construct_hcsp_type(...)`。它按
-[GAMMA_THETA_INPUT_SYNTAX.md](GAMMA_THETA_INPUT_SYNTAX.md) 解析一份完整输入，在
-内部把共享参数、Gamma、Theta 和 Process AST 保持为同源数据，然后立即执行完整
-类型构造：
+Users construct Types through `construct_hcsp_type(...)`. It parses complete input
+under [GAMMA_THETA_INPUT_SYNTAX.md](GAMMA_THETA_INPUT_SYNTAX.md), binds shared
+parameters, Gamma, Theta, and Process from that source, and starts construction:
 
 ```python
 from hcsp_typechecker import construct_hcsp_type
@@ -142,78 +142,75 @@ type_ast = construct_hcsp_type(
 )
 ```
 
-解析结果不会作为公共中间对象返回，Process AST 也不会通过包根暴露。接口会自行
-建立 Table 2 所需的配置，并按规则顺序一边构造类型、一边证明公式。证明义务为
-`false` 时立即停止；为 `unknown` 时保留证据并继续构造。构造完整且全部义务为
-`true` 时返回可信 `TypeAST`；构造完整但仍有 `unknown` 时抛出
-`HCSPUntrustedTypeConstructionError`，完整候选类型只通过其 `untrusted_type`
-属性提供。
+Parsed environments and Process ASTs remain internal. The facade creates required
+configurations and interleaves construction with proof. False stops immediately;
+unknown retains evidence and continues. Complete all-true construction returns
+trusted TypeAST; complete unknown construction raises
+`HCSPUntrustedTypeConstructionError`, exposing the candidate only as `untrusted_type`.
 
-接口支持以下 `output` 模式：
+Output modes are:
 
-- `"none"`：默认值，不打印；
-- `"result"`：显示最终结论；成功时按规范用户 Type 语法打印可信类型，证明未决
-  时按同一语法打印完整候选及“不可信”标记，其他失败打印原因和部分进度；
-- `"full"`：打印原始输入、环境摘要、内部构造完成说明、规则步骤、FOL/dL 公式、
-  证明器结论、未决义务和最终可信性，但不打印 Process AST 对象/repr。
+- `none`: default; no printing.
+- `result`: final verdict and canonical trusted Type, complete untrusted candidate
+  with its trust status, or failure reason and partial progress.
+- `full`: original input, environment summary, construction progress, rule steps,
+  FOL/dL formulas, backend results, unresolved obligations, and trust status.
+  It does not print Process AST objects or reprs.
 
-打印模式只影响展示，不改变返回对象、证明过程或异常语义。若要重定向日志，可
-通过 `stream=` 传入文本流。完整的调用参数和失败处理见“输入和输出”一节。
-词法、语法或 source 结构错误抛出带文件名、行、列和源码指示位置的
-`HCSPInputError`。
+Presentation does not change returned objects, proofs, or exceptions. `stream=`
+redirects to a text stream. See Public interface inputs and outputs for complete
+arguments and failure handling. Lexical, syntax, and source-structure errors
+raise `HCSPInputError` with source name, line, column, and diagnostic span.
 
-`parse_hcsp_source`、`parse_hcsp`、`parse_expression`、`construct_type` 和直接 Python
-AST 构造器仍供项目实现、测试和论文规则审计使用，但属于内部开发接口，不从包根
-公开，也不承诺跨版本保持调用协议稳定。普通用户不需要构造
-`TypeConstructionRequest`、内部判断或 `TypeConstructionReport`。
+`parse_hcsp_source`, `parse_hcsp`, `parse_expression`, `construct_type`, and direct
+AST constructors are internal implementation/test/review interfaces, outside
+package-root compatibility guarantees. Users need not construct
+`TypeConstructionRequest`, internal judgments, or `TypeConstructionReport`.
 
-若要手工修改简短完整输入并查看最终结果，可在仓库根目录运行：
+To edit short complete inputs and inspect results, run from the repository root:
 
 ```text
-python demo.py
+python examples/demo_type_construction.py
 ```
 
-把共享参数、Gamma、Theta 和 Process 绑定成一份完整 source 的用户输入格式已经整理在
-[GAMMA_THETA_INPUT_SYNTAX.md](GAMMA_THETA_INPUT_SYNTAX.md)；该文档是统一解析器
-已经实现的权威根语法，`HCSP_INPUT_SYNTAX.md` 只定义其 Process/Expr 子语法。
+[GAMMA_THETA_INPUT_SYNTAX.md](GAMMA_THETA_INPUT_SYNTAX.md) is the implemented
+root grammar binding parameters, Gamma, Theta, and Process.
+`HCSP_INPUT_SYNTAX.md` defines its Process/Expr subgrammars.
 
-以下关于具体 Process/Expr 节点和 Python 构造器的内容用于维护者审计内部表示，
-不是普通用户的调用方式，也不属于包根稳定接口。
+The following concrete Process/Expr nodes and Python constructors describe
+internal representations for maintainers, not the stable user API.
 
-其中 `Sequence` 和 `Parallel` 是二元节点；`If`、`InternalChoice` 和 `ODE`
-是自持公共后继的顺序末端节点，`InternalChoice` 同时是多元节点；`E` 只能
-出现在 ODE 的中断字段中。`Sequence.of(...)`、`InternalChoice.of(...)`、
-`EventChoice.of(...)`、`Parallel.of(...)` 是生成上述规范递归 AST 的类方法。
+`Sequence` and `Parallel` are binary nodes. `If`, n-ary `InternalChoice`, and
+`ODE` own common continuations and end their sequence spines. E occurs only in
+ODE interrupts. `Sequence.of(...)`, `InternalChoice.of(...)`, `EventChoice.of(...)`,
+and `Parallel.of(...)` construct the corresponding normalized recursive ASTs.
 
-`(if B then P else P');Q`、`(P_1 |~| ... |~| P_n);Q` 和 `ODE;Q` 的
-唯一规范表示分别由 `If.continuation`、`InternalChoice.continuation` 和
-`ODE.continuation` 保存。其中内部选择写成
-`InternalChoice(P_1, ..., P_n, continuation=Q)`。
-`InternalChoice(P_1, ..., P_n)` 是允许缺省公共后继的便捷写法，构造后的
-`continuation` 字段仍实际保存 `Skip()`。直接写
-`Sequence(If(...), Q)`、`Sequence(InternalChoice(...), Q)` 和
-`Sequence(ODE(...), Q)` 都会被拒绝；`Sequence.of(...)` 若遇到这些便捷输入，
-会立即把 Q 吸收进相应控制节点。
+`(if B then P else P');Q`, `(P_1 |~| ... |~| P_n);Q`, and `ODE;Q` store Q in
+`If.continuation`, `InternalChoice.continuation`, and `ODE.continuation`.
+Internal choice uses `InternalChoice(P_1,...,P_n,continuation=Q)`. Omitting Q in
+the programmatic constructor still stores `Skip()`.
+Direct `Sequence(If(...),Q)`, `Sequence(InternalChoice(...),Q)`, and
+`Sequence(ODE(...),Q)` are invalid; `Sequence.of(...)` absorbs Q into those nodes.
 
-缺省 `Skip()` 是无行为的结构占位。递归尾位置检查会忽略递归调用之后的全部
-`skip`，所以选择分支末尾的 `X` 不会因为缺省公共后继而被误判为非尾递归；如果
-忽略 `skip` 后仍有其他 Process，T-X 仍会拒绝该回边。
+Default Skip is an empty structural placeholder. Tail checking ignores trailing
+skips, so a branch-ending X remains tail-recursive. If any other Process remains
+after skips are ignored, T-X rejects the back edge.
 
-Table 2 的 T-sqcup 在这个 AST 上分别推导 `P; Q` 和 `P'; Q`，再把结果
-组成内部选择类型。因此无需引入通用的类型级 `T-Seq`。
+T-sqcup derives `P;Q` and `P';Q` independently and combines their Types as internal
+choice; no generic type-level T-Seq is needed.
 
-通道名 `ch`、状态变量、进程变量和类型变量统一使用 ASCII IDENT 词法形状
-`[A-Za-z_][A-Za-z0-9_]*`。用户文本还要排除语法保留字，因此 `chan`、
-`channel_1`、`_private` 合法，而裸 `channel` 是环境类型构造关键字，不能作为源码
-标识符。Unicode 名称、全角兼容字符、空白名称、`1channel`、`a-b`、`a.b` 以及
-带首尾空格或换行的名称会在 Expr AST、Process AST、Type AST 或环境入口被拒绝。
+Channel, state, Process, and Type variable names use `[A-Za-z_][A-Za-z0-9_]*`.
+User source also excludes reserved words: `chan`, `channel_1`, and `_private` are
+valid; `channel` is reserved. Unicode/compatibility names, whitespace, `1channel`,
+`a-b`, `a.b`, and names with surrounding whitespace are rejected at AST/environment boundaries.
 
-`d` 必须是有限非负有理数，支持 int、float、Decimal、Fraction 和常量有理
-算式；负数、符号量、Bool、NaN 和正负无穷都会在构造边界被拒绝。
+A finite delay d must be a nonnegative rational. Programmatic input accepts int,
+float, Decimal, Fraction, and constant rational arithmetic. Negative values,
+symbolic values, Bool, NaN, and infinities are invalid finite delays; ordinary ODE
+annotations separately permit positive infinity.
 
-此外，每个普通 `ODE(...)` 也会自动建立一个独立的 `ODELocalClock`：进入 ODE
-时初值固定为 `0`，连续导数固定为 `1`。用户不需要为了测量 ODE 的演化时间
-而在方程、Gamma 或初始状态中声明时钟：
+Every ordinary `ODE(...)` creates an independent `ODELocalClock`, initialized to
+0 with derivative 1. Users need not declare it in equations, Gamma, or initial state:
 
 ```python
 ode = ODE(
@@ -227,78 +224,69 @@ assert ode.local_clock.initial_value == Literal(0)
 assert ode.local_clock.derivative == Literal(1)
 ```
 
-在一个 ODE 的方程右端、演化域和 `safety` 中，保留名 `t` 直接表示该 ODE
-隐式时钟的当前值；上例的 Gamma 把 `x` 声明成普通 `Real`，再用另一个键登记
-`ode_x: ContinuousType(("x",))`，不需要声明或初始化 `t`。核对 Gamma 中的 ODE
-向量时只读取用户写在 `ODE.eqs` 左侧的变量，自动添加的 `t` 不属于该向量。
-这个默认例子的 domain/safety 都是 `true`，所以纯通信中断、无自然后继的
-ODE 的公共后继保存在节点自己的 `continuation` 字段。若它不是占位 `Skip`，
-则会按论文
-生成精确 boundary 义务，未配置 KeYmaera X 时总体判定保守显示 `unknown`；规则
-推导仍会尽量形成完整候选，但该候选保持未验证状态。
-也可以把 domain/safety 改成例如 `t < 5 and x < 20` 与 `x >= t`；它们分别
-成为演化域不变量和安全性后置条件。
-用户不能把 `t` 再写成方程左端，因为 `t'=1` 已由 ODE 自动提供。局部 `t`
-不进入 Gamma、`fv`、`bv`、`get_vars()` 或并行状态所有权集合 `V`，也不作用于事件分支
-continuation 和 ODE 的顺序后继。若这些后续位置需要一个持久时钟，应改用另一
-个普通状态变量并在 Gamma 中声明。不同 ODE（包括并行 ODE）各自获得不同内部
-实例，TypeConstructor 生成 dL 时将各处源名 `t` 映射到本 ODE 的同一个新鲜 Real。
+Within ODE right-hand sides, domain, and safety, t reads the implicit local clock.
+For this example, declare x as Real and register
+`ode_x: ContinuousType(("x",))`; t needs no declaration or initial value and is
+excluded from ODE-vector matching. The example has true domain/safety.
+An ODE owns its continuation; a non-skip finite continuation requires an exact
+boundary goal. Without the external prover, unresolved goals make any complete
+candidate untrusted. Domain/safety can instead be `t < 5 and x < 20` and `x >= t`.
+Users cannot provide a t left-hand side, since `t'=1` is automatic. Local t is
+excluded from Gamma, `fv`, `bv`, `get_vars()`, and parallel ownership V, and is not
+in scope in interrupt or external continuations. Persistent clocks there require
+ordinary declared state variables. Each ODE, including parallel ODEs, has a fresh
+internal Real clock symbol shared by that ODE's dL formulas.
 
-普通 ODE 的隐藏时钟只负责测量时间，不会把时延边界偷加进用户演化域，
-因此 `delay` 仍是由用户提供的外部批注；只有带自然顺序后继的有限 ODE 才按
-Table 2 额外验证恰好到达该边界。ODE 若需要在 `d` 时自然结束，应在自己的
-演化域中显式写出严格边界，
-例如 `t < 5`。
+The hidden clock measures elapsed time without inserting a delay boundary into
+the user domain. Delay remains an explicit annotation. Finite natural timeout
+requires proof of the exact boundary; to end at d, give an explicit strict domain
+boundary, for example `t < 5`.
 
-### Assumption 2.1 构造期检查
+### Assumption 2.1 construction checks
 
-项目检查 `fv(S) ∩ bv(S) = ∅`。`ch?(x1,...,xn)` 把所有 `xi` 加入绑定值变量
-集合，并绑定它的顺序后继或事件分支 continuation 中的同名出现；`mu X.P` 把 `X` 加入
-绑定进程变量集合，并绑定递归体 `P` 中的同名出现。如果某个名称还在绑定范围
-外自由出现，复合 AST 构造器会立即抛出 `ValueError`。
+The project checks `fv(S) ∩ bv(S) = ∅`. Input adds all xi to bound value variables
+and binds occurrences in its sequential/event continuation. `mu X.P` binds X in
+P. A name remaining free outside its binding scope causes composite AST constructors
+to raise `ValueError`.
 
-因此 `ch?(x,y); assert(x >= 0 and y >= 0)` 合法，而
-`assert(x >= 0); ch?(x,y)`、在不同选择
-分支中分别自由使用和绑定 `x`，或者在同一系统中同时自由使用和绑定进程变量
-`X` 都不合法。
+`ch?(x,y); assert(x >= 0 and y >= 0)` is valid. In contrast,
+`assert(x >= 0); ch?(x,y)`, free/bound x in different choice branches, or free/bound
+Process X in one system violates the condition.
 
-项目对复合顺序前缀采用已确认的作用域约定：前缀某个分支中出现的
-`ch?(x1,...,xn)` 可绑定该复合前缀的公共顺序后继。因此
-`If(B, InputChannel("ch", ("x",)), Skip(), continuation=P_using_x)` 按项目约定合法；
-实现不要求 `x` 在前缀的每个分支上都被绑定。
+The implementation lets input in one branch of a composite prefix bind its
+common sequential continuation. Thus
+`If(B,InputChannel("ch",("x",)),Skip(),continuation=P_using_x)` is structurally
+valid without requiring every prefix branch to bind x.
 
-构造 `Parallel(S1, S2)` 时还会检查两个分量的变量全集
-`V = fv ⊎ bv`、输入通道集合 `iCh` 和输出通道集合 `oCh` 必须分别不相交。
-同一通道的一入一出仍合法，可用于并行同步；违反这三项会在进入 TypeConstructor
-之前抛出 `ValueError`。
+`Parallel(S1,S2)` requires disjoint variable sets `V = fv ⊎ bv`, input-channel sets
+iCh, and output-channel sets oCh. A same-channel input/output pair remains valid
+for synchronization. Violations raise `ValueError` before TypeConstructor starts.
 
-### Assumption 2.2 构造期检查
+### Assumption 2.2 construction checks
 
-构造 `Mu("X", body)` 时会立即检查 communication-guarded 条件：`body` 中
-每个受该 `mu` 绑定的 `Var("X")`，在所有可到达它的控制流路径上都必须先
-经过 `InputChannel` 或 `OutputChannel`。赋值、断言、`skip` 和 ODE 演化本身
-都不算通信；任一路径未通信便回到 `X` 时，构造器会抛出 `ValueError`。
+`Mu("X",body)` requires every bound `Var("X")` to be preceded by input/output
+on every path reaching it. Assignment, assertion, skip, and ODE evolution do not
+count as communication. An unguarded path raises `ValueError`.
 
-检查覆盖顺序、条件、内部选择和 ODE 事件 continuation，并遵守词法作用域：
-内层同名 `Mu("X", ...)` 会遮蔽外层绑定。ODE 的事件 continuation 由对应
-事件通信保护，但 ODE 的自然结束路径不会借用中断通信来保护公共后继。
-实现仍按这些 AST 产生式逐项对应论文规则，但核心遍历使用显式工作栈：长顺序
-Process、深 Type continuation、类型构造/检查及规范化项图转换不依赖 Python
-调用栈深度。端到端压力测试会把 TypeConstructor 的真实大规模输出先序列化为正式
-Type 用户语法并交给 TypeChecker，也会直接交给状态图接口，防止前三个接口形成不同的
-人工深度边界。状态图的状态数和转移数仍受调用者给出的规模上限约束，因为这属于
-Table 3 可达状态数量而非 AST 表示深度。
+The check traverses sequences, conditionals, choices, and interrupt continuations,
+respecting shadowing by an inner same-name Mu. Interrupt communication guards
+its branch, but cannot guard the ODE's natural continuation.
+Core traversals use explicit stacks for long Processes, deep Type continuations,
+construction/checking, and normalized term graphs. End-to-end stress tests
+serialize large actual constructed Types for checking and graph generation,
+preventing inconsistent artificial depth limits. Graph limits control reachable
+state/edge counts separately from AST depth.
 
-## Section 4.2/4.3 批注
+## Section 4.2/4.3 annotations
 
-批注不会增加新的 `P` 节点，而是附着在原有 ODE 和 `mu` 节点上：
+Annotations attach to existing ODE and mu nodes without adding new P nodes:
 
 ```text
 ODE:  <dot(v)=e & B>_safety |>[delay] E
 mu:   mu X_invariant.P
 ```
 
-对应的 Python 构造为：
+The corresponding Python constructors are:
 
 ```python
 ode = ODE(
@@ -317,82 +305,82 @@ loop = Mu(
 )
 ```
 
-`safety` 或递归 `invariant` 省略时按论文约定等于 `true`。每个 `ODE` 都必须
-显式提供 `ODEAnnotation`，且其中的 `delay` 必填。有限 delay 必须是可静态
-计算的非负有理常量，正无穷也合法；符号变量、负数、Bool、NaN 和负无穷会在
-AST 构造时立即报错。
+At the programmatic AST level, omitted safety/invariant means true. Each ODE
+requires `ODEAnnotation` with delay. Finite delay is a statically evaluable
+nonnegative rational; positive infinity is also valid. Symbolic values, negatives,
+Bool, NaN, and negative infinity fail immediately at construction.
 
-`ODEAnnotation` 只保存用户提供的 `safety` 和 `delay`；自动 `local_clock` 是
-ODE 节点的独立只读语义字段，不是第三种批注，也不接受用户构造参数。
+`ODEAnnotation` stores safety and delay. Automatic `local_clock` is a separate
+read-only ODE field, not another annotation or user constructor argument.
 
-有限 delay 会统一保存为精确 `Fraction` 字面量。以下输入均合法：
+Finite delays normalize to exact Fractions. These are valid:
 
 ```python
 from decimal import Decimal
 from fractions import Fraction
 
 ODEAnnotation(delay=2)
-ODEAnnotation(delay=0.5)                 # 规范化为 Fraction(1, 2)
-ODEAnnotation(delay=Decimal("0.125"))    # 规范化为 Fraction(1, 8)
+ODEAnnotation(delay=0.5)                 # Normalizes to Fraction(1, 2).
+ODEAnnotation(delay=Decimal("0.125"))    # Normalizes to Fraction(1, 8).
 ODEAnnotation(delay=Fraction(2, 3))
-ODEAnnotation(delay="1 / 4 + 1 / 4")     # 常量算式，结果为 Fraction(1, 2)
+ODEAnnotation(delay="1 / 4 + 1 / 4")     # Constant arithmetic: Fraction(1, 2).
 ODEAnnotation(delay=float("inf"))
 ```
 
-以下输入会抛出 `ValueError`：
+These raise `ValueError`:
 
 ```python
-ODEAnnotation()                 # 缺失 delay
-ODEAnnotation(delay=-1)         # 负数
-ODEAnnotation(delay="d")        # 符号时延
-ODEAnnotation(delay="sqrt(2)")  # 不能静态确定为有理数
-ODE([("x", 1)], True)           # 整个 ODEAnnotation 缺失
+ODEAnnotation()                 # Missing delay.
+ODEAnnotation(delay=-1)         # Negative delay.
+ODEAnnotation(delay="d")        # Symbolic delay.
+ODEAnnotation(delay="sqrt(2)")  # Cannot be statically evaluated as a rational.
+ODE([("x", 1)], True)           # Missing ODEAnnotation.
 ```
 
-## 快速运行与测试
+## Run examples and tests
 
-克隆仓库并安装依赖后，在仓库根目录运行：
+After cloning and installing dependencies, run from the repository root:
 
 ```text
-python demo.py
+python examples/demo_type_construction.py
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-提交或推送前可一次运行环境诊断、隐私路径扫描和完整回归测试：
+Before committing or pushing, run environment diagnostics, private-path scanning,
+and the full regression suite together:
 
 ```text
 python scripts/check_repository.py
 ```
 
-`tests/` 按职责分层组织。这里不写死测试数量，实际数量以测试命令的输出为准：
+Tests are organized by responsibility. The test command reports the current count:
 
 ```text
 tests/
-├── backend/          后端目录边界、共享规则引擎与代码风格
-├── expressions/      Expr AST、输入边界与精确解析
-├── frontend/         前端目录边界
-├── hcsp_syntax/      Process AST 与 Assumption 2.1/2.2
-├── input_frontend/   完整 source、运行上下文、Process 与表达式输入
-├── annotations/      ODE/Mu 批注与自动局部时钟
-├── type_ast/         Type AST 规范化
-├── type_constructor/ Table 2 构造、参数背景、ODE 选规与通信
-├── type_checker/     给定 Type 的递归检查、分组与往返性质
-├── type_syntax/      Type 文本与 Type AST 的可逆转换
-├── model/            运行上下文、证明证据与详细报告
-├── logic/            表达式语义、偏函数有定义性与状态值
-├── dl/               dL 公式与 KeYmaera X 后端
-├── public_api/       稳定门面、日志、异常与案例脚本
-└── quality/          全项目文档及测试审计注释
+├── backend/          Backend boundaries, shared rules, and style
+├── expressions/      Expr ASTs, input boundaries, and exact parsing
+├── frontend/         Frontend boundaries
+├── hcsp_syntax/      Process ASTs and Assumptions 2.1/2.2
+├── input_frontend/   Complete source, contexts, Process/expression input
+├── annotations/      ODE/Mu annotations and automatic local clocks
+├── type_ast/         Formal Type construction and normalization
+├── type_constructor/ Table 2, parameter backgrounds, ODE candidates, communication
+├── type_checker/     Supplied Types, grouping, and round trips
+├── type_syntax/      Reversible Type text/AST conversion
+├── model/            Runtime contexts, proof evidence, and full reports
+├── logic/            Expression semantics, definedness, and state values
+├── dl/               dL formulas and KeYmaera X
+├── public_api/       Stable facade, output, exceptions, and case scripts
+└── quality/          Documentation and language consistency
 ```
 
-表达式解析测试覆盖头部注释列出的每一种支持语法，并比较完整 `Expr` AST。
-Process → Type 测试同样比较行为类型 AST，而不是只比较输出字符串。Table 2
-规则、证明义务和预期结果均直接写在相应测试文件的头注释与测试函数注释中。
-公开仓库的持续集成会在 Windows/Linux 和受支持 Python 版本上重复安装与运行
-这些测试；真实 KeYmaera X 证明作为显式配置的完整模式 smoke test，不是核心
-测试的隐含依赖。
+Expression tests compare full Expr ASTs for supported syntax. Process-to-Type
+tests compare behavioral ASTs rather than only printed strings. Test documentation
+identifies relevant rules, obligations, and expected behavior. CI installs and
+runs tests on Windows/Linux and supported Python versions. Real KeYmaera X
+proof is an explicitly configured full-mode smoke test, not a core-suite dependency.
 
-论文第 4.3 节的递归例子也可以完全通过用户语法输入：
+The paper's Section 4.3 recursion example can use complete user syntax:
 
 ```python
 from hcsp_typechecker import construct_hcsp_type
@@ -413,34 +401,30 @@ process {{
 """
 
 type_ast = construct_hcsp_type(source, output="full")
-# 日志按用户 Type 语法显示：type mu t1. forever interrupt angelic {...}
+# Reports use canonical Type syntax: type mu t1. forever interrupt angelic {...}
 ```
 
-## 公共接口的输入和输出
+## Public interface inputs and outputs
 
-本节用于说明公共接口与内部架构的边界。普通用户需要逐参数说明、返回对象字段、
-异常捕获模板和端到端示例时，请直接阅读
-[公共接口使用手册](PUBLIC_API_GUIDE.md)，避免从本文件的内部实现说明中反推调用
-协议。
+This section distinguishes stable interfaces from internals. For parameter
+details, result fields, exception patterns, and end-to-end examples, use the
+[Public API guide](PUBLIC_API_GUIDE.md).
 
-包根 `hcsp_typechecker` 只公开以下稳定白名单：
+The package-root stable export list contains:
 
-- 四个操作：`construct_hcsp_type`、`check_hcsp_type`、
-  `build_type_transition_graph` 与 `analyze_type_lock_freedom`；
-- 正式结果类型：`TypeAST`、`TypeTransitionGraph` 与 `LockFreedomReport`；
-- 打印模式枚举：`OutputMode`；
-- 六个公共异常：`HCSPInputError`、`HCSPTypeConstructionError`、
-  `HCSPUntrustedTypeConstructionError`、`HCSPTypeCheckingError`。其中
-  `HCSPUntrustedTypeConstructionError` 是
-  `HCSPTypeConstructionError` 的子类；第三接口使用
-  `HCSPTypeTransitionGraphError`；第四接口使用 `HCSPTypeLockAnalysisError`。
-- 四套错误分类和统一明细：`TypeConstructionErrorKind`、
-  `TypeCheckingErrorKind`、`TypeTransitionGraphErrorKind`、`HCSPErrorDetail`。
-  第四套为 `TypeLockAnalysisErrorKind`。
+- Four operations: `construct_hcsp_type`, `check_hcsp_type`,
+  `build_type_transition_graph`, and `analyze_type_lock_freedom`.
+- Result types: `TypeAST`, `TypeTransitionGraph`, and `LockFreedomReport`.
+- Output enum: `OutputMode`.
+- Six exceptions: `HCSPInputError`, `HCSPTypeConstructionError`,
+  its subclass `HCSPUntrustedTypeConstructionError`, `HCSPTypeCheckingError`,
+  `HCSPTypeTransitionGraphError`, and `HCSPTypeLockAnalysisError`.
+- Four category enums: `TypeConstructionErrorKind`, `TypeCheckingErrorKind`,
+  `TypeTransitionGraphErrorKind`, and `TypeLockAnalysisErrorKind`, plus `HCSPErrorDetail`.
 
-Constructor 接口的签名为：
+The constructor signature is:
 
-```python
+```text
 construct_hcsp_type(
     source,
     *,
@@ -454,9 +438,9 @@ construct_hcsp_type(
 ) -> TypeAST
 ```
 
-Checker 的稳定入口为：
+The checker entry point is:
 
-```python
+```text
 check_hcsp_type(
     source,
     *,
@@ -470,37 +454,38 @@ check_hcsp_type(
 ) -> TypeAST
 ```
 
-它要求 source 在相同四类输入后追加 `type configuration_type`，以给定 Type
-为每个规则 judgment 的结论递归检查；失败抛出 `HCSPTypeCheckingError`。
+It requires a final `type configuration_type` after the same program sections,
+checks it as the conclusion of each rule judgment, and raises
+`HCSPTypeCheckingError` on failure.
 
-- `source` 必须包含 Gamma、可选 Parameters、Theta 和 Process；解析得到的环境和
-  Process AST 只在本次调用内部存在，不作为公共结果返回；
-- 单进程的 `initial_states` 可为一个变量到值的 mapping；并行系统必须按
-  source 中顶层进程分量的顺序提供同样数量的 mapping；省略时各分量使用空初态；
-- 初态可以只给出 Gamma 中变量的子集，但不能出现 Gamma 未声明的变量，也不能
-  给共享参数或 `ContinuousType` 声明标签赋初值；若输入目标本身已在 Gamma 中
-  声明为 `BasicType`，它可以有初值，之后仍会被接收动作覆盖；
-- `path_condition` 默认为 `true`，也可以传入符合项目表达式语法的字符串；该
-  字符串的语法错误同样以带独立来源位置的 `HCSPInputError` 报告；
-- 两个 timeout 只改变相应证明器的等待上限，不改变数学规则。
+- Source includes Gamma, optional Parameters, Theta, and Process; parsed
+  environments/ASTs remain internal to the call.
+- One Process accepts one state mapping; parallel input requires one per component
+  in source order. Omission gives empty states.
+- Initial states may cover a Gamma-scalar subset, excluding undeclared names,
+  shared parameters, and ContinuousType labels. Declared BasicType input targets
+  may have initial values that later input replaces.
+- `path_condition` defaults to true and also accepts a strict expression string.
+  String syntax failures raise source-located `HCSPInputError`.
+- Timeouts change waiting limits, not mathematical rules.
 
-只有总体 verdict 为 `true` 且已经形成可信类型时，接口才直接返回 `TypeAST`。
-结构/静态失败或必要公式为 `false` 时，构造立即停止并抛出
-`HCSPTypeConstructionError`。公式为 `unknown` 时不会短路：TypeConstructor 记录
-它并继续构造；若最终形成完整候选类型，接口抛出
-`HCSPUntrustedTypeConstructionError`，其 `untrusted_type` 属性保存该候选。候选适合
-审计或交给其他工具补证，但在未决义务消除前不可信。若仍未形成完整类型，则抛出
-普通 `HCSPTypeConstructionError`。类型构造异常公开 `verdict`、`kind`、`phase`、
-`reason`、`rule`、`location`、`details`、`partial_types`，并提供
-`format_result()` 与 `format_full()`。Checker 异常使用自己的错误分类，另外提供
-`type_mismatch_detected` 与三值 `type_structure_matched`。词法、语法或 source
-结构错误会在对应业务后端启动前终止并抛出 `HCSPInputError`。
+Only a true verdict with a complete Type returns TypeAST normally. Static,
+structural, or false-proof failure stops construction and raises
+`HCSPTypeConstructionError`. Unknown retains evidence and continues; a complete
+candidate raises `HCSPUntrustedTypeConstructionError` with `untrusted_type`,
+while incomplete results use the parent exception. Candidates remain untrusted
+until unresolved obligations are proved. Construction errors expose `verdict`,
+`kind`, `phase`, `reason`, `rule`, `location`, `details`, `partial_types`, and
+`format_result()/format_full()`. Checking has its own categories plus
+`type_mismatch_detected` and three-valued `type_structure_matched`.
+Frontend errors raise `HCSPInputError` before business backends start.
 
-Checker 只在 Type 结构完整匹配且全部前提为 `true` 时返回给定 `TypeAST`。明确
-结构不匹配、规则静态失败或证明为 `false` 时抛出 `HCSPTypeCheckingError`；证明
-为 `unknown` 时仍继续检查剩余 Type 结构以形成完整审计记录，但最终同样抛出
-`HCSPTypeCheckingError(kind="proof-unknown")`，不会把未验证 Type 当作成功返回。
-以下示例展示 Constructor 的异常处理：
+Checking returns the supplied TypeAST only with complete structural matching
+and all premises true. Mismatch, static-rule failure, or false proof raises
+`HCSPTypeCheckingError`. Unknown continues through remaining structure where
+possible. If no mismatch or definite failure takes precedence, unresolved proofs
+raise `kind="proof-unknown"`; an unverified Type is never accepted.
+Constructor exception handling follows:
 
 ```python
 from hcsp_typechecker import (
@@ -517,31 +502,30 @@ try:
         output="result",
     )
 except HCSPInputError as error:
-    # result 模式已经打印诊断；这里可读取 error.kind 或设置退出码。
+    # Result mode already printed diagnostics; inspect error.kind or set an exit code.
     pass
 except HCSPUntrustedTypeConstructionError as error:
-    # result 已用规范 Type 源码打印候选；对象仍在 error.untrusted_type 中。
+    # Result mode printed the candidate; its AST remains in error.untrusted_type.
     pass
 except HCSPTypeConstructionError as error:
     pass
 ```
 
-`output="none"`、`"result"`、`"full"` 也可分别写成
-`OutputMode.NONE`、`OutputMode.RESULT`、`OutputMode.FULL`。接口不会把日志字符串
-当作返回值：可信成功时始终返回 `TypeAST`；不可信候选只附着在异常上。`none`
-不打印；`result` 打印最终可信结果、不可信完整候选或失败摘要；`full` 打印输入、
-实际规则轨迹、FOL/dL 公式、证明结论、待证明义务和类型可信性。Constructor 的
-完整日志还含环境摘要；Checker 的环境可从每条规则步骤读取。两者都不暴露内部
-Process AST 对象/repr。打印目标默认是标准输出，`stream=` 仅用于定向到其他文本流。
+Output strings also have enum forms `OutputMode.NONE/RESULT/FULL`. Return values
+are ASTs, not rendered logs; candidates occur only on exceptions. None prints
+nothing, result prints outcomes/candidates/failures, and full includes input,
+rules, FOL/dL goals, proofs, unresolved obligations, and trust status. Constructor
+full reports add environment summaries; checking environments appear in rule
+steps. Neither exposes Process reprs. Output defaults to stdout, redirected by stream.
 
-所有日志中的 Type 都使用 [TYPE_INPUT_SYNTAX.md](TYPE_INPUT_SYNTAX.md) 的规范
-用户语法，并带完整 `type` 前缀；不会再并列打印 Python Type AST `repr`。因此
-`Type 源码 :` 后的文本可以直接复制回用户输入，并由 TypeChecker 再次读取。
+Reported Types use [Canonical user Type syntax](TYPE_INPUT_SYNTAX.md) with a
+complete `type` prefix, without a parallel Python repr. Text after `Type source :`
+can be copied into input and parsed again by checking.
 
-共享参数在 HCSP 执行前由用户选定，所有合法选择必须满足 source 中同一个
-`where` 约束。它们不属于任一分量的状态 Gamma，可以被所有并行 Process、通道
-refinement、递归不变量和 ODE 公式读取，但不能被初态、赋值、输入动作或 ODE
-左端修改。例如：
+Users choose shared parameter values before execution, with every legal valuation
+satisfying the source where constraint. Parameters are outside component Gamma
+state and are readable in parallel Processes, refinements, recursion invariants,
+and ODE formulas, but cannot be modified by states, assignment, input, or ODEs. For example:
 
 ```hcsp
 gamma(
@@ -560,86 +544,76 @@ theta()
 process {{skip}}
 ```
 
-若参数约束记为 `H`，配置路径记为 `phi`，T-sigma 实际检查
-`H -> phi[sigma]`；后续规则在背景条件 `H and phi` 下推导。因此结果表示
-“对每一个满足 H 的预赋值，类型构造均成立”，而不是只检查某一组参数实例。
-TypeConstructor 还会验证 `H` 可满足，拒绝用矛盾约束得到真空证明。
+For parameter constraint H and configuration path phi, T-sigma checks
+`H -> phi[sigma]`; later rules use `H and phi`. The result covers every parameter
+valuation satisfying H, not just an instance. Construction also checks H is
+satisfiable, rejecting vacuous proofs from inconsistent constraints.
 
-Gamma 中的 `p`、`v`、`a` 是具有当前值的标量；`vehicle_ode` 只登记允许出现的
-完整 ODE 演化向量，不是可读取、赋值或通信更新的普通值。ODE 用户方程左侧的
-变量集合必须与某个 `continuous(...)` 集合恰好相等，排列顺序没有语义差异；
-真子集和真超集会被拒绝。没有显式方程的空 flow ODE 无需 continuous 声明。
-连续演化中要保持的 `phi` 只写在 ODE 的 `safety(...)` 中。ODE 隐藏时钟 `t`
-由节点管理，不进入 Gamma，也不参与向量匹配。
+p, v, and a are scalar Gamma values; vehicle_ode registers only a complete ODE
+vector and cannot be read, assigned, or input-bound. User left-hand sides must
+exactly match a continuous set, independent of order. Strict subsets/supersets fail.
+Empty-flow ODEs need no declaration. Safety properties occur only in safety;
+the implicit t clock is outside Gamma and vector matching.
 
-内部 `construct_type` 会形成包含 verdict、证明义务、诊断和规则轨迹的
-`TypeConstructionReport`，但它不是普通用户接口。公共门面只在全部义务通过时
-交付可信 Type AST；确定失败通过 `HCSPTypeConstructionError` 报告，构造完整但
-证明未决则通过 `HCSPUntrustedTypeConstructionError` 报告并保留
-`untrusted_type`。论文中的 `BottomType`（`\bot`）是正式的不可达错误行为；它不被
-复用为“构造器内部失败”或“尚未构造”的恢复占位符。Constructor 在有限
-`T-\unrhd` 结论中用它标记不可达 deadline 后继；`T-\unrhd'` 的真实空后继则是
-`EmptyType`。
+Internal `construct_type` returns `TypeConstructionReport` with verdict,
+obligations, diagnostics, and rule evidence. The public facade returns trusted
+Types only, raises construction errors on definite failure, and delivers complete
+unknown candidates through untrusted exceptions. Formal Bottom is unreachable/error
+behavior, not an internal construction-failure placeholder. Finite T-unrhd uses
+Bottom for an unreachable deadline continuation; T-unrhd' uses Empty for a real empty continuation.
 
-## 项目架构与自有 AST
+## Architecture and project-defined ASTs
 
-实现按数据流划分为一个稳定门面、输入结构层、两个 Table 2 业务层以及一个
-Table 3 操作语义层：
+The implementation separates a stable facade, input structures, two Table 2
+backends, Table 3 operational semantics, and lock analysis:
 
-- `hcsp_typechecker.api`：面向普通用户的门面层，分别编排 Constructor 的“完整
-  source → 内部 Process AST → `TypeAST`”与 Checker 的“完整 typed source →
-  逐规则验证给定 Type”，并统一打印和异常语义；中间 AST
-  不作为公共结果暴露；
+- `hcsp_typechecker.api`: orchestrates complete-source construction, typed-source
+  checking, graph construction, and analysis, with uniform errors/output.
+  Intermediate Process ASTs remain internal.
 
-- `hcsp_typechecker.frontend.annotated_hcsp_syntax`：带批注 HCSP 与 Expr 的输入结构及其到
-  Process/Expr AST 的片段转换；
-- `hcsp_typechecker.frontend.typing_context_syntax`：Gamma、Theta、全局参数的输入结构及其到
-  内部环境对象的片段转换；
-- `hcsp_typechecker.frontend.type_syntax`：用户给定行为 Type 的输入结构，以及 Type AST 的
-  解析与规范化输出；
-- `hcsp_typechecker.frontend.normalized_type_syntax`：把状态图中的规范化 Type AST
-  输出为贴近原用户 Type 的只读文本；扁平内部选择省略分支圆括号，匿名递归使用
-  `mu { ... }` 和 `recursion_position(index)`；该语法没有 parser；
-- `hcsp_typechecker.frontend.type_transition_graph_syntax`：一次输出状态图元数据、
-  规范状态、边标签和 Table 3 规则证据；该语法同样没有 parser；
-- `hcsp_typechecker.frontend.type_constructor_frontend`：完整 source 的组合前端，负责共享词法、源码位置诊断，
-  并将参数环境、Gamma、Theta 和 Process 绑定为一次 TypeConstructor 调用的内部输入；
-- `hcsp_typechecker.frontend.type_checker_frontend`：在同一完整输入后继续解析必填
-  `type` 分节，并把程序解析记录与用户 Type AST 绑定为一次 TypeChecker 输入；
-- `hcsp_typechecker.data_structures.process_ast`：源语言层，`expressions.py` 定义表达式 ``e/B``，
-  `ast.py` 定义 Section 2.1 的 ``E/P/S`` process AST，以及附着在 ODE/Mu 上的
-  Section 4.2/4.3 批注；
-- `hcsp_typechecker.data_structures.type_ast`：行为类型层，定义 Section 4.1 的行为类型
-  ``T/A``、Section 4.2 的组合类型 ``mathcal T`` 和 alpha 等价比较；后续所有
-  直接分析或变换 Type AST 的功能也放在这一层；
-- `hcsp_typechecker.data_structures.normalized_type_ast`：循环项图构造和状态展示使用的
-  De Bruijn 规范 Type AST；保留有限 ``mu`` 结构，尚不消除有限展开差异；
-- `hcsp_typechecker.data_structures.regular_type_term_graph`：把递归绑定表示为回边的
-  有限循环项图，以及双模拟最小化后供状态图判重的等递归键；
-- `hcsp_typechecker.data_structures.type_transition_graph`：完整状态图的状态、
-  转移标签和规则证据；
-- `hcsp_typechecker.data_structures.runtime_context`：Gamma、Theta、共享参数、
-  Configuration，以及基础类型、连续向量和通道 refinement 的运行上下文定义；
-- `hcsp_typechecker.backend.common`：Constructor 与 Checker 共享的内部基础层；
-  `rule_engine.py` 保存四类 conclusion judgment、两类 premise 和 Table 2 规则展开，
-  并统一执行 Gamma、Theta、参数环境的规范化与良构检查；`environment.py` 保存
-  两个业务后端共同消费的规范环境结果，`model.py` 保存证明义务、诊断、推导
-  步骤与共享规则证据，`logic.py`、`dl.py` 与 `keymaerax.py` 负责逻辑公式和证明后端；
-- `hcsp_typechecker.backend.type_constructor`：TypeConstructor 的独立业务后端，
-  其 `model.py` 定义构造请求和报告名称，`constructor.py` 从规则子结论组合出
-  Type AST；
-- `hcsp_typechecker.backend.type_checker`：TypeChecker 的独立业务后端，消费用户
-  Type AST 的对应子树并检查每个规则结论；其请求和报告也由本目录的
-  `model.py` 定义。它与 Constructor 均依赖 common，两个业务后端彼此不依赖；
-- `hcsp_typechecker.backend.type_operational_semantics`：循环项图上的 Table 3 单步语义、
-  正规项图双模拟最小化和 BFS 可达图构造；它不依赖 Constructor 或 Checker；
-- `hcsp_typechecker.tooling`：项目工具层，目前提供跨平台环境诊断程序。
+- `frontend.annotated_hcsp_syntax`: annotated Process/Expr fragment lowering.
+- `frontend.typing_context_syntax`: Gamma/Theta/parameter fragment lowering.
+- `frontend.type_syntax`: supplied Type parsing and canonical formatting.
+- `frontend.normalized_type_syntax`: read-only normalized AST presentation with
+  flattened choices, anonymous `mu`, and `recursion_position`; no parser.
+- `frontend.type_transition_graph_syntax`: read-only metadata, states, edges,
+  and Table 3 evidence; no parser.
+- `frontend.type_constructor_frontend`: complete-source lexer, locations, and
+  parameters/Gamma/Theta/Process binding for construction.
+- `frontend.type_checker_frontend`: final Type parsing and binding with the parsed program.
+- `data_structures.process_ast`: expressions e/B, Section 2.1 E/P/S nodes,
+  and Section 4.2/4.3 ODE/Mu annotations.
+- `data_structures.type_ast`: Section 4.1 T/A and Section 4.2 configuration Types,
+  alpha equivalence, and direct Type AST analysis/transformation.
+- `data_structures.normalized_type_ast`: finite De Bruijn ASTs for graph compilation
+  and display; finite unfolding differences remain structurally visible.
+- `data_structures.regular_type_term_graph`: finite cyclic representations and
+  bisimulation-minimized equi-recursive state keys.
+- `data_structures.type_transition_graph`: states, labels, transitions, and evidence.
+- `data_structures.runtime_context`: Gamma/Theta/parameters/Configuration,
+  basic types, continuous vectors, and channel refinements.
+- `backend.common`: four conclusion judgments, two premise categories, Table 2
+  expansion, environment normalization, shared results/evidence, expression logic,
+  dL formulas, and KeYmaera X adaptation.
+- `backend.type_constructor`: construction requests/reports and composition of
+  child conclusions into Type ASTs.
+- `backend.type_checker`: supplied-subtree rule checking and its requests/reports;
+  both Table 2 backends depend on common, not each other.
+- `backend.type_operational_semantics`: term-graph Table 3, bisimulation minimization,
+  and BFS closure, independent of construction/checking.
+- `data_structures.type_lock_analysis`: property reports, paths, and witnesses.
+- `backend.type_lock_analysis`: CSR indexing and iterative BFS/DFS analysis.
+- `frontend.type_lock_analysis_syntax`: read-only property and witness formatting.
+- `tooling`: cross-platform environment diagnostics.
 
-依赖方向保持单向：`frontend` 只把文本转换为 `data_structures` 中的领域对象；
-`backend.common` 只依赖领域对象并提供规则/证明基础设施；两个业务后端分别依赖
-`common + data_structures`，彼此不导入；`api.py` 只在最外侧组合前端与后端。
+All module paths above are relative to `hcsp_typechecker`.
 
-包根 `hcsp_typechecker` 的 `__all__` 是明确的公开白名单：
+Dependencies flow in one direction: frontends convert text to domain structures;
+common provides rule/proof infrastructure over those structures; construction
+and checking each depend on common plus data structures, without mutual imports.
+The outer api facade composes frontend and backend calls.
+
+The root `hcsp_typechecker.__all__` is the explicit stable export list:
 
 ```text
 HCSPErrorDetail, HCSPInputError, HCSPTypeConstructionError,
@@ -652,29 +626,25 @@ construct_hcsp_type, check_hcsp_type,
 build_type_transition_graph, analyze_type_lock_freedom
 ```
 
-普通调用方只依赖上述稳定名称。`parse_hcsp_source`、`parse_hcsp`、
-`parse_expression`、`construct_type`、具体 AST 节点、判断、证明义务和后端配置只能
-从相应子包取得，它们是内部实现与开发审计接口，不承诺兼容性，也不会重新从
-包根导出。以后新增 Type AST 分析功能时，也应先通过门面定义清楚稳定协议，
-再选择性加入根包白名单。
+Users depend only on these names. Parsing helpers, construct_type, concrete
+nodes, judgments, obligations, and backend configuration are obtained from
+internal subpackages without compatibility guarantees. Future Type analysis
+should first define a facade contract before joining the root export list.
 
-各 `rule_t_*` 只展开一层推导规则，process/system 结果类型仍严格分离；
-`T-Assign` 通过赋值前路径与更新后的符号映射表示惰性最强后置状态；顺序求解器
-只判定已经具体化的逻辑公式。
+Each rule expands one level, with Process/System result categories kept distinct.
+T-Assign represents a lazy strongest post-state through the pre-path and updated
+symbol map; the evaluator proves already concrete formulas only.
 
-行为类型 AST 将有限连续行为统一保存为
-``FiniteDelayType(d, A, T)``；它仅在打印时按 ``A``、``T`` 是否为空采用
-``delay(d).T``、``delay(d) \unrhd A`` 或完整形式的论文缩写。其中省略自然后继的
-``delay(d) \unrhd A`` 内部保存 `BottomType`，而可达的正常空后继保存
-`EmptyType`，二者不是同一类型。
-``d=infinity`` 时超时永远不会发生，因此 process→type 转换使用显式
-``InfiniteDelayType(A)``；其 timeout fallback 固定为不可达的 ``bottom``，而顺序后继
-只会保留在实际发生的通信中断分支 continuation 中。``EmptyType`` 是过程空通信行为
-``0`` 的唯一表示；空和单分支外部选择分别规范为 ``NoInterruptType`` 和单个
-输入/输出类型。
+Finite continuous behavior uses `FiniteDelayType(d,A,T)`. Paper-style display
+abbreviates based on A/T: `delay(d).T`, `delay(d) \unrhd A`, or the full form.
+An omitted natural continuation stores Bottom; a reachable normal empty one
+stores Empty. Infinite delay uses `InfiniteDelayType(A)`, fixing timeout to
+unreachable Bottom and retaining sequential behavior only in actual communication
+continuations. EmptyType is the unique normal empty communication behavior.
+External choices normalize empty/single branches to NoInterrupt or Input/Output.
 
-下面的字符串表达式和节点构造示例只用于内部实现审计；普通用户应把同样内容
-写进完整 source：
+These expression strings and constructors are internal review examples.
+Users put equivalent content in complete source:
 
 ```python
 from hcsp_typechecker.data_structures.process_ast import (
@@ -697,7 +667,7 @@ hp = Sequence.of(
     Assert(CompareExpr((Variable("x"), Literal(0)), (">=",))),
 )
 
-# 普通表达式结果都是标量基础类型；Gamma 另用 ContinuousType 登记 ODE 集合。
+# Expressions return scalar BasicTypes; Gamma uses ContinuousType to register ODE sets.
 scalar_value = ensure_expr("x + 1")
 multi_channel = ChannelType(
     (BasicType.INT, BasicType.BOOL),
@@ -707,33 +677,29 @@ multi_input = InputChannel("data", ("x", "ready"))
 multi_output = OutputChannel("data", ("x", "ready"))
 ```
 
-TypeConstructor 使用 `isinstance` 分派。不是 `HCSP` 子类的对象会产生结构错误，即使它
-拥有 `type`、`hps` 或 `expr` 等同名字段也不会被接受。
+Construction dispatches with isinstance. Objects outside HCSP fail structurally
+even if they have fields named type, hps, or expr.
 
-表达式层只支持标量字面量、变量、算术、比较、布尔连接和简单函数调用。
-论文未要求普通积类型，因此项目不定义 tuple 表达式或 ``TupleType``；字符串形式
-和 Python tuple/list 对象都会在普通表达式构造边界被拒绝。表达式结果对应
-单个 ``BasicType``。Gamma 的 ``BasicType`` 项才有当前标量值；
-``ContinuousType`` 项只是独立的 ODE 向量声明，不能用于表达式。
-``ChannelType`` 保存一个非空的
-``BasicType`` 槽位序列；``InputChannel`` 和 ``OutputChannel`` 保存同元数的目标变量
-或载荷表达式序列。这里的 Python tuple 只是通信参数列表，不是可赋给变量或由表达式
-求值得到的 tuple 值。每个载荷表达式都独立产生一个标量值，refinement 可以同时引用
-全部槽位的 binder。
-表达式级 `a if B else b` 不受支持；条件控制流统一使用进程节点
-`If(B, P, P', continuation=Q)`；省略 `Q` 时规范为 `Skip()`。
+Expressions support scalar literals, variables, arithmetic, comparisons, Boolean
+connectives, and simple calls. There is no tuple expression or TupleType;
+tuple/list values fail construction. Results have one BasicType. ContinuousType
+is a declaration label without expression value. ChannelType stores a nonempty
+BasicType slot sequence; communication nodes store matching target/payload
+sequences. Their Python tuples are argument lists, not tuple-valued expressions.
+Each payload produces one scalar, and refinements may reference all slot binders.
+Conditional expressions are unsupported; use Process `If(B,P,P',continuation=Q)`,
+whose programmatic omitted continuation defaults to Skip.
 
-表达式翻译结果同时保存 Z3 项、`BasicType` 和求值有定义条件。`/` 始终按实数
-除法处理，整数操作数会先显式提升；除数非零、`sqrt` 参数非负等条件由相应
-Table 2 规则在相应 premise 位置立即判定。`%` 只接受 Nat/Int。因而除零、负数平方根
-或 Real 取模会得到可审计的 `false` 义务/诊断，不会沿用 Z3 的全函数扩展，
-也不会把原始 `Z3Exception` 泄漏给用户。
+Translation retains a Z3 term, BasicType, and definedness. `/` is real division
+with explicit promotion of integer operands. Rules prove nonzero divisors and
+nonnegative sqrt arguments at the corresponding premise. `%` accepts only Nat/Int.
+Division by zero, negative square roots, or Real modulo produce auditable false
+obligations/diagnostics rather than adopting Z3's total-function extensions or leaking Z3Exception.
 
-## ODE 证明后端
+## ODE proof backend
 
-`ODEAnnotation` 保存论文随程序给出的 `safety` 与 `delay`；ODE 自身还自动
-携带隐藏局部时钟。TypeConstructor 据此生成正式的 dL 义务，并默认通过项目内建
-适配器调用 KeYmaera X：
+ODEAnnotation supplies safety/delay, and the ODE adds its hidden clock.
+Construction creates formal dL obligations and uses the built-in KeYmaera X adapter:
 
 ```python
 from hcsp_typechecker import construct_hcsp_type
@@ -760,63 +726,64 @@ type_ast = construct_hcsp_type(
 )
 ```
 
-内建后端会生成单目标 `.kyx` archive，以独立进程运行 KeYmaera X，并兼容
-5.1.x 的 `-prove` 参数和新版 `prove` 子命令。它处理三类 ODE 义务：
+The adapter creates a single-goal kyx archive and launches an independent process,
+supporting legacy 5.1.x `-prove` and modern `prove` CLI styles. Goals include:
 
-- 安全性：`pre_with_t=0 → [{ODE,t'=1}](t≤d → safety)`；
-- 纯通信中断时的演化域：`pre_with_t=0 → [{ODE,t'=1}]B`；
-- 有限 ODE 具有自然顺序后继时的准确边界：在无域动力学
-  `{ODE,t'=1}` 上证明 `(t<d → B) ∧ (t=d → ¬B)`。纯通信中断形式没有
-  自然超时迁移，因此不生成这条义务。
+- Safety: `pre_with_t=0 → [{ODE,t'=1}](t≤d → safety)`.
+- Communication-guaranteed domain: `pre_with_t=0 → [{ODE,t'=1}]B`.
+- Finite natural-timeout boundary: prove `(t<d → B) ∧ (t=d → ¬B)` under
+  domain-free dynamics `{ODE,t'=1}`. Communication-only conclusions have no
+  natural timeout and do not generate this goal.
 
-用户输入中的每个 ODE 都必须显式写出顺序后继；没有实际后继时写
-`ODE; skip`。前端把它规范为 `ODE(..., continuation=Skip())`，不会保留外置
-`Sequence(ODE, Skip)`。这个重叠形状会隔离试用纯通信规则与自然后继规则，再根据
-domain/boundary 的即时证明结果选择；未选候选只作为审计证据保存。后继为
-非 skip 程序时唯一使用自然后继规则。两种解释可以在统一 Type AST 中都以
-不同后继结束：纯通信规则使用不可达 `BottomType`，自然后继规则若后继是 skip
-则使用可达的 `EmptyType`。证明前提和子 judgment 也不同。
+Every source ODE needs an explicit continuation, including `;skip` when there is
+no substantive continuation. It lowers into the ODE field, not external Sequence.
+ODE;skip isolates communication-guaranteed and natural-timeout candidates and
+selects using immediate domain/boundary results. Unselected evidence remains
+for review. Non-skip successors use natural timeout only. The two Types differ
+in Bottom versus reachable Empty continuations, with different premises and child judgments.
 
-后继 judgment 也严格按项目当前采用的 Table 2 规则区分：纯通信规则的事件分支在
-`B ∧ safety` 下检查；带自然超时规则的通信分支只使用 `safety`；其自然后继
-使用 `¬B ∧ safety`。这三种条件由不同的内部枚举值表示，不再共用含义模糊的
-布尔开关。
+Post-contexts are distinct: communication-guaranteed interrupts use `B ∧ safety`;
+natural-timeout interrupts use safety; natural continuation uses `¬B ∧ safety`.
+Separate internal enum values represent these meanings rather than one ambiguous flag.
+Each post-context also retains the prepared shared parameter condition and scalar
+type-domain constraints; see
+[Symbolic post-ODE contexts](TYPE_CONSTRUCTOR.md#96-symbolic-post-ode-contexts).
 
-`delay=∞` 时不再比较 `t` 与有限边界，但自动时钟仍属于该 ODE；若安全性或
-演化域公式不是恒真，生成的 dL 模态仍会包含入口 `t=0` 和方程 `t'=1`。
+Infinite delay avoids finite-boundary comparisons but retains the local clock.
+Nontrivial safety/domain modalities still contain entry t=0 and derivative t'=1.
 
-KeYmaera X 的 `PROVED` 映射为 `true`；明确的反例状态映射为 `false`；未完成、
-超时、解析失败、环境缺失和超出可靠翻译子集均映射为 `unknown`。特别地，
-`safety=true` 会记录一条直接成立的 safety 义务，无需为该义务启动外部进程；
-带自然顺序后继的有限 ODE，其 boundary 义务仍需证明。`false` 会否证当前规则并
-立即停止；`unknown` 只留下待证明义务，后续类型结构仍继续推导。
+PROVED maps to true; definite counterexamples map to false. Incomplete proof,
+timeout, parse failure, missing environment, or unsupported reliable translation
+maps to unknown. True safety is discharged locally; finite natural boundaries
+still require proof. False stops the rule; unknown preserves obligations while
+structural derivation continues.
 
-当前可靠翻译子集包括实数/整数常量与变量、`+ - * / ^`、数值比较以及
-`not/and/or/implies`。整数参数在 dL 中按实数过近似；布尔状态变量、字符串、
-tuple/list、`mod`、表达式级条件和未解释函数不会被不可靠地拼成公式，而会保守
-返回 `unknown`。测试或证明后端开发所用的 `dl_checker`、`keymaerax_config`
-注入点属于内部 `construct_type` 协议，不是普通用户接口；公共门面从环境变量读取
-KeYmaera X 配置，只额外公开 `keymaerax_timeout_seconds` 作为本次调用的超时覆盖。
+Reliable translation covers real/integer constants and variables, `+ - * / ^`,
+numeric comparisons, and `not/and/or/implies`. Integer parameters are overapproximated
+by reals in dL. Boolean states, strings, tuple/list values, modulo, conditional
+expressions, and uninterpreted functions conservatively produce unknown.
+Internal `dl_checker` and `keymaerax_config` injection belongs to construct_type,
+not the public facade. Public calls use environment configuration and expose
+`keymaerax_timeout_seconds` only as a per-call override.
 
-## 判定语义
+## Verdict semantics
 
-一阶逻辑和 dL 前提检查的都是“有效性”，不是仅寻找一个满足赋值。一阶逻辑
-由 Z3 检查其否定是否不可满足；dL 由 KeYmaera X 尝试证明公式。这与 PPT 中
-笼统写的“检查可满足性”不同，但与论文 Table 2 的
-`phi => B`、`phi => refinement`、`pre => [ODE]post` 等全称前提一致：
+FOL/dL premises require validity, not merely a satisfying assignment. Z3 checks
+unsatisfiability of negation; KeYmaera X attempts proof. This realizes universal
+Table 2 premises such as `phi => B`, `phi => refinement`, and `pre => [ODE]post`:
 
-- 否定不可满足：`true`；
-- KeYmaera X 返回 `PROVED`：`true`；
-- Z3 或 KeYmaera X 给出反例：`false`；
-- 求解/证明未完成、超时或工具不可用：`unknown`。
+- Unsatisfiable negation: true.
+- KeYmaera X PROVED: true.
+- A trustworthy Z3/KeYmaera X counterexample: false.
+- Incomplete query/proof, timeout, or unavailable tool: unknown.
 
-当前范围已经包括依据 Table 2 构造类型、检查用户给定类型并证明相应 premises，
-以及从已有 Type AST 生成 Table 3 可达状态图；暂不包含 deadlock/livelock 等图上
-性质分析。
+Current scope includes Table 2 construction/checking and proofs, complete Table 3
+reachable graphs, and deadlock/livelock/Bottom-error analysis on those graphs.
+General termination and other graph properties are outside the current scope.
 
-## Table 3 状态转移图
+## Table 3 transition graphs
 
-已有 `TypeAST` 可交给第三个稳定业务入口：
+An existing TypeAST can be passed to interface 3:
 
 ```python
 from hcsp_typechecker import (
@@ -832,35 +799,33 @@ graph: TypeTransitionGraph = build_type_transition_graph(
 )
 ```
 
-`result` 模式只打印图规模与初始规范 Type；`full` 模式使用两个内部
-frontend formatter 打印全部状态、边标签和规则证据。formatter 不进入包根公开白名单。
+Result mode prints graph size and initial normalized Type. Full mode uses internal
+formatters for all states, labels, and evidence; these formatters are not root exports.
 
-第三个接口使用公开的 `HCSPTypeTransitionGraphError` 报告失败。`kind` 可稳定区分
-非法 Type 根、非法规模选项、规范化失败与规模越界，`phase` 指明失败阶段；规模错误
-还公开 `limit_name`/`limit`，非法选项公开 `option_name`/`option_value`。任何失败都
-不会返回部分状态图。`result` 输出紧凑摘要，`full` 输出输入 Type 和各阶段状态，
-`none` 保持静默。
+`HCSPTypeTransitionGraphError` distinguishes invalid Type, invalid limits,
+normalization failure, and size limits using kind/phase. It exposes limit_name/limit
+or option_name/option_value as appropriate, never a partial graph.
+Result gives compact errors, full adds input and stage progress, and none is silent.
 
-完整图可继续交给第四接口 `analyze_type_lock_freedom(graph, ...)`。它用 CSR 索引和
-非递归 BFS/DFS 线性搜索非空-ready无限等待死锁、纯静默环活锁和可达 Bottom
-错误终止，返回 `LockFreedomReport` 及各自的最短可达路径反例。报告保留论文的
-`lock_free`，另行提供 `error_free` 和综合的 `behavior_correct`。性质为假是正常报告；
-图对象非法或不是完整
-可达闭包时才抛 `HCSPTypeLockAnalysisError`。详见
-[死锁/活锁分析](TYPE_LOCK_ANALYSIS.md)。
+Pass a complete graph to `analyze_type_lock_freedom(graph,...)`. CSR and iterative
+linear BFS/DFS find nonempty-ready infinite waits, silent cycles, and reachable
+Bottom errors. LockFreedomReport contains shortest reachable prefixes and finite
+witnesses, with lock_free, error_free, and behavior_correct kept separate.
+False properties return normally; invalid/incomplete graphs raise
+HCSPTypeLockAnalysisError. See [Lock analysis](TYPE_LOCK_ANALYSIS.md).
 
-该接口先把原 Type AST 单向转换为独立的规范化 Type AST，再由
-`backend/type_operational_semantics` 穷尽基于 Table 3 的关键-deadline约化状态。规范化 AST 与
-`TypeTransitionGraph`、状态、边、标签和规则证据位于 `data_structures`；Type 项图
-转换/最小化、规则执行和 BFS 图构造位于后端。状态判重先把 ``mu``/De Bruijn 结构转换为有限
-循环项图并按最大双模拟取商，因此折叠递归与任意有限展开共享状态编号。Table 3
-直接改写项图，``[P-mu]`` 被回边吸收而不再产生展开中间态；节点显示由项图确定性
-生成规范 AST 代表。项目不提供规范化 Type 转回原 Type AST 的转换。完整说明见
-[规范化 Type AST 与 Table 3 状态转移图](TYPE_OPERATIONAL_SEMANTICS.md)以及
-[规范化 Type AST 只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)和
-[状态迁移图只读输出语法](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)。
+The graph interface normalizes original Types into separate ASTs and enumerates
+Table 3 under critical-deadline reduction. Data structures hold normalized Types,
+graphs, states, labels, and evidence; the backend handles term conversion,
+minimization, rules, and BFS. Recursion becomes cyclic term graphs quotiented by
+greatest bisimulation, merging finite unfoldings. Table 3 rewrites these graphs;
+P-mu is absorbed into back edges, and deterministic normalized ASTs serve display.
+There is no inverse conversion to original Types. See
+[Operational semantics](TYPE_OPERATIONAL_SEMANTICS.md),
+[Normalized output syntax](NORMALIZED_TYPE_OUTPUT_SYNTAX.md), and
+[Graph output syntax](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md).
 
-返回对象的 `initial_state` 是初态编号，`states` 保存连续编号和规范展示 AST，
-`transitions` 保存源、目标、`tau`/时间标签及全部推导证据；
-`graph.outgoing(state_id)` 可取得指定状态的稳定有序出边。状态身份实际使用
-`EquiRecursiveStateKey`，因此展示 AST 只负责解释结果，不参与规则执行或判重。
+initial_state identifies the root; states holds consecutive identifiers and
+display ASTs; transitions holds source/target, tau/time labels, and derivations.
+`graph.outgoing(state_id)` provides stable outgoing edges. EquiRecursiveStateKey
+determines identity; display ASTs do not execute rules or deduplicate states.

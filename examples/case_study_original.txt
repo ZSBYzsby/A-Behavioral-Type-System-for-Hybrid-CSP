@@ -1,0 +1,279 @@
+Original paper case study (Section 5): case_study_original.py
+===========================================================
+
+1. Purpose and scope
+--------------------
+
+case_study_original.py constructs the behavioral type of the vehicle/controller
+case from Section 5 of the original paper version. Its acceleration condition checks the
+predicted velocity safety at the end of a control period, but omits an
+explicit endpoint position check and an intermediate turning-point check.
+
+The mathematical example below explains why an endpoint prediction alone
+cannot establish safety throughout continuous motion. For every d > 0, it
+gives a state that satisfies the original loop invariant and has a safe
+predicted endpoint, yet crosses the target position at time d/2.
+
+In the executable script, d is a concrete positive rational supplied through
+--d. The physical parameters end, vmax, amin, and amax remain symbolic under:
+
+    end >= 0 and vmax >= 0 and amin < 0 and amax >= 0
+
+The expected script outcome is a complete but unverified candidate Type AST
+with unresolved proof obligations. An unknown prover result is a statement
+about unresolved verification; the algebra below supplies the explicit
+counterexample explaining the weakness of the original safety conditions.
+
+
+2. Continuous motion
+--------------------
+
+The vehicle follows:
+
+    p' = v
+    v' = a
+    a' = 0
+    t' = 1
+
+Here p is position, v is velocity, a is acceleration, t is the local clock,
+and d is the control period. Acceleration remains constant during one
+continuous evolution because a' = 0. The HCSP frontend introduces the
+implicit clock t; the source explicitly declares the flow for p, v, and a.
+
+
+3. A concrete parameter instance for the counterexample
+-------------------------------------------------------
+
+To make the counterexample explicit, choose:
+
+    end  = 10    Target position
+    vmax = 4     Maximum allowed forward velocity
+    amin = -2    Minimum acceleration, representing maximum braking
+    amax = 2     Maximum acceleration
+
+These values illustrate one admissible parameter assignment. The executable
+case keeps all four parameters symbolic.
+
+The braking distance at maximum velocity is:
+
+    sb = vmax^2 / (-2 * amin)
+       = 4^2 / 4
+       = 4
+
+The coefficient in the braking condition is:
+
+    -2 * amin = 4
+
+
+4. Original safety conditions
+------------------------------
+
+Position safety:
+
+    phi_p(p) := p <= 10
+
+The vehicle must not cross the target position.
+
+Velocity safety has three cases:
+
+    phi_v(p, v) :=
+        (p >= 10 and v <= 0)
+        or (10 - p >= 4 and v <= 4)
+        or (0 < 10 - p < 4 and (v <= 0 or v^2 <= 4 * (10 - p)))
+
+At or beyond the target, velocity must be nonpositive. At least four units
+before the target, velocity must not exceed vmax. Closer to the target,
+positive velocity must satisfy the braking-distance bound.
+
+The original acceleration condition predicts the endpoint:
+
+    p(d) = p + v*d + a*d^2/2
+    v(d) = v + a*d
+
+and requires:
+
+    phi_a(p, v, a) := -2 <= a <= 2 and phi_v(p(d), v(d))
+
+This condition checks the predicted velocity safety at time d. It does not
+explicitly require phi_p(p(d)) or check positions between time 0 and time d.
+
+For general symbolic parameters, the script uses the same three-case phi_v
+with end, vmax, and amin. It multiplies distance comparisons by -2*amin > 0
+to avoid dividing by a symbolic braking parameter in generated formulas.
+
+
+5. Parameterized counterexample
+--------------------------------
+
+For any d > 0, define:
+
+    u = d / (d + 1)
+
+Choose the following state at the start of a continuous evolution:
+
+    p = 10 - u^2/4
+    v = u
+    a = -2*u/d
+    t = 0
+
+This state tests preservation of the loop invariant used by the ODE proof.
+The executable vehicle initializes p=v=a=0; the algebraic construction above
+refutes invariant preservation without establishing reachability from that
+particular program initialization.
+
+Substitution gives:
+
+    a = -2 / (d + 1)
+
+Therefore -2 < a < 0, so acceleration is within the allowed range [-2, 2].
+
+
+6. Why the initial state and predicted endpoint are safe
+--------------------------------------------------------
+
+Initially, p = 10 - u^2/4 < 10 because u > 0, so phi_p holds.
+Since 0 < u < 1, the remaining distance satisfies 0 < u^2/4 < 4, and:
+
+    v^2 = u^2
+        = 4 * (u^2/4)
+        = 4 * (10 - p)
+
+Thus the initial velocity lies exactly on the braking-safety boundary,
+and phi_v holds.
+
+At the endpoint:
+
+    v(d) = u + (-2*u/d)*d
+         = -u
+
+    p(d) = p + u*d + (-2*u/d)*d^2/2
+         = p + u*d - u*d
+         = p
+
+The vehicle returns to its initial position with negative velocity.
+The predicted endpoint satisfies phi_v, and acceleration is admissible,
+so the original phi_a holds as well.
+
+
+7. Why the midpoint is unsafe
+-----------------------------
+
+At time t = d/2:
+
+    v(d/2) = u + (-2*u/d)*(d/2)
+           = 0
+
+This is the maximum forward position, after which the vehicle moves backward.
+The position is:
+
+    p(d/2)
+      = p + u*d/2 + (-2*u/d)*(d/2)^2/2
+      = p + u*d/4
+      = 10 - u^2/4 + u*d/4
+      = 10 + u*(d-u)/4
+
+For d > 0:
+
+    u > 0
+    d - u = d^2 / (d + 1) > 0
+
+Consequently p(d/2) > 10, so phi_p fails. The trajectory has the form:
+
+    Safe initial state
+        -> Forward motion
+        -> Cross the target and stop at d/2
+        -> Backward motion
+        -> Return to the initial position at d
+
+The initial state and predicted endpoint are safe, while the intervening
+continuous trajectory is unsafe.
+
+
+8. Mathematical claims and generated proof obligations
+-------------------------------------------------------
+
+Let CONSTRUCTION abbreviate the assignments and assumptions in Section 5,
+and let INITIAL_SAFETY be phi_p and phi_v and phi_a. The first claim is:
+
+    CONSTRUCTION -> INITIAL_SAFETY
+
+The second claim describes an execution reaching the unsafe midpoint:
+
+    CONSTRUCTION -> <ODE_PROGRAM> MIDPOINT_UNSAFE
+
+where MIDPOINT_UNSAFE means:
+
+    t = d/2 and p > 10 and v = 0 and not (phi_p and phi_v)
+
+The diamond modality <ODE_PROGRAM> states that an execution of the ODE can
+reach the indicated state. A universal safety statement uses a box modality
+and requires safety along every admissible execution. An execution reaching
+the unsafe midpoint refutes such a universal statement.
+
+The current case_study_original.py builds the complete annotated HCSP vehicle/controller
+source and calls construct_hcsp_type. Table 2 derivation generates the proof
+obligations, and Z3/KeYmaera X discharge them through the public API. The two
+claims above explain the counterexample mathematically; they are not a list
+of the complete program's generated proof obligations.
+
+
+9. Script execution and expected result
+---------------------------------------
+
+The main function:
+
+1. Parses --d as a concrete positive rational; the default is 1.
+2. Builds Gamma, the shared parameter constraints, Theta, and two parallel
+   processes: the vehicle and the controller.
+3. Selects writable prover configuration and artifact directories and enables
+   retention of generated proof files.
+4. Calls construct_hcsp_type with a 180-second timeout per external proof.
+5. Expects HCSPUntrustedTypeConstructionError with kind="proof-unknown" and
+   a complete unverified candidate in untrusted_type.
+6. Prints the candidate type, the unresolved-proof summary, and its primary
+   rule and location.
+
+Exit code 0 means the expected complete unverified candidate was reproduced.
+Input errors, construction failure without that candidate, or an unexpected
+trusted return give exit code 1. This script does not build a transition graph
+or run lock-freedom analysis.
+
+Set OUTPUT_MODE to "full" in examples/case_study_original.py to inspect generated formulas
+and the complete derivation trace.
+
+The script selects these directories relative to the repository root:
+
+    examples/tmp/paper-case-unknown-home
+    examples/tmp/paper-case-unknown-artifacts
+
+Generated .kyx/.kyp proof artifacts are retained in the artifact directory;
+these local directories are ignored by Git.
+
+
+10. Running the case
+---------------------
+
+Install dependencies as described in README.md, and configure KeYmaera X
+using document/ENVIRONMENT_SETUP.md. From the repository root, run:
+
+    python examples/case_study_original.py --d 1
+
+A rational period is also accepted:
+
+    python examples/case_study_original.py --d 3/2
+
+Set KEYMAERAX_JAR to the KeYmaera X jar. Java is located through
+KEYMAERAX_JAVA, JAVA_HOME, or PATH. On Windows, use the virtual environment's
+interpreter if it is not activated:
+
+    .\.venv\Scripts\python.exe examples/case_study_original.py --d 1
+
+
+11. Relation to the revised paper case
+--------------------------------------
+
+The counterexample shows that checking only the predicted endpoint cannot
+establish position safety over a continuous interval. case_study_revised.py strengthens
+phi_a with endpoint position and turning-point checks while retaining the
+original phi_p and phi_v. See examples/case_study_revised.txt for the definitions and
+the construction, graph, and lock-analysis pipeline.

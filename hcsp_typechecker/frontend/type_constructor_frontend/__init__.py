@@ -1,8 +1,4 @@
-"""TypeConstructor 所用的完整输入组合前端。
-
-本子包维护共享词法与诊断，并把带批注 HCSP、Gamma、Theta、全局参数组合为一次
-TypeConstructor 调用使用的内部 ``ParsedHCSPSource``。它不属于包根稳定接口。
-"""
+r"""Combined input frontend for TypeConstructor."""
 
 from ..errors import HCSPInputError, SourcePosition
 from .lexer import Token, tokenize

@@ -1,4 +1,4 @@
-"""把锁自由、Bottom 错误自由结论和反例路径渲染成可审计文本。"""
+r"""Render lock conclusions and counterexample paths as auditable text."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ from ..normalized_type_syntax import format_normalized_type_ast
 
 
 def _yes_no(value: bool) -> str:
-    """把布尔性质结论转换成稳定中文展示。"""
+    r"""Render Boolean property conclusions as English yes/no."""
 
-    return "是" if value else "否"
+    return 'yes' if value else 'no'
 
 
 def _format_ready(label: TimedTransitionLabel) -> str:
-    """按通道和方向稳定排序 ready set。"""
+    r"""Sort ready actions stably by channel and direction."""
 
     actions = sorted(
         (f"{action.channel}{action.direction.value}" for action in label.ready)
@@ -29,7 +29,7 @@ def _format_ready(label: TimedTransitionLabel) -> str:
 
 
 def _format_label(transition: TypeTransition) -> str:
-    """渲染静默标签或带时长和 ready set 的时间标签。"""
+    r"""Render a silent or duration/ready-set transition label."""
 
     label = transition.label
     if isinstance(label, SilentTransitionLabel):
@@ -41,13 +41,13 @@ def _format_label(transition: TypeTransition) -> str:
 
 
 def _format_edge(transition: TypeTransition) -> str:
-    """以状态编号和标签渲染一条有向迁移。"""
+    r"""Render edge endpoints and label."""
 
     return f"S{transition.source} -- {_format_label(transition)} --> S{transition.target}"
 
 
 def _format_derivation_tree(transition: TypeTransition, *, indent: str) -> list[str]:
-    """用显式工作栈完整渲染边的全部嵌套 Table 3 推导证据。"""
+    r"""Render nested Table 3 derivation evidence with an explicit stack."""
 
     lines: list[str] = []
     pending: list[tuple[str, object, int]] = [
@@ -84,7 +84,7 @@ def _format_derivation_tree(transition: TypeTransition, *, indent: str) -> list[
 
 
 def _format_path(path: TransitionPath, *, indent: str) -> list[str]:
-    """逐边渲染路径及每条边保存的 Table 3 规则证据。"""
+    r"""Render every path edge and its rule evidence."""
 
     if not path.transitions:
         return [f"{indent}S{path.start_state}  (empty prefix)"]
@@ -96,39 +96,39 @@ def _format_path(path: TransitionPath, *, indent: str) -> list[str]:
 
 
 def format_lock_freedom_result(report: LockFreedomReport) -> str:
-    """生成适合终端查看的简洁分析结果。"""
+    r"""Render a concise terminal-oriented analysis result."""
 
     lines = [
-        "=== Type 行为正确性分析结果 ===",
-        f"可达状态 : {report.reachable_state_count}",
-        f"迁移数量 : {report.transition_count}",
-        f"死锁自由 : {_yes_no(report.deadlock_free)}",
-        f"活锁自由 : {_yes_no(report.livelock_free)}",
-        f"锁自由   : {_yes_no(report.lock_free)}",
-        f"错误终止自由 : {_yes_no(report.error_free)}",
-        f"整体行为正确 : {_yes_no(report.behavior_correct)}",
+        '=== Type behavioral correctness result ===',
+        f"Reachable states : {report.reachable_state_count}",
+        f"Transition count : {report.transition_count}",
+        f"Deadlock-free : {_yes_no(report.deadlock_free)}",
+        f"Livelock-free : {_yes_no(report.livelock_free)}",
+        f"Lock-free    : {_yes_no(report.lock_free)}",
+        f"Error-free : {_yes_no(report.error_free)}",
+        f"Behavior correct : {_yes_no(report.behavior_correct)}",
     ]
     if report.deadlock_witness is not None:
         lines.append(
-            "死锁反例 : " + _format_edge(report.deadlock_witness.infinite_wait)
+            'Deadlock witness : ' + _format_edge(report.deadlock_witness.infinite_wait)
         )
     if report.livelock_witness is not None:
         cycle = report.livelock_witness.cycle
         lines.append(
-            f"活锁反例 : 静默环入口 S{cycle.start_state}，"
-            f"环长 {len(cycle.transitions)}"
+            f"Livelock witness : silent cycle starts at S{cycle.start_state}."
+            f"cycle length {len(cycle.transitions)}"
         )
     if report.bottom_error_witness is not None:
         witness = report.bottom_error_witness
         lines.append(
-            f"Bottom 错误反例 : S{witness.prefix.end_state}，"
-            f"分量 {witness.component_indices}"
+            f"Bottom error witness : S{witness.prefix.end_state}."
+            f"components {witness.component_indices}"
         )
     return "\n".join(lines)
 
 
 def _witness_state_ids(report: LockFreedomReport) -> tuple[int, ...]:
-    """收集三类反例中出现的状态，供完整报告集中显示 Type。"""
+    r"""Collect states referenced by the three witness kinds."""
 
     state_ids: set[int] = set()
     if report.deadlock_witness is not None:
@@ -146,12 +146,12 @@ def format_lock_freedom_full(
     report: LockFreedomReport,
     graph: TypeTransitionGraph,
 ) -> str:
-    """生成含规范 Type 状态、路径和规则编号的完整反例报告。"""
+    r"""Render witness states, paths, and Table 3 evidence in full."""
 
-    lines = [format_lock_freedom_result(report), "", "=== 分析证据 ==="]
+    lines = [format_lock_freedom_result(report), "", '=== Analysis evidence ===']
     if report.behavior_correct:
         lines.append(
-            "所有可达状态均无死锁、无活锁，且不含 Bottom 错误终止根。"
+            'All reachable states are deadlock-free and livelock-free, with no Bottom error termination root.'
         )
 
     if report.deadlock_witness is not None:

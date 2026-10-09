@@ -1,13 +1,4 @@
-r"""Table 3 状态转移图的领域数据结构。
-
-图边分为无时间消耗的 ``SilentTransitionLabel`` 和携带精确时长、ready set 的
-``TimedTransitionLabel``。相同源、标签和目标可能由多个规则实例推出，因而一条边
-保存一组 ``TransitionDerivation``，既压缩重复图边又不丢失推导证据。状态只保存
-连续编号和规范 Type 展示代表；等递归项图状态键属于后端遍历过程，不泄漏进结果。
-
-本模块验证标签、节点编号和边端点等局部结构，不负责重新执行 Table 3 或证明整张图
-确为完整可达闭包；这项保证由唯一公共构造入口和操作语义后端共同提供。
-"""
+r"""Immutable states, labels, transitions, and Table 3 derivations."""
 
 from __future__ import annotations
 
@@ -21,7 +12,7 @@ from ..normalized_type_ast import NormalizedConfigurationType
 
 
 class CommunicationDirection(str, Enum):
-    """ready action 的输入或输出方向。"""
+    r"""Input or output direction of a ready action."""
 
     INPUT = "?"
     OUTPUT = "!"
@@ -29,13 +20,13 @@ class CommunicationDirection(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class ReadyAction:
-    """等待期间对环境开放的一个带方向信道动作。"""
+    r"""A directed channel action offered while waiting."""
 
     channel: str
     direction: CommunicationDirection
 
     def __post_init__(self) -> None:
-        """验证通道名称和通信方向属于项目支持的词法/枚举范围。"""
+        r"""Validate the channel identifier and communication direction."""
 
         if not is_hcsp_identifier(self.channel):
             raise ValueError("Ready-action channel must be an HCSP identifier")
@@ -43,7 +34,7 @@ class ReadyAction:
             raise TypeError("Ready-action direction must be CommunicationDirection")
 
     def complement(self) -> "ReadyAction":
-        """返回同一通道、相反输入输出方向的互补 ready action。"""
+        r"""Return the opposite-direction ready action on the same channel."""
 
         direction = (
             CommunicationDirection.OUTPUT
@@ -54,7 +45,7 @@ class ReadyAction:
 
 
 class InfiniteTime(str, Enum):
-    """与有限 ``Fraction`` 分离表示的唯一正无穷时间值。"""
+    r"""A unique positive-infinity duration distinct from finite Fraction values."""
 
     VALUE = "infinity"
 
@@ -64,12 +55,12 @@ TimeDuration: TypeAlias = Fraction | InfiniteTime
 
 @dataclass(frozen=True, slots=True)
 class SilentTransitionLabel:
-    """Table 3 中不消耗时间的无标签转移 ``mathcal T -> mathcal T'``。"""
+    r"""A zero-time silent Table 3 transition label."""
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class TimedTransitionLabel:
-    r"""Table 3 的时间转移标签 ``\xrightarrow{d,R}``。"""
+    r"""A timed label carrying a duration and ready set."""
 
     duration: TimeDuration
     ready: frozenset[ReadyAction]
@@ -79,7 +70,7 @@ class TimedTransitionLabel:
         duration: Fraction | int | InfiniteTime,
         ready: Iterable[ReadyAction],
     ) -> None:
-        """规范正有理/无穷时长并冻结 ready set。"""
+        r"""Normalize a positive rational or infinite duration and freeze its ready set."""
 
         if isinstance(duration, bool):
             raise TypeError("Timed transition duration must not be Boolean")
@@ -102,7 +93,7 @@ TransitionLabel: TypeAlias = SilentTransitionLabel | TimedTransitionLabel
 
 
 class Table3Rule(str, Enum):
-    """循环项图状态图中实际生成边证据的 Table 3 规则。"""
+    r"""Table 3 rules recorded as edge evidence."""
 
     COMMUNICATION = "P-unrhd"
     TIMEOUT = "P-triangleright"
@@ -113,13 +104,7 @@ class Table3Rule(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class TransitionDerivation:
-    """一条状态图边的一次具体 Table 3 规则应用证据。
-
-    ``component_indices`` 与 ``branch_indices`` 均引用该边源状态所展示的规范
-    Type AST，而不是后端循环项图的内部结点或子边编号。通信证据中的两个元组
-    按相同位置配对：第 ``i`` 个分量采用第 ``i`` 个中断分支。``premises`` 保存
-    ``P-parallel`` 等组合规则的直接子证据，不额外制造递归展开边。
-    """
+    r"""Evidence for one concrete Table 3 rule application."""
 
     rule: Table3Rule
     component_indices: tuple[int, ...] = ()
@@ -128,7 +113,7 @@ class TransitionDerivation:
     premises: tuple["TransitionDerivation", ...] = ()
 
     def __post_init__(self) -> None:
-        """验证规则标签、索引、可选通道和递归前提证据的结构。"""
+        r"""Validate rule labels, indices, channels, and nested premise evidence."""
 
         if not isinstance(self.rule, Table3Rule):
             raise TypeError("Transition derivation requires a Table3Rule")
@@ -145,13 +130,13 @@ class TransitionDerivation:
 
 @dataclass(frozen=True, slots=True)
 class TypeState:
-    """由编号引用的等递归状态及其项图确定性生成的规范 AST 展示代表。"""
+    r"""An equi-recursive state identifier and canonical display AST."""
 
     id: int
     type_ast: NormalizedConfigurationType
 
     def __post_init__(self) -> None:
-        """验证非负状态编号和规范化配置根。"""
+        r"""Require a nonnegative state identifier and normalized configuration root."""
 
         if isinstance(self.id, bool) or not isinstance(self.id, int) or self.id < 0:
             raise ValueError("Type-state id must be a non-negative integer")
@@ -161,7 +146,7 @@ class TypeState:
 
 @dataclass(frozen=True, slots=True)
 class TypeTransition:
-    """连接两个状态编号并保存全部等价规则应用证据的有向边。"""
+    r"""A directed edge retaining all equivalent rule derivations."""
 
     source: int
     target: int
@@ -169,7 +154,7 @@ class TypeTransition:
     derivations: tuple[TransitionDerivation, ...]
 
     def __post_init__(self) -> None:
-        """验证端点、标签类别和至少一份规则推导证据。"""
+        r"""Validate endpoints, label kind, and nonempty derivation evidence."""
 
         for endpoint in (self.source, self.target):
             if isinstance(endpoint, bool) or not isinstance(endpoint, int) or endpoint < 0:
@@ -184,24 +169,14 @@ class TypeTransition:
 
 @dataclass(frozen=True, slots=True)
 class TypeTransitionGraph:
-    """按等递归状态取商后的完整关键-deadline约化有向图。
-
-    ``states`` 必须按 ``0..n-1`` 连续编号，``initial_state`` 和每条边端点必须引用
-    其中的状态。正常公共构造保证 ``transitions`` 是从初态出发的完整可达闭包。
-
-    普通遍历从 ``states[initial_state]`` 开始，并用 :meth:`outgoing` 取得一个状态
-    的稳定有序出边。每个 ``TypeState.type_ast`` 是用于展示的规范 Type；每条
-    ``TypeTransition`` 的 ``label`` 区分无耗时 ``tau`` 与带 ``duration/ready`` 的
-    时间边，``derivations`` 保存产生该边的全部 Table 3 规则实例。对象不可变，
-    但不预先建立邻接表；需要大量重复查询时，调用方可自行缓存 ``outgoing`` 结果。
-    """
+    r"""The complete critical-deadline graph quotiented by equi-recursive state identity."""
 
     initial_state: int
     states: tuple[TypeState, ...]
     transitions: tuple[TypeTransition, ...]
 
     def __post_init__(self) -> None:
-        """验证连续状态编号和合法边端点。"""
+        r"""Require contiguous state identifiers and valid edge endpoints."""
 
         if not self.states:
             raise ValueError("Type transition graph requires at least one state")
@@ -218,7 +193,7 @@ class TypeTransitionGraph:
             raise ValueError("Type transition refers to an unknown state")
 
     def outgoing(self, state_id: int) -> tuple[TypeTransition, ...]:
-        """按图内稳定顺序返回指定状态的全部出边；未知编号抛出 ``KeyError``。"""
+        r"""Return outgoing edges in stable order; unknown identifiers raise KeyError."""
 
         if state_id < 0 or state_id >= len(self.states):
             raise KeyError(f"Unknown type-state id: {state_id}")

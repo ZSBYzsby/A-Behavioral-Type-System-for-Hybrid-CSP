@@ -1,1 +1,1 @@
-"""用户给定 Type 的 Table 2 递归检查测试。"""
+r"""Regression tests for type checker. Paper reference: Table 2."""

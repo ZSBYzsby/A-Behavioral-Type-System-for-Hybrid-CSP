@@ -1,9 +1,4 @@
-"""把正式 Type AST 编译成循环项图并穷尽 Table 3 可达状态。
-
-图遍历以 ``EquiRecursiveStateKey`` 为真实状态，规范 Type AST 只作为确定性展示
-代表。每个后继在入队前再次裁剪和最小化；相同源、标签和目标合并成一条边，同时
-累积不同规则证据。状态或边达到调用者上限时整体失败，不返回部分闭包。
-"""
+r"""Compile Type ASTs into cyclic term graphs and enumerate Table 3 successors."""
 
 from __future__ import annotations
 
@@ -29,10 +24,10 @@ from .table3 import derive_one_step
 
 
 class TypeTransitionGraphSizeError(RuntimeError):
-    """状态图达到用户指定规模上限时抛出的完整构造失败。"""
+    r"""Graph construction exceeded a requested size limit."""
 
     def __init__(self, limit_name: str, limit: int) -> None:
-        """保存触发的上限名称和值，并说明不会返回部分状态图。"""
+        r"""Store the exceeded limit; never expose a partial graph."""
 
         self.limit_name = limit_name
         self.limit = limit
@@ -48,11 +43,7 @@ def build_type_transition_graph(
     max_states: int | None = None,
     max_transitions: int | None = None,
 ) -> TypeTransitionGraph:
-    """规范化输入 Type AST，并以 BFS 构造完整关键-deadline可达图。
-
-    ``max_states`` 与 ``max_transitions`` 为可选严格正整数；上限包括初态和去重后的
-    有向边。触及上限会抛出 :class:`TypeTransitionGraphSizeError`。
-    """
+    r"""Normalize the Type and build its complete critical-deadline graph by BFS."""
 
     _validate_limit("max_states", max_states)
     _validate_limit("max_transitions", max_transitions)
@@ -70,12 +61,7 @@ def _build_normalized_graph(
     max_states: int | None,
     max_transitions: int | None,
 ) -> TypeTransitionGraph:
-    """以最小循环项图作为状态本体，合并同边证据并冻结可达图。
-
-    Table 3 直接作用于 ``state_keys`` 中的项图。``state_values`` 仅保存由该规范
-    项图确定性重建的可读 AST 代表，因此展示形式不会反过来影响状态判重或出边。
-    同一 ``(source, label, target)`` 的多份推导只合并边，不合并证据。
-    """
+    r"""Merge equivalent edges and freeze the reachable cyclic-term graph."""
 
     initial_key = equi_recursive_state_key(initial)
     state_ids = {initial_key: 0}
@@ -142,7 +128,7 @@ def _build_normalized_graph(
 
 
 def _validate_limit(name: str, value: int | None) -> None:
-    """验证可选图规模上限是严格正整数。"""
+    r"""Require a strictly positive integer for an optional graph limit."""
 
     if value is None:
         return

@@ -1,4 +1,4 @@
-"""为不可变 TypeTransitionGraph 建立紧凑的 CSR 出边索引。"""
+r"""Build a compact CSR outgoing-edge index for an immutable graph."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from ...data_structures.type_transition_graph import TypeTransitionGraph
 
 @dataclass(frozen=True, slots=True)
 class GraphIndex:
-    """按状态编号提供 O(1) 出边区间的压缩稀疏行索引。"""
+    r"""Provide constant-time outgoing-edge ranges by state identifier."""
 
     graph: TypeTransitionGraph
     offsets: array
@@ -18,7 +18,7 @@ class GraphIndex:
 
     @classmethod
     def build(cls, graph: TypeTransitionGraph) -> GraphIndex:
-        """以两次线性扫描建立稳定保持原迁移顺序的 CSR 索引。"""
+        r"""Build a CSR index in two linear scans, preserving transition order."""
 
         state_count = len(graph.states)
         degrees = array("Q", [0]) * state_count
@@ -38,6 +38,6 @@ class GraphIndex:
         return cls(graph=graph, offsets=offsets, edge_ids=edge_ids)
 
     def edge_range(self, state_id: int) -> range:
-        """返回 ``state_id`` 的出边在 ``edge_ids`` 中的半开区间。"""
+        r"""Return the half-open outgoing-edge range for a state."""
 
         return range(self.offsets[state_id], self.offsets[state_id + 1])

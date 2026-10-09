@@ -1,1 +1,1 @@
-"""规范化 Type AST 只读输出语法测试包。"""
+r"""Regression tests for normalized type syntax."""

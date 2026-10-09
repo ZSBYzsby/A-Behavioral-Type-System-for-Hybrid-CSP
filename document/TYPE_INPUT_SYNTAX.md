@@ -1,26 +1,33 @@
-# 用户 Type 输入语法
+# Supplied Type input syntax
 
-本文件定义 TypeChecker 使用的用户 Type 具体语法。当前项目已经提供对应的
-内部前端：`hcsp_typechecker.frontend.type_syntax.parse_type_source` 与
-`hcsp_typechecker.frontend.type_syntax.format_type_source`。它们属于内部开发层，
-不属于包根稳定公共接口；普通用户通过 `check_hcsp_type(...)` 读取完整 typed source。
+This page defines the concrete Type syntax used by TypeChecker. Internal parsing
+and formatting are provided by
+`hcsp_typechecker.frontend.type_syntax.parse_type_source` and
+`hcsp_typechecker.frontend.type_syntax.format_type_source`.
+These are implementation interfaces, outside the stable package-root API.
+Users pass complete typed source to `check_hcsp_type(...)`.
 
-解析和规范化输出满足：
+Parsing and canonical formatting satisfy:
 
 ```text
 parse_type_source(format_type_source(T)) == T
 ```
 
-其中 `T` 是任意 `ConfigurationType`。格式化器输出唯一的规范拼写；解析器还接受
-有限/无穷时延中显式写出的空 Angelic Type。
+Here `T` is a `ConfigurationType` representable in the user syntax, including
+its identifier and numeric-literal restrictions. Internal AST constructors
+enforce ASCII identifier shape but do not universally reject reserved words;
+for example, `TypeVar("empty")` cannot round-trip through text because `empty`
+denotes `EmptyType`. The formatter uses one canonical spelling; the parser also
+accepts explicit empty Angelic Types in finite and infinite delays.
 
-TypeConstructor 与 TypeChecker 的 `result/full` 运行日志也调用同一个格式化器。
-日志中 `Type 源码 :`、`构造 Type 源码 :` 或 `给定 Type 源码 :` 后面的
-`type ...` 均可直接复制，并由本前端无损读回；运行日志不再重复打印 Python AST
-的 `repr`。规范格式化器让简单类型保持单行，并对 `parallel`、`internal` 和
-`angelic` 花括号块采用换行与四空格缩进；嵌套块逐级增加缩进。
+Construction and checking reports in `result/full` mode use the same formatter.
+The `type ...` text following labels such as `Type source :`,
+`Complete candidate Type source :`, and `Supplied Type source :` can be copied
+and parsed without loss. Reports display canonical source rather than Python AST
+`repr` output. Simple Types stay on one line; `parallel`, `internal`, and
+`angelic` blocks use line breaks and four-space indentation at each nesting level.
 
-## 1. 完整输入中的 Type 段
+## 1. Type section in complete input
 
 ```ebnf
 typed_source
@@ -32,10 +39,11 @@ type_section
     ::= "type" configuration_type
 ```
 
-`program_prefix` 沿用 [完整 HCSP 输入语法](GAMMA_THETA_INPUT_SYNTAX.md)，依次包含
-Gamma、可选 Parameters、Theta 和 Process。本文件只定义最后的 `type_section`。
+`program_prefix` follows the [Complete HCSP input syntax](GAMMA_THETA_INPUT_SYNTAX.md):
+Gamma, optional Parameters, Theta, and Process, in order. This page defines only
+the final `type_section`.
 
-## 2. Type 语法
+## 2. Type grammar
 
 ```ebnf
 configuration_type
@@ -77,13 +85,13 @@ finite_duration
       | NONNEGATIVE_INTEGER "/" POSITIVE_INTEGER
 ```
 
-圆括号现在是正式分组语法。每个 `internal` 分支都必须写成 `(process_type)`；
-解析器也允许在其他 `process_type` 位置使用圆括号，但规范格式化器只在内部选择
-分支处输出必要括号。
+Parentheses are part of the grouping syntax. Every `internal` branch must be
+written as `(process_type)`. Other `process_type` positions also accept grouping
+parentheses, but canonical formatting emits them only where internal-choice grouping requires them.
 
-## 3. AST 对应与规范输出
+## 3. AST mapping and canonical output
 
-| Type AST | 规范输出 |
+| Type AST | Canonical output |
 |---|---|
 | `EmptyType()` | `empty` |
 | `BottomType()` | `bottom` |
@@ -96,14 +104,15 @@ finite_duration
 | `TypeVar(X)` | `X` |
 | `ParallelType(T1,...,Tn)` | `parallel {T1, ..., Tn}` |
 
-`A` 由 `angelic_type` 表示：
+`A` uses `angelic_type`:
 
-`InternalChoiceType` 不再压平嵌套内部选择。括号确定的嵌套结构就是规则分块：
-T-If 的当前节点必须有两个分支，多元 T-sqcup 的当前节点必须与 Process 选择分支
-数量相同，Checker 随后按当前节点的顺序逐项递归。它不会搜索其他连续分组，也不
-使用结合律或交换律改写用户给出的结构。
+`InternalChoiceType` preserves nested internal choices. Parentheses specify the
+rule grouping: the current T-If node must have two branches, and an n-ary T-sqcup
+node must match the Process branch count. The checker then checks each branch
+in order. It does not search alternative groupings or rewrite the supplied
+structure using associativity or commutativity.
 
-例如：
+For example:
 
 ```text
 internal {(
@@ -111,44 +120,45 @@ internal {(
 ), (T3)}
 ```
 
-明确表示第一条子 judgment 对应 `internal {(T1), (T2)}`，第二条对应 `T3`；它与
-`internal {(T1), (internal {(T2), (T3)})}` 是不同的 Type AST。
+The first child judgment receives `internal {(T1), (T2)}` and the second receives
+`T3`. This is a different Type AST from
+`internal {(T1), (internal {(T2), (T3)})}`.
 
-| Angelic Type AST | 规范输出 |
+| Angelic Type AST | Canonical output |
 |---|---|
 | `NoInterruptType()` | `angelic {}` |
 | `InputType(ch,T)` | `angelic {ch? -> T}` |
 | `OutputType(ch,T)` | `angelic {ch! -> T}` |
 | `ExternalChoiceType(...)` | `angelic {branch1, ..., branchn}` |
 
-`angelic {}` 是空中断集合 (A)，`empty` 是无可观察通信行为的过程类型 (T)，两者
-不可互换。对于 delay，解析器允许：
+`angelic {}` is the empty interrupt set (A); `empty` is a Process Type (T) with
+no observable communication. They are distinct categories. For delay, the parser accepts:
 
 ```text
 delay(1) then empty
 delay(1) interrupt angelic {} then empty
 ```
 
-二者都得到 `FiniteDelayType(1, NoInterruptType(), EmptyType())`；格式化时一律输出
-第一种省略中断的形式。
+Both produce `FiniteDelayType(1, NoInterruptType(), EmptyType())`; canonical
+formatting always uses the first form, omitting the empty interrupt.
 
-`bottom` 无损表达正式 `BottomType` 节点。有限
-`delay(d) interrupt A then bottom` 对应 `T-\unrhd`：deadline 后继不可达；
-`delay(d) interrupt A then empty` 则对应具有真实空后继的 `T-\unrhd'`。无穷时延
-的不可达 bottom 后继仍由 `InfiniteDelayType` 固定隐含。格式化与重新解析会保持
-finite bottom/empty 的区别。
+`bottom` preserves the formal `BottomType` node. A finite
+`delay(d) interrupt A then bottom` represents `T-\unrhd`, whose deadline
+continuation is unreachable. `delay(d) interrupt A then empty` represents
+`T-\unrhd'` with a reachable empty continuation. `InfiniteDelayType` fixes its
+unreachable bottom continuation implicitly. Serialization preserves the finite bottom/empty distinction.
 
-## 4. 语法范畴边界
+## 4. Syntactic category boundaries
 
-`AngelicType` 与 `ProcessType` 是不同的 Python 抽象层。`angelic {...}` 只能出现在
-`interrupt` 后，不能单独作为 `type` 段的根。一个输入/输出过程行为由无穷时延节点
-表示，例如：
+`AngelicType` and `ProcessType` are separate Python abstract categories.
+`angelic {...}` may occur only after `interrupt`, not as the root of a `type`
+section. An input/output Process behavior uses an infinite-delay node, for example:
 
 ```text
 type forever interrupt angelic {ch? -> empty}
 ```
 
-对应：
+This corresponds to:
 
 ```python
 InfiniteDelayType(InputType("ch", EmptyType()))

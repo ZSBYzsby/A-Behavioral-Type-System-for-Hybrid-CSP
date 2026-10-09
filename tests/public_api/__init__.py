@@ -1,1 +1,1 @@
-"""面向普通调用者的稳定公共门面测试。"""
+r"""Regression tests for public API."""

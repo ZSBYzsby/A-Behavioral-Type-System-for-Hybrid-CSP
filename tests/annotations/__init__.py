@@ -1,1 +1,1 @@
-"""Section 4.2/4.3 批注 AST 与批注类型规则测试。"""
+r"""Regression tests for annotations. Paper reference: Section 4.2/4.3."""

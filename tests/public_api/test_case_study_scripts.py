@@ -1,49 +1,41 @@
-"""Case-study 脚本对单一稳定公共接口的使用契约测试。
-
-测试内容
---------
-1. ``case.py`` 与 ``new_case.py`` 只能从包根导入稳定业务入口和公共异常；
-   ``new_case.py`` 在可信构造成功后还会把 Type AST 交给第三接口生成状态图，
-   但不能重新依赖旧两阶段入口、内部 AST 构造器或低层构造器；
-2. 两个脚本生成的完整用户 source 都必须能通过同一个公开入口越过解析阶段。
-   为避免在接口契约测试中重复执行昂贵 dL 证明，测试用恒假路径条件让推导在
-   T-sigma 处稳定停止，并以 ``HCSPTypeConstructionError``（而非输入错误）证明解析成功。
-
-论文对应
---------
-两个脚本分别保存 Section 5 原始 ``phi_a`` 与加强 ``phi_a``。本文件不重新证明
-dL 前提，只锁定案例以完整 source 进入统一的 source -> Type AST 工作流，且不再
-从公开 API 取得 Process AST、Gamma、Theta 或参数环境的中间对象。
-"""
+r"""Regression tests for case study scripts. Paper reference: Section 5."""
 
 from __future__ import annotations
 
 import ast
+from contextlib import redirect_stdout
 from fractions import Fraction
 import importlib.util
+from io import StringIO
+import os
 from pathlib import Path
 from types import ModuleType
 import unittest
+from unittest.mock import patch
 
-from hcsp_typechecker import HCSPTypeConstructionError, construct_hcsp_type
+from hcsp_typechecker import (
+    HCSPTypeConstructionError,
+    HCSPUntrustedTypeConstructionError,
+    construct_hcsp_type,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CASE_DIRECTORY = PROJECT_ROOT / "case_study"
+CASE_DIRECTORY = PROJECT_ROOT / "examples"
 COMMON_PUBLIC_IMPORTS = {
     "HCSPInputError",
     "HCSPTypeConstructionError",
     "construct_hcsp_type",
 }
 EXPECTED_PUBLIC_IMPORTS = {
-    # 原始案例需要单独确认 proof-unknown 是预期结果；改良案例则把不可信
-    # 候选与确定构造失败分开报告，但两者都返回非零退出码。
-    "case.py": COMMON_PUBLIC_IMPORTS
+    # The original case expects proof-unknown; the strengthened case fails on an untrusted
+    # candidate.
+    "case_study_original.py": COMMON_PUBLIC_IMPORTS
     | {
         "HCSPUntrustedTypeConstructionError",
         "TypeConstructionErrorKind",
     },
-    "new_case.py": COMMON_PUBLIC_IMPORTS
+    "case_study_revised.py": COMMON_PUBLIC_IMPORTS
     | {
         "HCSPTypeTransitionGraphError",
         "HCSPTypeLockAnalysisError",
@@ -55,7 +47,7 @@ EXPECTED_PUBLIC_IMPORTS = {
 
 
 def _load_case_module(filename: str) -> ModuleType:
-    """从案例目录加载脚本，而不要求案例目录本身成为产品包。"""
+    r"""Load a case script independently of package installation."""
 
     path = CASE_DIRECTORY / filename
     module_name = "_hcsp_case_test_" + path.stem
@@ -67,17 +59,31 @@ def _load_case_module(filename: str) -> ModuleType:
     return module
 
 
+def _unverified_candidate_error() -> HCSPUntrustedTypeConstructionError:
+    r"""Create a genuine public unverified-candidate exception with a controlled prover."""
+
+    with patch(
+        "hcsp_typechecker.backend.common.keymaerax.KeYmaeraXBackend.__call__",
+        return_value=None,
+    ):
+        try:
+            construct_hcsp_type(
+                "gamma() theta() process {{"
+                "ode(flow(), domain(t < 1), delay(1)); skip}}"
+            )
+        except HCSPUntrustedTypeConstructionError as error:
+            return error
+    raise AssertionError("The fixture must produce a complete unverified candidate")
+
+
 class CaseStudyPublicInterfaceTests(unittest.TestCase):
-    """防止可执行案例重新绕过项目承诺的单一用户入口。"""
+    r"""Tests for Case Study Public Interface."""
 
-    # 测试输入：解析两个 case-study Python 文件的项目导入语句。
-    # 预期行为：项目包导入只来自根 hcsp_typechecker，名称恰为入口及结构化错误接口。
-    # 检查内容：拒绝 _internal、子包路径、旧 parse/infer、AST 构造器和 construct_type。
-    # 论文对应：这里只约束案例进入论文推导规则的工程边界，不改动案例公式。
+
     def test_case_scripts_import_only_the_single_stable_facade(self) -> None:
-        """两个案例脚本不得重新依赖两阶段接口或任何内部模块。"""
+        r"""Verify case scripts import only the single stable facade."""
 
-        for filename in ("case.py", "new_case.py"):
+        for filename in ("case_study_original.py", "case_study_revised.py"):
             path = CASE_DIRECTORY / filename
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             project_imports = [
@@ -95,20 +101,14 @@ class CaseStudyPublicInterfaceTests(unittest.TestCase):
                     EXPECTED_PUBLIC_IMPORTS[filename],
                 )
 
-    # 测试输入：两个脚本针对 d=3/2 生成的完整 Gamma/Parameters/Theta/Process source，
-    #           调用单入口时额外给路径条件 false。
-    # 预期行为：两份输入都先成功完成内部解析，再在 T-sigma 处以 false 类型错误停止；
-    #           若 source 语法退化，本测试会得到 HCSPInputError 而不是预期异常。
-    # 检查内容：核对 delay/显式空 flow ODE 的精确有理文本、false verdict、空部分类型和停止规则。
-    # 论文对应：原始与加强案例只在 phi_a 强度上不同，基础混成系统输入保持一致；
-    #           false 路径条件仅用于压缩该接口测试，不声称是案例的真实推导前提。
+
     def test_case_sources_cross_parsing_boundary_through_single_entrypoint(
         self,
     ) -> None:
-        """两份完整案例 source 必须由单入口成功解析且进入类型推导。"""
+        r"""Verify case sources cross parsing boundary through single entrypoint."""
 
-        original = _load_case_module("case.py")
-        improved = _load_case_module("new_case.py")
+        original = _load_case_module("case_study_original.py")
+        improved = _load_case_module("case_study_revised.py")
         period = Fraction(3, 2)
         sources = {
             "original": original._build_original_case_source(period),
@@ -130,6 +130,55 @@ class CaseStudyPublicInterfaceTests(unittest.TestCase):
                 self.assertEqual(error.verdict, "false")
                 self.assertEqual(error.partial_types, (None, None))
                 self.assertIn("T-sigma", error.format_result())
+
+
+    def test_original_case_requires_the_expected_unverified_candidate(self) -> None:
+        r"""Distinguish reproduction of the original outcome from unexpected proof success."""
+
+        original = _load_case_module("case_study_original.py")
+        candidate_error = _unverified_candidate_error()
+        trusted_type = construct_hcsp_type("gamma() theta() process {{skip}}")
+        outcomes = (
+            ("unverified", {"side_effect": candidate_error}, 0),
+            ("unexpected-trusted", {"return_value": trusted_type}, 1),
+        )
+        for label, result, expected in outcomes:
+            with self.subTest(outcome=label), patch.dict(os.environ), patch.object(
+                original, "construct_hcsp_type", **result
+            ), redirect_stdout(StringIO()):
+                self.assertEqual(original.main(["--d", "1"]), expected)
+
+
+    def test_revised_case_stops_before_analysis_for_unverified_candidates(self) -> None:
+        r"""Keep unresolved proofs from proceeding as trusted graph-analysis inputs."""
+
+        revised = _load_case_module("case_study_revised.py")
+        candidate_error = _unverified_candidate_error()
+        with patch.dict(os.environ), patch.object(
+            revised, "construct_hcsp_type", side_effect=candidate_error
+        ), patch.object(revised, "build_type_transition_graph") as graph_builder, patch.object(
+            revised, "analyze_type_lock_freedom"
+        ) as analyzer, redirect_stdout(StringIO()):
+            self.assertEqual(revised.main(["--d", "1"]), 1)
+        graph_builder.assert_not_called()
+        analyzer.assert_not_called()
+
+
+    def test_revised_case_requires_lock_freedom_after_trusted_construction(self) -> None:
+        r"""Use real graphs to check acceptance of synchronization and rejection of deadlock."""
+
+        revised = _load_case_module("case_study_revised.py")
+        prefix = "gamma(x: Int) theta(ch: channel(value: Int)) "
+        programs = (
+            ("synchronizing", prefix + "process {{ch?(x)}, {ch!(1)}}", 0),
+            ("deadlocked", prefix + "process {{ch?(x)}}", 1),
+        )
+        for label, source, expected in programs:
+            trusted_type = construct_hcsp_type(source)
+            with self.subTest(case=label), patch.dict(os.environ), patch.object(
+                revised, "construct_hcsp_type", return_value=trusted_type
+            ), redirect_stdout(StringIO()):
+                self.assertEqual(revised.main(["--d", "1"]), expected)
 
 
 if __name__ == "__main__":

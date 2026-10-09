@@ -1,16 +1,4 @@
-r"""Table 3 状态迁移图的稳定只读输出测试。
-
-测试内容
---------
-1. 时间边输出精确时长、稳定排序的 ready set 与嵌套规则证据。
-2. 通信边输出 tau、端点、信道以及分量/分支索引。
-3. 输出子包拒绝错误对象，并且有意不提供 parser。
-
-论文对应
---------
-覆盖 Table 3 状态、无时边、时间边、ready set 及推导证据的展示协议；不增加新的
-操作语义规则，也不执行任何图上性质分析。
-"""
+r"""Regression tests for serializer. Paper reference: Table 3."""
 
 from __future__ import annotations
 
@@ -35,14 +23,11 @@ from hcsp_typechecker.frontend.type_transition_graph_syntax import (
 
 
 class TypeTransitionGraphSerializerTests(unittest.TestCase):
-    """锁定状态图全部领域字段的稳定、可审计文本形式。"""
+    r"""Tests for Type Transition Graph Serializer."""
 
-    # 测试输入：剩余时延 2/5、ready 动作 left?/right! 的两个并行分量。
-    # 预期行为：首条时间边写成 time(2, ready={left?, right!}) 并列出并行规则前提。
-    # 检查内容：有理时长、ready 排序、P-parallel 和两个 P-unrhd-prime 证据。
-    # 论文对应：Table 3 [P-|] 组合两个 [P-unrhd'] 时间前提。
+
     def test_timed_edge_and_nested_rule_evidence_are_rendered(self) -> None:
-        """时间边完整输出标签与嵌套规则证据。"""
+        r"""Verify timed edge and nested rule evidence are rendered."""
 
         graph = build_type_transition_graph(
             ParallelType(
@@ -77,12 +62,9 @@ class TypeTransitionGraphSerializerTests(unittest.TestCase):
         )
         self.assertIn("S0 = normalized type parallel {", rendered)
 
-    # 测试输入：无穷 ch? 与 ch! 两个分量，可立即同步且没有共同时间边。
-    # 预期行为：图输出 tau 边和 P-unrhd 的分量、分支、信道参数。
-    # 检查内容：通信标签不伪装成时间，审计证据保留具体匹配来源。
-    # 论文对应：Table 3 [P-unrhd] 在任意互补并行分量之间执行通信。
+
     def test_communication_edge_exposes_matching_witness(self) -> None:
-        """通信边以 tau 和带信道的规则实例输出。"""
+        r"""Verify communication edge exposes matching witness."""
 
         graph = build_type_transition_graph(
             ParallelType(
@@ -102,12 +84,9 @@ class TypeTransitionGraphSerializerTests(unittest.TestCase):
         )
         self.assertNotIn("time(", rendered)
 
-    # 测试输入：原 Type AST 而非图，以及 graph syntax 子包导出命名空间。
-    # 预期行为：错误对象抛 TypeError；子包仅导出 formatter，不存在 parse 函数。
-    # 检查内容：状态图语法保持输出单向边界。
-    # 论文对应：Table 3 图由后端生成，不从未经验证的用户图文本恢复。
+
     def test_graph_output_is_deliberately_one_way(self) -> None:
-        """整图 formatter 不接受 Type AST 且没有反向 parser。"""
+        r"""Verify graph output is deliberately one way."""
 
         with self.assertRaises(TypeError):
             format_type_transition_graph(EmptyType())  # type: ignore[arg-type]

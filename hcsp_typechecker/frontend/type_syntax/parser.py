@@ -1,9 +1,4 @@
-"""把 ``type`` 用户语法降低为既有的行为 Type AST。
-
-语法使用命名结构，并用圆括号明确内部选择的每个 Type 块。``angelic { ... }``
-保留当前 AST 对 Angelic Type 的规范化：零、一、多个通信分支分别成为
-``NoInterruptType``、单个输入/输出节点、``ExternalChoiceType``。
-"""
+r"""Lower user type syntax into existing behavioral ASTs."""
 
 from __future__ import annotations
 
@@ -35,10 +30,10 @@ _T = TypeVar("_T")
 
 
 class TypeParser:
-    """在共享的项目词法 token 流上解析一个完整的 ``type`` 段。"""
+    r"""Parse a complete type section using the shared lexical stream."""
 
     def __init__(self, source: str, source_name: str) -> None:
-        """保存源码、扫描 token，并把游标置于首个 token。"""
+        r"""Store source and tokens and initialize the cursor."""
 
         self.source = source
         self.source_name = source_name
@@ -47,12 +42,12 @@ class TypeParser:
 
     @property
     def current(self) -> Token:
-        """返回尚未消费的当前 token。"""
+        r"""Return the current unconsumed token."""
 
         return self.tokens[self.index]
 
     def parse(self) -> ConfigurationType:
-        """解析 ``type <configuration-type>`` 并要求输入恰好结束。"""
+        r"""Parse type followed by a configuration and EOF."""
 
         self._expect("type")
         value = self._parse_configuration_type()
@@ -60,7 +55,7 @@ class TypeParser:
         return value
 
     def _parse_configuration_type(self) -> ConfigurationType:
-        """解析单进程类型或多分量 ``parallel`` configuration type。"""
+        r"""Parse a process type or multi-component parallel type."""
 
         values: list[ConfigurationType] = []
         pending: list[tuple[object, ...]] = [("configuration",)]
@@ -99,7 +94,7 @@ class TypeParser:
         return values[0]
 
     def _parse_process_type(self) -> ProcessType:
-        """用显式工作栈解析过程 Type，深 continuation 不占用调用栈。"""
+        r"""Parse deep continuation Types with an explicit work stack."""
 
         values: list[ProcessType | AngelicType] = []
         pending: list[tuple[object, ...]] = [("process",)]
@@ -284,7 +279,7 @@ class TypeParser:
         return values[0]
 
     def _parse_internal_choice(self) -> ProcessType:
-        """解析至少两个带圆括号分块的多元内部选择。"""
+        r"""Parse at least two explicitly parenthesized internal-choice branches."""
 
         start = self._expect("internal")
         self._expect("{")
@@ -297,7 +292,7 @@ class TypeParser:
         return self._construct(start, lambda: InternalChoiceType(branches))
 
     def _parse_parenthesized_process_type(self) -> ProcessType:
-        """解析一般圆括号分组；括号本身不产生额外 Type AST 节点。"""
+        r"""Parse grouping parentheses without adding an AST node."""
 
         self._expect("(")
         value = self._parse_process_type()
@@ -305,7 +300,7 @@ class TypeParser:
         return value
 
     def _parse_required_choice_branch(self) -> ProcessType:
-        """解析内部选择中必须显式写出的一个 ``(T)`` 分支块。"""
+        r"""Require an explicit (T) block for an internal-choice branch."""
 
         if self.current.kind != "(":
             raise self._syntax_error(
@@ -315,7 +310,7 @@ class TypeParser:
         return self._parse_parenthesized_process_type()
 
     def _parse_finite_delay(self) -> ProcessType:
-        """解析有限 delay；缺省 interrupt 规范为 ``NoInterruptType``。"""
+        r"""Parse finite delay, defaulting omitted interrupts to NoInterruptType."""
 
         start = self._expect("delay")
         self._expect("(")
@@ -332,7 +327,7 @@ class TypeParser:
         )
 
     def _parse_infinite_delay(self) -> ProcessType:
-        """解析无穷 delay；它没有用户可写的自然到时后继。"""
+        r"""Parse infinite delay without a writable timeout continuation."""
 
         start = self._expect("forever")
         interrupts: AngelicType = NoInterruptType()
@@ -341,7 +336,7 @@ class TypeParser:
         return self._construct(start, lambda: InfiniteDelayType(interrupts))
 
     def _parse_mu(self) -> ProcessType:
-        """解析 ``mu X. T``，并交给 ``MuType`` 验证通信守卫条件。"""
+        r"""Parse mu X.T and validate communication guards via MuType."""
 
         start = self._expect("mu")
         variable = self._expect("IDENT")
@@ -350,7 +345,7 @@ class TypeParser:
         return self._construct(start, lambda: MuType(variable.text, body))
 
     def _parse_angelic_type(self) -> AngelicType:
-        """解析零、一或多个通信分支，并规范为唯一的 ``A`` 节点。"""
+        r"""Canonicalize zero, one, or multiple communication branches."""
 
         start = self._expect("angelic")
         self._expect("{")
@@ -368,7 +363,7 @@ class TypeParser:
         return self._construct(start, lambda: make_external_choice(branches))
 
     def _parse_communication_branch(self) -> InputType | OutputType:
-        """解析一个 ``ch? -> T`` 或 ``ch! -> T`` 的 Angelic 分支。"""
+        r"""Parse a ch? -> T or ch! -> T angelic branch."""
 
         channel = self._expect("IDENT")
         direction = self.current
@@ -391,7 +386,7 @@ class TypeParser:
         )
 
     def _parse_duration(self) -> Fraction:
-        """只接受精确、有限且非负的整数字面量或分数字面量。"""
+        r"""Require an exact nonnegative integer or fraction duration."""
 
         numerator = self._expect("INTEGER")
         denominator: Token | None = None
@@ -410,7 +405,7 @@ class TypeParser:
             raise self._validation_error(str(exc), token) from exc
 
     def _match(self, kind: str) -> Token | None:
-        """若当前 token 属于指定种类则消费它，否则保持游标不动。"""
+        r"""Consume a matching token without advancing on failure."""
 
         if self.current.kind != kind:
             return None
@@ -419,7 +414,7 @@ class TypeParser:
         return token
 
     def _expect(self, kind: str) -> Token:
-        """消费指定 token，失败时产生带源码位置的语法诊断。"""
+        r"""Require a token or produce a located syntax diagnostic."""
 
         token = self._match(kind)
         if token is None:
@@ -430,7 +425,7 @@ class TypeParser:
         return token
 
     def _construct(self, token: Token, build: Callable[[], _T]) -> _T:
-        """把 AST 构造期的局部良构错误包装成用户可定位的诊断。"""
+        r"""Wrap constructor well-formedness failures as located diagnostics."""
 
         try:
             return build()
@@ -443,7 +438,7 @@ class TypeParser:
         *,
         expected: tuple[str, ...] = (),
     ) -> HCSPInputError:
-        """按当前 token 的位置创建语法错误。"""
+        r"""Create a syntax error at the current token."""
 
         return HCSPInputError(
             message,
@@ -456,7 +451,7 @@ class TypeParser:
         )
 
     def _validation_error(self, message: str, token: Token) -> HCSPInputError:
-        """按给定 token 的位置创建 AST 良构性错误。"""
+        r"""Create a well-formedness error at the selected token."""
 
         return HCSPInputError(
             message,
@@ -473,6 +468,6 @@ def parse_type_source(
     *,
     source_name: str = "<type>",
 ) -> ConfigurationType:
-    """把完整 ``type`` 源码解析为项目的 ``ConfigurationType`` AST。"""
+    r"""Parse complete Type source into ConfigurationType."""
 
     return TypeParser(source, source_name).parse()

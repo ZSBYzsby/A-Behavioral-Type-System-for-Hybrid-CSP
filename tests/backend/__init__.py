@@ -1,1 +1,1 @@
-"""后端目录边界、依赖方向与统一代码风格测试。"""
+r"""Regression tests for backend."""

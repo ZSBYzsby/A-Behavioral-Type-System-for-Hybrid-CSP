@@ -1,11 +1,4 @@
-r"""把规范 Type 转成有限正规项图，并计算等递归状态键。
-
-``mu`` 与 De Bruijn 变量在构图时解析成循环边；随后用有限图上的双模拟分区
-求无限正规树等价类。内部/外部选择在递归等价暴露出新的嵌套或重复分支后再次
-按既有代数律展平、去重，配置根则删除 Empty 单位元、排序并保留并行重数。模块还
-能为最小项图确定性生成仅供状态图展示的规范 Type AST 代表，并记录项图根/子边
-到该展示代表可见位置的映射，供 Table 3 推导证据使用。
-"""
+r"""Compile normalized Types into finite regular term graphs and equi-recursive keys."""
 
 from __future__ import annotations
 
@@ -44,7 +37,7 @@ from ...data_structures.regular_type_term_graph import (
 
 @dataclass(frozen=True, slots=True)
 class _NodeSpec:
-    """最小化期间允许临时单分支选择的私有结点说明。"""
+    r"""A temporary node specification permitting singleton choices during minimization."""
 
     kind: RegularTypeNodeKind
     payload: str | Fraction | None
@@ -53,12 +46,7 @@ class _NodeSpec:
 
 @dataclass(frozen=True, slots=True)
 class _StatePresentation:
-    """项图状态的规范 AST 展示以及语义位置到展示位置的映射。
-
-    项图按循环图的稳定结点编号排列根和选择子边；规范 AST 则按最终重建出的
-    ``normalized_*_key`` 排序。递归回边会在展示时重新引入 ``mu``，所以两种顺序
-    不能假定相同。映射以“出现位置”而不是结点编号为键，从而保留重复并行分量。
-    """
+    r"""A display AST and mappings from semantic to displayed positions."""
 
     type_ast: NormalizedConfigurationType
     component_indices: tuple[int, ...]
@@ -67,16 +55,16 @@ class _StatePresentation:
 
 
 class _TermGraphBuilder:
-    """用可解析占位符把 De Bruijn 递归绑定转换为有限循环图。"""
+    r"""Resolve De Bruijn recursion binders into finite cyclic graph placeholders."""
 
     def __init__(self) -> None:
-        """建立空结点表和仅用于 ``mu`` binder 的别名表。"""
+        r"""Initialize nodes and recursion-binder aliases."""
 
         self.nodes: list[RegularTypeNode | None] = []
         self.aliases: dict[int, int] = {}
 
     def placeholder(self) -> int:
-        """分配一个稍后指向递归体根的 binder 占位编号。"""
+        r"""Allocate a binder placeholder for its future body root."""
 
         node_id = len(self.nodes)
         self.nodes.append(None)
@@ -88,10 +76,10 @@ class _TermGraphBuilder:
         payload: str | Fraction | None = None,
         children: Iterable[int] = (),
     ) -> int:
-        """追加一个实际 Type 构造结点并返回其临时编号。"""
+        r"""Append a constructor node and return its temporary identifier."""
 
-        # ``children`` 往往是会递归追加子结点的生成器。必须先把它完全求值，再按
-        # 当前表长分配父结点编号，否则父编号会误指向生成器追加的第一个子结点。
+        # Evaluate child generators before allocating the parent identifier; children may append
+        # nodes.
         frozen_children = tuple(children)
         node_id = len(self.nodes)
         self.nodes.append(RegularTypeNode(kind, payload, frozen_children))
@@ -102,7 +90,7 @@ class _TermGraphBuilder:
         value: NormalizedProcessType,
         binders: tuple[int, ...],
     ) -> int:
-        """用显式工作栈转换规范过程类型并解析递归位置。"""
+        r"""Compile a normalized process with an explicit work stack."""
 
         return self._build(value, binders, angelic=False)
 
@@ -111,7 +99,7 @@ class _TermGraphBuilder:
         value: NormalizedAngelicType,
         binders: tuple[int, ...],
     ) -> int:
-        """用同一显式工作栈转换空、单通信或多通信 angelic 类型。"""
+        r"""Compile angelic types using the same explicit work stack."""
 
         return self._build(value, binders, angelic=True)
 
@@ -122,7 +110,7 @@ class _TermGraphBuilder:
         *,
         angelic: bool,
     ) -> int:
-        """把一棵可能很深的规范类型树迭代地追加到有限项图。"""
+        r"""Append a potentially deep normalized type tree iteratively."""
 
         results: list[int] = []
         # visit: ("visit", value, binders, is_angelic)
@@ -249,7 +237,7 @@ class _TermGraphBuilder:
         return results[0]
 
     def freeze(self, roots: Iterable[int]) -> RegularTypeTermGraph:
-        """解析 binder 别名、删除占位编号并冻结全部可达实际结点。"""
+        r"""Resolve binder aliases and freeze reachable constructor nodes."""
 
         resolved_roots = tuple(self._resolve(root) for root in roots)
         semantic: dict[int, RegularTypeNode] = {}
@@ -291,7 +279,7 @@ class _TermGraphBuilder:
         )
 
     def _resolve(self, node_id: int) -> int:
-        """沿 binder 别名解析到实际构造结点并拒绝纯别名递归环。"""
+        r"""Resolve binder aliases and reject pure alias recursion cycles."""
 
         path: list[int] = []
         current = node_id
@@ -310,11 +298,7 @@ class _TermGraphBuilder:
 def build_regular_type_term_graph(
     value: NormalizedConfigurationType,
 ) -> RegularTypeTermGraph:
-    """把闭合规范配置转换为不含 ``mu``/变量节点的有限循环项图。
-
-    每个递归 binder 先建立占位符，受绑定 De Bruijn 引用再连接到对应占位符；
-    guardedness 保证占位符最终可解析到一个真实 Type 构造。并行分量重数予以保留。
-    """
+    r"""Compile a closed normalized configuration without mu or variable nodes."""
 
     if not isinstance(value, NormalizedConfigurationType):
         raise TypeError("Regular type conversion requires a normalized configuration")
@@ -326,10 +310,7 @@ def build_regular_type_term_graph(
 def equi_recursive_state_key(
     value: NormalizedConfigurationType,
 ) -> EquiRecursiveStateKey:
-    """返回忽略有限 ``mu`` 展开/折叠差异的稳定、可哈希状态键。
-
-    该键而非展示 AST 是状态图判重和 Table 3 一步推导使用的状态本体。
-    """
+    r"""Return a hashable state key invariant under finite mu unfolding."""
 
     return minimize_regular_type_term_graph(build_regular_type_term_graph(value))
 
@@ -338,7 +319,7 @@ def equi_recursive_equivalent(
     left: NormalizedConfigurationType,
     right: NormalizedConfigurationType,
 ) -> bool:
-    """判断两个规范配置是否表示相同的等递归无限正规树。"""
+    r"""Compare normalized configurations as equi-recursive infinite regular trees."""
 
     return equi_recursive_state_key(left) == equi_recursive_state_key(right)
 
@@ -346,11 +327,7 @@ def equi_recursive_equivalent(
 def minimize_regular_type_term_graph(
     graph: RegularTypeTermGraph,
 ) -> EquiRecursiveStateKey:
-    """按最大双模拟最小化项图，并对最终商图执行稳定编号。
-
-    每轮先按节点标签和子类颜色求商，再重新展平、排序和去重选择节点；当商图稳定
-    后，把普通节点转换为不可变 ``CanonicalRegularTypeNode`` 状态键。
-    """
+    r"""Minimize by greatest bisimulation and number the quotient deterministically."""
 
     if not isinstance(graph, RegularTypeTermGraph):
         raise TypeError("Regular-tree minimization requires RegularTypeTermGraph")
@@ -376,7 +353,7 @@ def minimize_regular_type_term_graph(
 
 
 def _bisimulation_colors(graph: RegularTypeTermGraph) -> tuple[int, ...]:
-    """用稳定分区细化计算有限项图的最大构造保持双模拟。"""
+    r"""Compute constructor-preserving bisimulation through partition refinement."""
 
     colors = _assign_colors(
         tuple((_base_key(node),) for node in graph.nodes)
@@ -386,15 +363,14 @@ def _bisimulation_colors(graph: RegularTypeTermGraph) -> tuple[int, ...]:
             _node_signature(node, colors) for node in graph.nodes
         )
         next_colors = _assign_colors(signatures)
-        # 颜色编号本身只是实现细节；比较同色关系，避免同一稳定划分因编号
-        # 置换而在两轮之间振荡。
+        # Compare color equivalence relations, not color numbers, to detect stable partitions.
         if _same_partition(colors, next_colors):
             return colors
         colors = next_colors
 
 
 def _same_partition(left: tuple[int, ...], right: tuple[int, ...]) -> bool:
-    """线性判断两组颜色是否定义同一个等价关系，忽略颜色编号置换。"""
+    r"""Compare partitions independently of color-number permutations."""
 
     if len(left) != len(right):
         return False
@@ -409,7 +385,7 @@ def _same_partition(left: tuple[int, ...], right: tuple[int, ...]) -> bool:
 
 
 def _assign_colors(signatures: tuple[tuple[object, ...], ...]) -> tuple[int, ...]:
-    """按可比较签名的稳定排序为每个等价类分配连续编号。"""
+    r"""Assign contiguous colors using stable signature ordering."""
 
     unique = {signature for signature in signatures}
     ordered = sorted(unique, key=repr)
@@ -418,7 +394,7 @@ def _assign_colors(signatures: tuple[tuple[object, ...], ...]) -> tuple[int, ...
 
 
 def _base_key(node: RegularTypeNode) -> tuple[object, ...]:
-    """返回不含子边的结点标签键。"""
+    r"""Return the node label without child edges."""
 
     payload: tuple[object, ...]
     if node.payload is None:
@@ -438,7 +414,7 @@ def _node_signature(
     node: RegularTypeNode,
     colors: tuple[int, ...],
 ) -> tuple[object, ...]:
-    """按有序构造或选择集合语义生成一次分区细化签名。"""
+    r"""Generate a refinement signature respecting ordered or set-like constructors."""
 
     child_colors = tuple(colors[child] for child in node.children)
     if node.kind in {
@@ -453,7 +429,7 @@ def _quotient_and_simplify(
     graph: RegularTypeTermGraph,
     colors: tuple[int, ...],
 ) -> RegularTypeTermGraph:
-    """按双模拟类取商，并重新执行选择与并行的代数规范化。"""
+    r"""Quotient by bisimulation and renormalize choices and parallel composition."""
 
     representatives: dict[int, RegularTypeNode] = {}
     for node_id, color in enumerate(colors):
@@ -476,7 +452,7 @@ def _simplify_choice_aliases(
     specs: dict[int, _NodeSpec],
     roots: tuple[int, ...],
 ) -> tuple[dict[int, _NodeSpec], tuple[int, ...]]:
-    """展平同类选择；幂等化后只剩一支时把选择重定向到该分支。"""
+    r"""Flatten and deduplicate choices; redirect singleton choices to their branch."""
 
     current = dict(specs)
     current_roots = roots
@@ -537,7 +513,7 @@ def _choice_leaves(
     specs: dict[int, _NodeSpec],
     visiting: frozenset[int],
 ) -> tuple[int, ...]:
-    """沿同类选择边迭代收集非选择叶，并保持原深度优先顺序。"""
+    r"""Collect non-choice leaves iteratively in depth-first order."""
 
     leaves: list[int] = []
     pending: list[tuple[int, frozenset[int]]] = [(node_id, visiting)]
@@ -558,7 +534,7 @@ def _choice_leaves(
 
 
 def _resolve_redirect(node_id: int, redirects: dict[int, int]) -> int:
-    """解析单分支选择重定向并防御性拒绝别名环。"""
+    r"""Resolve singleton-choice redirects and reject alias cycles."""
 
     visited: set[int] = set()
     current = node_id
@@ -574,7 +550,7 @@ def _freeze_specs(
     specs: dict[int, _NodeSpec],
     roots: tuple[int, ...],
 ) -> RegularTypeTermGraph:
-    """删除不可达商类、规范并行 Empty 单位元并冻结连续编号项图。"""
+    r"""Remove unreachable classes and Empty parallel identities before freezing."""
 
     nonempty_roots = tuple(
         root for root in roots if specs[root].kind is not RegularTypeNodeKind.EMPTY
@@ -617,23 +593,13 @@ def _freeze_specs(
 def normalized_type_from_state_key(
     value: EquiRecursiveStateKey,
 ) -> NormalizedConfigurationType:
-    """为规范循环项图生成一个确定的规范 Type AST 展示代表。
-
-    该转换只服务于状态图输出，不参与 Table 3 推导或状态判等。项图回边被重新
-    写成 De Bruijn ``mu``；无回边的普通节点不会被多余的 ``mu`` 包裹。由于同一
-    项图节点可能从多个位置到达，展示树可以复制共享子图，但其正规树语义保持不变。
-    """
+    r"""Choose a deterministic normalized Type AST for display."""
 
     return _present_state_key(value).type_ast
 
 
 def _present_state_key(value: EquiRecursiveStateKey) -> _StatePresentation:
-    """重建规范 AST，并记录项图位置在该 AST 中对应的可见索引。
-
-    ``component_indices[i]`` 是项图第 ``i`` 个根在展示配置中的位置。另两个映射
-    分别把该根为内部选择或 delay 时的项图分支位置转换为展示分支位置。不存在
-    对应分支类别时保存空元组。
-    """
+    r"""Rebuild a display AST with visible-index mappings."""
 
     if not isinstance(value, EquiRecursiveStateKey):
         raise TypeError("State-key rendering requires EquiRecursiveStateKey")
@@ -710,7 +676,7 @@ def _ordered_child_index_map(
     values: tuple[NormalizedProcessType | NormalizedAngelicType, ...],
     key: Callable[[Any], tuple[Any, ...]],
 ) -> tuple[int, ...]:
-    """返回子边原位置到最终规范排序位置的双射。"""
+    r"""Map original child positions to their normalized sorted positions."""
 
     if not values:
         return ()
@@ -728,7 +694,7 @@ def _source_to_display_indices(
     ordered_sources: tuple[int, ...],
     item_count: int,
 ) -> tuple[int, ...]:
-    """把按展示顺序排列的原位置转换为 ``原位置 -> 展示位置`` 元组。"""
+    r"""Invert display order into a source-to-display index tuple."""
 
     if len(ordered_sources) != item_count or set(ordered_sources) != set(
         range(item_count)
@@ -745,7 +711,7 @@ def _reify_process(
     node_id: int,
     path: tuple[int, ...],
 ) -> NormalizedProcessType:
-    """沿当前 DFS 路径把一个过程节点及回边重建为 De Bruijn 语法树。"""
+    r"""Reconstruct process nodes and back edges as a De Bruijn syntax tree."""
 
     result = _reify_iterative(graph, node_id, path, angelic=False)
     assert isinstance(result, NormalizedProcessType)
@@ -757,7 +723,7 @@ def _reify_angelic(
     node_id: int,
     path: tuple[int, ...],
 ) -> NormalizedAngelicType:
-    """把项图中的 angelic 子结构重建为规范输入、输出或外部选择。"""
+    r"""Reconstruct normalized angelic inputs, outputs, and external choices."""
 
     result = _reify_iterative(graph, node_id, path, angelic=True)
     assert isinstance(result, NormalizedAngelicType)
@@ -771,7 +737,7 @@ def _reify_iterative(
     *,
     angelic: bool,
 ) -> NormalizedProcessType | NormalizedAngelicType:
-    """用显式后序栈把有限循环项图重建为用于展示的 De Bruijn AST。"""
+    r"""Reify cyclic graphs using an explicit postorder stack."""
 
     results: list[NormalizedProcessType | NormalizedAngelicType] = []
     pending: list[tuple[Any, ...]] = [("visit", root, path, angelic)]
@@ -878,7 +844,7 @@ def _reify_iterative(
 
 
 def _references_binder(value: NormalizedProcessType, depth: int) -> bool:
-    """判断过程树是否引用当前待决定是否保留的虚拟 binder。"""
+    r"""Check whether a process references the candidate virtual binder."""
 
     pending: list[tuple[object, int, bool]] = [(value, depth, False)]
     while pending:
@@ -921,7 +887,7 @@ def _remove_unused_binder(
     value: NormalizedProcessType,
     depth: int,
 ) -> NormalizedProcessType:
-    """删除一个未被引用的虚拟 binder，并下移其外层 De Bruijn index。"""
+    r"""Remove an unused binder and lower outer De Bruijn indices."""
 
     results: list[NormalizedProcessType | NormalizedAngelicType] = []
     pending: list[tuple[Any, ...]] = [("visit", value, depth, False)]
@@ -1012,9 +978,9 @@ def _remove_unused_binder_angelic(
     value: NormalizedAngelicType,
     depth: int,
 ) -> NormalizedAngelicType:
-    """在 angelic continuation 中删除同一未使用虚拟 binder。"""
+    r"""Remove the same unused binder from angelic continuations."""
 
-    # 复用过程入口的显式工作栈，并取临时无穷时延包装中的 angelic 子树。
+    # Reuse iterative process traversal through a temporary infinite-delay wrapper.
     wrapped = _remove_unused_binder(NormalizedInfiniteDelayType(value), depth)
     assert isinstance(wrapped, NormalizedInfiniteDelayType)
     return wrapped.interrupts

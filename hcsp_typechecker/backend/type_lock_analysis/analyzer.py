@@ -1,9 +1,4 @@
-"""以 O(|V|+|E|) 显式图算法判断 Type 图的锁自由与 Bottom 错误自由。
-
-实现不使用 Python 递归：BFS 同时建立最短可达前缀，显式栈 DFS 在静默
-迁移子图中寻找有向环。因而其可承载规模与第三接口生成的显式图相匹配，
-不会因用户类型较深而触发 Python 递归上限。
-"""
+r"""Analyze explicit graphs in O(|V|+|E|) time with finite counterexample witnesses."""
 
 from __future__ import annotations
 
@@ -29,14 +24,14 @@ from .graph_index import GraphIndex
 
 
 class IncompleteTransitionGraphError(ValueError):
-    """图含有从初始状态不可达的结点，不能视为完整可达闭包。"""
+    r"""Unreachable nodes prevent treating the graph as a reachable closure."""
 
     def __init__(
         self,
         unreachable_state_ids: tuple[int, ...],
         total_count: int,
     ) -> None:
-        """保存不可达状态预览和总数，并构造紧凑错误原因。"""
+        r"""Store unreachable-state counts and a compact diagnostic preview."""
 
         self.unreachable_state_ids = unreachable_state_ids
         self.total_count = total_count
@@ -48,7 +43,7 @@ class IncompleteTransitionGraphError(ValueError):
 
 
 def _is_deadlock_edge(transition: TypeTransition) -> bool:
-    """实现 Definition 4.5：无限时间迁移且 ready 集非空。"""
+    r"""Definition 4.5: infinite-time transition with a nonempty ready set."""
 
     label = transition.label
     return (
@@ -62,7 +57,7 @@ def _bottom_component_indices(
     graph: TypeTransitionGraph,
     state_id: int,
 ) -> tuple[int, ...]:
-    """返回一个规范状态中已经成为并行根的全部 Bottom 分量位置。"""
+    r"""Find Bottom components at the normalized parallel root."""
 
     return tuple(
         index
@@ -76,7 +71,7 @@ def _reconstruct_prefix(
     parent_edge: array,
     target: int,
 ) -> TransitionPath:
-    """从 BFS 父边数组迭代重建初始状态到 ``target`` 的最短路径。"""
+    r"""Reconstruct a shortest reachable prefix iteratively from BFS parent edges."""
 
     reverse_edges: list[TypeTransition] = []
     current = target
@@ -98,7 +93,7 @@ def _reconstruct_prefix(
 def _reachable_bfs(
     index: GraphIndex,
 ) -> tuple[bytearray, array, tuple[int, ...], int | None]:
-    """扫描所有可达边，并记录最短路径树与首条可达死锁边。"""
+    r"""Find reachable states, shortest paths, and the first deadlock edge."""
 
     graph = index.graph
     state_count = len(graph.states)
@@ -132,7 +127,7 @@ def _reconstruct_silent_cycle(
     ancestor: int,
     closing_edge_id: int,
 ) -> TransitionPath:
-    """由 DFS 树父边和一条返祖边重建非空静默环。"""
+    r"""Reconstruct a nonempty silent cycle from DFS parent edges and a back edge."""
 
     reverse_tree_edges: list[TypeTransition] = []
     cursor = current
@@ -152,10 +147,11 @@ def _find_silent_cycle(
     index: GraphIndex,
     reachable_order: tuple[int, ...],
 ) -> tuple[int, TransitionPath] | None:
-    """在静默边诱导子图上用显式栈 DFS 寻找一个有向环。"""
+    r"""Find a directed cycle in the silent-edge subgraph using iterative DFS."""
 
     graph = index.graph
-    color = bytearray(len(graph.states))  # 0=未见，1=活动栈，2=已完成
+    # DFS colors: 0 = unseen, 1 = active, 2 = complete.
+    color = bytearray(len(graph.states))
     parent_edge = array("q", [-1]) * len(graph.states)
 
     for root in reachable_order:
@@ -199,7 +195,7 @@ def _find_silent_cycle(
 
 
 def analyze_lock_freedom(graph: TypeTransitionGraph) -> LockFreedomReport:
-    """分析完整可达 Type 图，返回锁、Bottom 错误与综合正确性见证。"""
+    r"""Analyze the complete graph and return lock and Bottom-error witnesses."""
 
     if not isinstance(graph, TypeTransitionGraph):
         raise TypeError("graph must be a TypeTransitionGraph")

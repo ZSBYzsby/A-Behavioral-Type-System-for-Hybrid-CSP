@@ -1,11 +1,4 @@
-r"""Table 3 状态空间采用的规范化行为 Type AST。
-
-规范化树不是用户 Type 语法的第二种写法，而是操作语义内部的商结构：并行按结合律、
-交换律和 ``EmptyType`` 单位元规范化但保留重数；内部选择按结合律、交换律和幂等律
-规范化；外部选择按交换律和幂等律规范化；递归引用使用 De Bruijn index 消除绑定名
-差异。全部节点不可变且可哈希，并作为有限循环项图的构造输入；Table 3 正式作用于
-该项图，使 ``mu t.T`` 与 ``T[mu t.T/t]`` 从状态身份到出边集合都完全一致。
-"""
+r"""Immutable normalized Type ASTs for the Table 3 state space."""
 
 from __future__ import annotations
 
@@ -18,10 +11,10 @@ from ...identifiers import is_hcsp_identifier
 
 
 class NormalizedProcessType(ABC):
-    """规范化过程类型 ``T`` 的抽象类别。"""
+    r"""Abstract category of normalized process types."""
 
     def __new__(cls, *args: Any, **kwargs: Any) -> "NormalizedProcessType":
-        """阻止绕过具体规范产生式直接实例化抽象过程类别。"""
+        r"""Prevent direct instantiation of the abstract process category."""
 
         if cls is NormalizedProcessType:
             raise TypeError("NormalizedProcessType is an abstract category")
@@ -29,10 +22,10 @@ class NormalizedProcessType(ABC):
 
 
 class NormalizedAngelicType(ABC):
-    """规范化中断/外部选择类型 ``A`` 的抽象类别。"""
+    r"""Abstract category of normalized angelic interrupt types."""
 
     def __new__(cls, *args: Any, **kwargs: Any) -> "NormalizedAngelicType":
-        """阻止绕过具体规范产生式直接实例化抽象 angelic 类别。"""
+        r"""Prevent direct instantiation of the abstract angelic category."""
 
         if cls is NormalizedAngelicType:
             raise TypeError("NormalizedAngelicType is an abstract category")
@@ -41,22 +34,22 @@ class NormalizedAngelicType(ABC):
 
 @dataclass(frozen=True, slots=True)
 class NormalizedEmptyType(NormalizedProcessType):
-    """正常终止且不再产生信道通信的空过程行为。"""
+    r"""Normal termination with no further channel communication."""
 
 
 @dataclass(frozen=True, slots=True)
 class NormalizedBottomType(NormalizedProcessType):
-    """论文中的异常底行为 ``\bot``，不能与正常空行为合并。"""
+    r"""Bottom error behavior, distinct from normal termination."""
 
 
 @dataclass(frozen=True, slots=True)
 class NormalizedBoundTypeVar(NormalizedProcessType):
-    """使用 De Bruijn index 表示的受绑定递归类型变量。"""
+    r"""A bound recursion variable represented by a De Bruijn index."""
 
     index: int
 
     def __post_init__(self) -> None:
-        """拒绝 Boolean 和负数，保证 De Bruijn index 具有合法编码形状。"""
+        r"""Require a nonnegative integer De Bruijn index, excluding bool."""
 
         if isinstance(self.index, bool) or not isinstance(self.index, int):
             raise TypeError("Normalized type-variable index must be an integer")
@@ -66,18 +59,18 @@ class NormalizedBoundTypeVar(NormalizedProcessType):
 
 @dataclass(frozen=True, slots=True)
 class NormalizedNoInterruptType(NormalizedAngelicType):
-    """空 angelic choice，即 delay 不含任何通信中断分支。"""
+    r"""An empty angelic choice with no communication interrupt."""
 
 
 @dataclass(frozen=True, slots=True)
 class NormalizedInputType(NormalizedAngelicType):
-    """规范化输入中断分支 ``ch?.T``。"""
+    r"""Normalized input interrupt ch?.T."""
 
     channel: str
     continuation: NormalizedProcessType
 
     def __post_init__(self) -> None:
-        """验证通道词法边界和通信后的规范化过程类型。"""
+        r"""Validate the channel identifier and normalized process continuation."""
 
         if not is_hcsp_identifier(self.channel):
             raise ValueError("Normalized input channel must be an HCSP identifier")
@@ -87,13 +80,13 @@ class NormalizedInputType(NormalizedAngelicType):
 
 @dataclass(frozen=True, slots=True)
 class NormalizedOutputType(NormalizedAngelicType):
-    """规范化输出中断分支 ``ch!.T``。"""
+    r"""Normalized output interrupt ch!.T."""
 
     channel: str
     continuation: NormalizedProcessType
 
     def __post_init__(self) -> None:
-        """验证通道词法边界和通信后的规范化过程类型。"""
+        r"""Validate the channel identifier and normalized process continuation."""
 
         if not is_hcsp_identifier(self.channel):
             raise ValueError("Normalized output channel must be an HCSP identifier")
@@ -106,12 +99,12 @@ NormalizedCommunicationType: TypeAlias = NormalizedInputType | NormalizedOutputT
 
 @dataclass(frozen=True, slots=True)
 class NormalizedExternalChoiceType(NormalizedAngelicType):
-    """按交换律和幂等律排序去重后的多元外部选择。"""
+    r"""External choice sorted and deduplicated by commutativity and idempotence."""
 
     branches: tuple[NormalizedCommunicationType, ...]
 
     def __post_init__(self) -> None:
-        """保证多元节点至少两支，并已经处于唯一排序去重形式。"""
+        r"""Require at least two branches in canonical sorted, unique order."""
 
         if len(self.branches) < 2:
             raise ValueError("Normalized external choice requires at least two branches")
@@ -131,12 +124,12 @@ class NormalizedExternalChoiceType(NormalizedAngelicType):
 
 @dataclass(frozen=True, slots=True)
 class NormalizedInternalChoiceType(NormalizedProcessType):
-    """按结合律、交换律和幂等律展平排序去重的多元内部选择。"""
+    r"""Internal choice flattened, sorted, and deduplicated by associative set semantics."""
 
     branches: tuple[NormalizedProcessType, ...]
 
     def __post_init__(self) -> None:
-        """拒绝嵌套、单分支、乱序或重复的非规范内部选择。"""
+        r"""Reject nested, singleton, unsorted, or duplicate internal choices."""
 
         if len(self.branches) < 2:
             raise ValueError("Normalized internal choice requires at least two branches")
@@ -159,7 +152,7 @@ class NormalizedInternalChoiceType(NormalizedProcessType):
 
 
 def _normalize_duration(duration: Any) -> Fraction:
-    """把规范 delay 时长限制为非负精确有理数。"""
+    r"""Require a nonnegative exact rational delay."""
 
     if isinstance(duration, bool):
         raise TypeError("Normalized duration must not be Boolean")
@@ -176,7 +169,7 @@ def _normalize_duration(duration: Any) -> Fraction:
 
 @dataclass(frozen=True, slots=True, init=False)
 class NormalizedFiniteDelayType(NormalizedProcessType):
-    r"""规范有限时延 ``delay(d) \unrhd A \triangleright T``。"""
+    r"""Normalized finite delay with interrupts and a timeout continuation."""
 
     duration: Fraction
     interrupts: NormalizedAngelicType
@@ -188,7 +181,7 @@ class NormalizedFiniteDelayType(NormalizedProcessType):
         interrupts: NormalizedAngelicType,
         continuation: NormalizedProcessType,
     ) -> None:
-        """验证并冻结有限有理时长、中断集合和正常后继。"""
+        r"""Freeze an exact duration, interrupt type, and timeout continuation."""
 
         if not isinstance(interrupts, NormalizedAngelicType):
             raise TypeError("Normalized finite delay requires an angelic type")
@@ -201,12 +194,12 @@ class NormalizedFiniteDelayType(NormalizedProcessType):
 
 @dataclass(frozen=True, slots=True)
 class NormalizedInfiniteDelayType(NormalizedProcessType):
-    """规范无穷时延；其不可达自然后继由语义固定为 ``\bot``。"""
+    r"""Infinite delay with a semantically unreachable Bottom timeout continuation."""
 
     interrupts: NormalizedAngelicType
 
     def __post_init__(self) -> None:
-        """确保无穷时延只携带规范 angelic type。"""
+        r"""Require a normalized angelic interrupt type for infinite delay."""
 
         if not isinstance(self.interrupts, NormalizedAngelicType):
             raise TypeError("Normalized infinite delay requires an angelic type")
@@ -214,12 +207,12 @@ class NormalizedInfiniteDelayType(NormalizedProcessType):
 
 @dataclass(frozen=True, slots=True)
 class NormalizedMuType(NormalizedProcessType):
-    """无绑定名称的规范递归类型；变量引用使用 De Bruijn index。"""
+    r"""Nameless recursion using De Bruijn variable references."""
 
     body: NormalizedProcessType
 
     def __post_init__(self) -> None:
-        """确保递归体属于过程范畴且自身递归引用均受通信保护。"""
+        r"""Require a process body with communication-guarded recursion references."""
 
         if not isinstance(self.body, NormalizedProcessType):
             raise TypeError("Normalized recursive body must be a process type")
@@ -230,7 +223,7 @@ class NormalizedMuType(NormalizedProcessType):
 def make_normalized_internal_choice(
     branches: Iterable[NormalizedProcessType],
 ) -> NormalizedProcessType:
-    """展平、排序并去重内部选择，单一结果直接返回该分支。"""
+    r"""Flatten and deduplicate internal choice, returning a lone branch directly."""
 
     flat: list[NormalizedProcessType] = []
     for branch in branches:
@@ -251,7 +244,7 @@ def make_normalized_internal_choice(
 def make_normalized_external_choice(
     branches: Iterable[NormalizedCommunicationType],
 ) -> NormalizedAngelicType:
-    """排序并去重外部选择，按零、单、多分支返回唯一规范节点。"""
+    r"""Canonicalize zero, one, or multiple external-choice branches."""
 
     items = tuple(branches)
     if not all(
@@ -268,13 +261,13 @@ def make_normalized_external_choice(
 
 
 def normalized_process_key(value: NormalizedProcessType) -> tuple[Any, ...]:
-    """返回规范过程类型的稳定全序键，使用迭代后序遍历。"""
+    r"""Compute a stable total-order process key using iterative postorder traversal."""
 
     return _normalized_key(value)
 
 
 def normalized_angelic_key(value: NormalizedAngelicType) -> tuple[Any, ...]:
-    """返回规范 angelic type 的稳定全序键，使用迭代后序遍历。"""
+    r"""Compute a stable angelic key using iterative postorder traversal."""
 
     return _normalized_key(value)
 
@@ -282,7 +275,7 @@ def normalized_angelic_key(value: NormalizedAngelicType) -> tuple[Any, ...]:
 def _normalized_children(
     value: NormalizedProcessType | NormalizedAngelicType,
 ) -> tuple[NormalizedProcessType | NormalizedAngelicType, ...]:
-    """返回稳定键计算所需的直接子节点。"""
+    r"""Return direct children needed to compute structural keys."""
 
     if isinstance(value, (NormalizedInputType, NormalizedOutputType)):
         return (value.continuation,)
@@ -300,7 +293,7 @@ def _normalized_children(
 def _normalized_key(
     root: NormalizedProcessType | NormalizedAngelicType,
 ) -> tuple[Any, ...]:
-    """以显式栈构造深层规范 Type 的不可变结构键。"""
+    r"""Compute immutable keys for deep Types with an explicit stack."""
 
     results: dict[int, tuple[Any, ...]] = {}
     pending = [(root, False)]
@@ -338,7 +331,7 @@ def _target_binder_guarded(
     nested_depth: int,
     under_communication: bool,
 ) -> bool:
-    """检查目标外层 mu 的引用在所有路径上均先经过一次通信。"""
+    r"""Require communication before every reference to the target outer mu binder."""
 
     pending: list[tuple[object, int, bool, bool]] = [
         (value, nested_depth, under_communication, False)
@@ -391,12 +384,12 @@ def _target_binder_guarded(
 
 @dataclass(frozen=True, slots=True, init=False)
 class NormalizedConfigurationType:
-    """按并行结合/交换律和 Empty 单位元规范化的配置类型根。"""
+    r"""Canonical parallel configuration with Empty as its identity."""
 
     components: tuple[NormalizedProcessType, ...]
 
     def __init__(self, components: Iterable[NormalizedProcessType]) -> None:
-        """删除并行 Empty 单位元、排序分量并保留并行重数。"""
+        r"""Remove Empty roots, sort components, and preserve parallel multiplicity."""
 
         items = tuple(components)
         if not all(isinstance(item, NormalizedProcessType) for item in items):
@@ -412,7 +405,7 @@ class NormalizedConfigurationType:
 
     @property
     def is_empty(self) -> bool:
-        """判断该规范配置是否是唯一正常空状态。"""
+        r"""Recognize the canonical empty configuration."""
 
         return len(self.components) == 1 and isinstance(
             self.components[0], NormalizedEmptyType

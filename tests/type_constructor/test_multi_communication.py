@@ -1,22 +1,4 @@
-"""多标量同步通信的 Process -> Type 专项测试。
-
-测试内容
---------
-
-1. ``ch?(x1,...,xn)`` 一次建立多个独立标量绑定，并假设联合 refinement；
-2. ``ch!(e1,...,en)`` 逐槽检查 BasicType，并证明联合 refinement；
-3. 输入、输出参数数量必须与 ``Theta(ch)`` 的槽位元数完全一致；
-4. 每个槽位独立报告类型错误，不把整组通信载荷当作 TupleType；
-5. 并行的一入一出共享同一多槽签名，但行为类型仍只记录一次 ch?/ch!。
-6. 已声明输入目标只接受其可容纳的通道槽位类型，不允许把 Real 写入 Int。
-
-论文对应
---------
-
-这些测试覆盖协作者确认的 T-In/T-Out 多标量扩展：通道签名从一个 ``B`` 扩展为
-``B1,...,Bn``，普通变量与表达式结果仍分别只有一个 ``BasicType``。行为类型
-继续抽象为 ``ch?.T``/``ch!.T``，通信元数和联合 refinement 只保存在 Theta。
-"""
+r"""Regression tests for multi communication."""
 
 from __future__ import annotations
 
@@ -43,14 +25,11 @@ from hcsp_typechecker._internal import (
 
 
 class MultiScalarCommunicationTests(unittest.TestCase):
-    """验证多槽通信的环境更新、证明义务和行为类型抽象。"""
+    r"""Tests for Multi Scalar Communication."""
 
-    # 测试输入：data?(x,ready) 后断言 x>=0 and ready，Theta 给出同一联合精化。
-    # 预期行为：两个输入目标分别进入 Gamma，断言可由输入 refinement 证明。
-    # 检查内容：核对 true、InputType 以及 T-Assert 证明义务。
-    # 论文对应：扩展 T-In 同时执行 phi{x/eta1,ready/eta2}。
+
     def test_multi_input_binds_each_scalar_and_assumes_joint_refinement(self) -> None:
-        """联合输入 refinement 应同时约束全部新接收标量。"""
+        r"""Verify multi input binds each scalar and assumes joint refinement."""
 
         process = Sequence.of(
             InputChannel("data", ("x", "ready")),
@@ -76,12 +55,9 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         )
         self.assertIn("T-Assert", {item.rule for item in report.obligations})
 
-    # 测试输入：路径 x<limit 下经 pair!(x,limit) 输出，refinement 是二元 callable。
-    # 预期行为：两个 Int 槽位分别通过检查，联合精化证明为 true。
-    # 检查内容：核对 OutputType 和 T-Out 证明义务结论。
-    # 论文对应：扩展 T-Out 同时执行 phi{x/left,limit/right}。
+
     def test_multi_output_proves_callable_joint_refinement(self) -> None:
-        """多参数 refinement callable 应按槽位顺序接收全部输出项。"""
+        r"""Verify multi output proves callable joint refinement."""
 
         report = construct_type(
             gamma={"x": BasicType.INT, "limit": BasicType.INT},
@@ -112,12 +88,9 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         self.assertEqual(len(t_out), 1)
         self.assertEqual(t_out[0].verdict, Verdict.TRUE)
 
-    # 测试输入：二槽通道分别用于单目标输入和三表达式输出。
-    # 预期行为：T-In/T-Out 都返回 false 且不产生候选行为类型。
-    # 检查内容：分别核对期望元数与实际 targets/expressions 数量诊断。
-    # 论文对应：扩展通信的 x/e 参数表必须与 Theta(ch) 的 B 列表等长。
+
     def test_input_and_output_arity_must_match_channel_signature(self) -> None:
-        """通信参数数量与通道签名不一致时不能执行 refinement 替换。"""
+        r"""Verify input and output arity must match channel signature."""
 
         channel = ChannelType((BasicType.INT, BasicType.BOOL))
         reports = (
@@ -144,12 +117,9 @@ class MultiScalarCommunicationTests(unittest.TestCase):
                     any(fragment in item.message for item in report.diagnostics)
                 )
 
-    # 测试输入：mixed!(true,1) 对应通道签名 (Int,Bool)。
-    # 预期行为：两个槽位分别报告 Bool->Int 与 Nat->Bool 不兼容，总体 false。
-    # 检查内容：诊断必须带 slot 1/2，且静态类型前提失败后不生成 OutputType。
-    # 论文对应：多标量扩展逐个检查 Gamma·phi |- ei:Bi，不合并成 tuple 判断。
+
     def test_each_output_slot_is_type_checked_independently(self) -> None:
-        """交换槽位类型不能被整个参数表的外层形状掩盖。"""
+        r"""Verify each output slot is type checked independently."""
 
         report = construct_type(
             gamma={},
@@ -167,13 +137,9 @@ class MultiScalarCommunicationTests(unittest.TestCase):
         self.assertTrue(any("slot 1 expects Int, got Bool" in text for text in messages))
         self.assertTrue(any("slot 2 expects Bool, got Nat" in text for text in messages))
 
-    # 测试输入：分别把 Real 通道输入 Int 变量，以及把 Int 通道输入 Real 变量。
-    # 预期行为：前者因可能丢失非整数值而失败；后者按数值子类型提升成功。
-    # 检查内容：锁定 T-In 的唯一安全方向是 channel slot type <: target type。
-    # 论文对应：输入动作把通道本次携带的 B 类型值写入目标变量，目标声明必须
-    #           能容纳 B 的全部取值，不能仅因两个数值类型可比较便双向接受。
+
     def test_existing_input_target_uses_safe_subtype_direction(self) -> None:
-        """已声明目标只能接收其自身类型能够容纳的通道值。"""
+        r"""Verify existing input target uses safe subtype direction."""
 
         unsafe = construct_type(
             gamma={"x": BasicType.INT},
@@ -202,12 +168,9 @@ class MultiScalarCommunicationTests(unittest.TestCase):
             )
         )
 
-    # 测试输入：同一 pair 通道上的 pair?(x,y) 与 pair!(1,2) 并行。
-    # 预期行为：共享二槽 Theta 签名后整体 true，类型为一个输入和一个输出分量。
-    # 检查内容：确认载荷元数不复制进 InputType/OutputType，仍是一次同步动作。
-    # 论文对应：组合规则保留通信拓扑，连续/值数据细节由 Gamma/Theta 消解。
+
     def test_parallel_multi_input_and_output_keep_one_behavior_action(self) -> None:
-        """多标量同步不改变行为类型层的通信动作数量。"""
+        r"""Verify parallel multi input and output keep one behavior action."""
 
         system = Parallel(
             InputChannel("pair", ("x", "y")),

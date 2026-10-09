@@ -1,1 +1,1 @@
-"""HCSP 输入前端、TypeConstructor、TypeChecker 与 Table 3 图接口的分层测试包。"""
+r"""Regression tests for tests. Paper reference: Table 3."""

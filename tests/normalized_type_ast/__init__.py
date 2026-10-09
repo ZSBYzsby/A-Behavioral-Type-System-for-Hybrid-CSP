@@ -1,1 +1,1 @@
-"""规范化 Type AST 数据结构与单向转换测试包。"""
+r"""Regression tests for normalized type AST."""

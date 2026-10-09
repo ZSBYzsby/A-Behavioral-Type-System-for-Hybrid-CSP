@@ -1,9 +1,4 @@
-"""项目各层共享的 HCSP 标识符词法规则。
-
-用户输入、Expr AST、Process AST 以及后续类型环境都应使用同一种名称形状：
-``[A-Za-z_][A-Za-z0-9_]*``。本模块只定义这一词法形状；``if``、``ode`` 等
-保留字是否能出现在某个源码位置，仍由用户输入 lexer/parser 根据上下文判断。
-"""
+r"""Common ASCII identifier rules across all project layers."""
 
 from __future__ import annotations
 
@@ -18,7 +13,7 @@ HCSP_IDENTIFIER_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 
 def is_hcsp_identifier(value: object) -> bool:
-    """判断对象是否是符合项目 ASCII 词法规则的完整标识符字符串。"""
+    r"""Check whether a complete string is a valid HCSP identifier."""
 
     return (
         isinstance(value, str)
@@ -27,7 +22,7 @@ def is_hcsp_identifier(value: object) -> bool:
 
 
 def is_hcsp_identifier_start(character: str) -> bool:
-    """判断单个字符能否作为 HCSP ASCII 标识符的首字符。"""
+    r"""Check an HCSP identifier's initial character."""
 
     return (
         isinstance(character, str)
@@ -41,7 +36,7 @@ def is_hcsp_identifier_start(character: str) -> bool:
 
 
 def is_hcsp_identifier_continue(character: str) -> bool:
-    """判断单个字符能否作为 HCSP ASCII 标识符的后续字符。"""
+    r"""Check an HCSP identifier's subsequent character."""
 
     return is_hcsp_identifier_start(character) or (
         isinstance(character, str)

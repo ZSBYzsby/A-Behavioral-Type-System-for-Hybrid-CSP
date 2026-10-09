@@ -1,41 +1,49 @@
-# 项目文档索引
+# Project documentation index
 
-根目录 `README.md` 只说明普通用户接口、完整输入形状和受支持边界。维护者、
-审计者和希望逐条核对论文规则的读者从本目录进入详细说明。
+The root [README](../README.md) covers dependencies, installation, running demos,
+and case studies. This directory contains detailed usage and implementation
+references for users, maintainers, and readers comparing the code with the paper.
 
-公开 API 的权威入口是 [README 的稳定用户接口](../README.md#稳定用户接口)；完整
-调用参数、返回对象、异常字段和端到端示例见
-[公共接口使用手册](PUBLIC_API_GUIDE.md)。内部数据流见
-[完整功能参考的公共接口部分](PROJECT_FUNCTION_REFERENCE.md#公共接口的输入和输出)。
-各语法文档只维护自身 EBNF 与 lowering 约束，不重复定义输出和异常协议。
+The [Public API guide](PUBLIC_API_GUIDE.md) defines the stable interface contract,
+including arguments, result objects, exceptions, and end-to-end examples.
+Internal data flow is described in
+[Public interface inputs and outputs](PROJECT_FUNCTION_REFERENCE.md#public-interface-inputs-and-outputs).
+Each syntax reference maintains its own EBNF and lowering constraints rather than
+redefining the output and exception contracts.
 
-若目标是审计“代码到底实施了哪些数学操作”，应首先阅读
-[当前代码的实现语义与论文规则落地方式](IMPLEMENTATION_SEMANTICS.md)。该文档明确
-区分论文判断形式、项目数据表示和工程扩展，并逐条说明实际 Table 2/3 算法；它
-不会用“与论文一致”代替代码行为。
+To inspect the mathematical operations performed by the code, start with
+[Implementation semantics and the paper's rules](IMPLEMENTATION_SEMANTICS.md).
+It distinguishes judgments in the paper, implementation data representations, and
+engineering extensions, and explains the actual Table 2/3 algorithms.
 
-## 用户输入
+## Environment and usage
 
-- [共享参数、Gamma、Theta 与 Process 完整语法](GAMMA_THETA_INPUT_SYNTAX.md)
-- [用户给定 Type 的输入语法与 Type AST 往返](TYPE_INPUT_SYNTAX.md)
-- [Process 与表达式子语法](HCSP_INPUT_SYNTAX.md)
+- [Environment configuration, prover setup, and diagnostics](ENVIRONMENT_SETUP.md)
+- [Public API guide: calls, results, output modes, and exceptions](PUBLIC_API_GUIDE.md)
 
-## TypeConstructor、TypeChecker、Table 3 图与锁分析接口
+## User input
 
-- [四个稳定接口的详细使用手册](PUBLIC_API_GUIDE.md)
-- [当前代码的实现语义与论文规则落地方式](IMPLEMENTATION_SEMANTICS.md)
-- [TypeConstructor：Process AST 到 Type AST 的真实构造过程](TYPE_CONSTRUCTOR.md)
-- [TypeChecker：检查用户给定 Type 的规则递归过程](TYPE_CHECKER.md)
-- [第三接口：规范化 Type AST、循环项图与 Table 3 状态转移图](TYPE_OPERATIONAL_SEMANTICS.md)
-- [第四接口：状态图上的锁自由、Bottom 错误与综合正确性分析](TYPE_LOCK_ANALYSIS.md)
-- [规范化 Type AST 的只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)
-- [Table 3 状态迁移图的只读输出语法](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)
-- [完整项目功能参考](PROJECT_FUNCTION_REFERENCE.md)
-- [后端代码风格约定](BACKEND_CODE_STYLE.md)
+- [Shared parameters, Gamma, Theta, and complete Process syntax](GAMMA_THETA_INPUT_SYNTAX.md)
+- [Supplied Type syntax and Type AST round trips](TYPE_INPUT_SYNTAX.md)
+- [Process and expression syntax](HCSP_INPUT_SYNTAX.md)
 
-## 文档边界
+## Type construction, checking, Table 3 graphs, and lock analysis
 
-- 本目录描述当前源码版本的功能与实现。
-- `gpt_need/` 保存本地论文、PPT 和历史审计材料，不是当前公开文档来源。
-- `case_study/` 保存论文案例及其专用说明，案例文件不会取代这里的通用语法和
-  接口文档。
+- [Detailed guide to the four public interfaces](PUBLIC_API_GUIDE.md)
+- [Implementation semantics and the paper's rules](IMPLEMENTATION_SEMANTICS.md)
+- [TypeConstructor: constructing a Type AST from a Process AST](TYPE_CONSTRUCTOR.md)
+- [TypeChecker: checking a supplied Type against the rules](TYPE_CHECKER.md)
+- [Interface 3: normalized Types, cyclic term graphs, and Table 3 transition graphs](TYPE_OPERATIONAL_SEMANTICS.md)
+- [Interface 4: lock freedom, Bottom errors, and behavioral correctness](TYPE_LOCK_ANALYSIS.md)
+- [Read-only normalized Type output syntax](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)
+- [Read-only Table 3 graph output syntax](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)
+- [Complete project reference](PROJECT_FUNCTION_REFERENCE.md)
+- [Backend code style](BACKEND_CODE_STYLE.md)
+
+## Documentation scope
+
+- This directory documents the current source implementation.
+- `gpt_need/` contains local papers, slides, and historical review material; it is not
+  the source of current public documentation.
+- `examples/` contains the runnable demos, the paper's cases, and their English
+  notes. Those files supplement the general syntax and interface documentation here.

@@ -1,35 +1,4 @@
-"""把类型规则中的连续演化证明目标表示为 KeYmaera X 可读的 dL 公式。
-
-本模块刻意不定义新的 HCSP 语法，也不修改
-:mod:`hcsp_typechecker.data_structures.process_ast.ast` 或
-:mod:`hcsp_typechecker.data_structures.type_ast.ast`。
-它处于共享规则引擎和外部证明器之间，只负责两件事：
-
-* 把规则引擎已经建立的 Z3 符号状态翻译成 differential dynamic logic (dL)；
-* 把一条 dL 公式包装成 KeYmaera X 接受的 ``.kyx`` archive。
-
-传入本模块的入口路径、ODE 方程、演化域、安全性质和时延都已经由类型规则
-确定。本模块不参与 T-Assign 后置谓词综合，也不从多个 premise 中寻找未知公式；
-它只把一条已经具体化、但尚未证明的 ODE 义务转换成可信证明器所需的表示。
-
-论文 Table 2 中与 ODE 有关的三个逻辑前提在这里分别表示为：
-
-``safety``
-    ``pre_with_t=0 -> [{x'=f(x), t'=1}]``
-    ``(t<=d -> safe)``，其中 ``safe`` 只来自 ODE 节点批注；Gamma 只在规则层
-    核对用户 ODE 左侧向量是否已经登记，不向公式追加性质。
-``domain``
-    ``pre_with_t=0 -> [{x'=f(x), t'=1}]B``。
-``boundary``
-    ``pre_with_t=0 -> [{x'=f(x), t'=1}]``
-    ``((t<d -> B) & (t=d -> !B))``。该公式直接采用当前 Table 2：在 ``d``
-    以前演化域成立，在 ``d`` 时演化域恰好失效。仅当有限 ODE 具有自然
-    顺序后继时才需要这条边界前提。
-
-KeYmaera X 的程序变量都是实数。项目中的整数或自然数参数在 dL 公式中按实数
-过近似处理：若对所有实数都能证明公式，则对整数子域当然也成立；代价只是某些
-本来可证的整数性质可能返回 ``unknown``，不会因此误报为 ``true``。
-"""
+r"""Translate continuous-evolution proof goals into KeYmaera X dL formulas."""
 
 from __future__ import annotations
 
@@ -40,21 +9,12 @@ from .logic import z3
 
 
 class DLTranslationError(ValueError):
-    """输入超出当前可靠 dL 翻译子集时抛出的错误。
-
-    调用方应把这个错误转换成 ``UNKNOWN`` 证明义务，而不是把未翻译的表达式
-    当作字符串拼接进证明器输入。
-    """
+    r"""The input exceeds the soundly supported dL translation fragment."""
 
 
 @dataclass(frozen=True, slots=True)
 class DLFormula:
-    """一条已经完成变量重命名、可交给 KeYmaera X 的 dL 公式。
-
-    ``symbol_map`` 的每一项为 ``(KeYmaera名称, Z3原名称)``，用于审计公式中
-    的 ``kxv0`` 等安全名称究竟对应哪个符号状态。KeYmaera X 的标识符语法
-    不接受项目 Z3 名称中的双下划线，因此不能直接复用原名称。
-    """
+    r"""A renamed dL formula ready for KeYmaera X."""
 
     source: str
     variables: tuple[str, ...]
@@ -62,7 +22,7 @@ class DLFormula:
     role: str
 
     def __str__(self) -> str:
-        """在报告和日志中直接显示正式 dL 公式。"""
+        r"""Display the dL formula in reports."""
 
         return self.source
 
@@ -72,12 +32,7 @@ class DLFormula:
         entry_name: str = "HCSP dL obligation",
         tactic: str = "auto",
     ) -> str:
-        """生成单条证明目标的 KeYmaera X ``.kyx`` archive。
-
-        归档内显式列出 tactic，兼容仍使用旧式 ``-prove`` CLI 的 5.x 版本，
-        也兼容新式 ``prove`` 子命令。名称中的换行和引号被替换，防止破坏
-        archive 的结构；tactic 是本地受信配置，允许多行 Bellerophon 脚本。
-        """
+        r"""Create a KeYmaera X .kyx archive for one proof goal."""
 
         safe_name = (
             str(entry_name)
@@ -114,44 +69,34 @@ class DLFormula:
 
 @dataclass(frozen=True, slots=True)
 class UntranslatedDLFormula:
-    """保留无法可靠翻译的 dL 目标及其原因。
-
-    这种对象仍会进入
-    :class:`~hcsp_typechecker.backend.common.model.ProofObligation`，使审计者
-    能看到失败发生在哪一类公式；KeYmaera X 后端会保守返回 ``UNKNOWN``。
-    """
+    r"""Preserve an unsupported dL goal with its translation failure reason."""
 
     role: str
     reason: str
 
     def __str__(self) -> str:
-        """提供紧凑、可读的报告文本。"""
+        r"""Return compact report text."""
 
         return f"<untranslated {self.role}: {self.reason}>"
 
 
 class _Z3ToKeYmaeraX:
-    """把类型构造器使用的 Z3 算术/布尔子集打印为 KeYmaera X 语法。
-
-    这里不调用 Z3 求解。Z3 AST 只是类型构造器当前符号状态的无歧义中间表示。
-    每个自由数值常量都会被重命名为 ``kxvN``，从而避开 KeYmaera X 对下划线
-    和索引的特殊词法规则。
-    """
+    r"""Print the supported Z3 arithmetic and Boolean fragment in KeYmaera X syntax."""
 
     def __init__(self) -> None:
-        """建立空的、按首次访问顺序分配名称的符号表。"""
+        r"""Allocate symbol names in first-visit order."""
 
         self._names: dict[tuple[str, str], str] = {}
 
     @property
     def variables(self) -> tuple[str, ...]:
-        """返回按首次出现顺序分配的 KeYmaera X 变量名。"""
+        r"""Return allocated KeYmaera X names in encounter order."""
 
         return tuple(self._names.values())
 
     @property
     def symbol_map(self) -> tuple[tuple[str, str], ...]:
-        """返回安全名称到原始 Z3 名称的可审计映射。"""
+        r"""Map safe prover names back to original Z3 symbols."""
 
         return tuple(
             (safe, original)
@@ -159,7 +104,7 @@ class _Z3ToKeYmaeraX:
         )
 
     def term(self, value: Any) -> str:
-        """翻译数值项，并拒绝布尔、字符串、tuple 和未解释函数。"""
+        r"""Translate numeric terms; reject unsupported sorts and uninterpreted functions."""
 
         self._require_z3(value)
 
@@ -204,14 +149,14 @@ class _Z3ToKeYmaeraX:
         }:
             return self._arithmetic(kind, arguments)
 
-        # ``mod``, ``ite``, strings、数组及未解释函数都没有在这里做猜测式编码。
+        # Reject unsupported constructs rather than guess a dL encoding.
         raise DLTranslationError(
             "unsupported dL term produced by the expression translator: "
             f"{value} (Z3 kind {kind})"
         )
 
     def formula(self, value: Any) -> str:
-        """翻译布尔公式，包括连接词、蕴含和数值关系。"""
+        r"""Translate Boolean connectives, implications, and numeric relations."""
 
         self._require_z3(value)
         if z3.is_true(value):
@@ -221,7 +166,8 @@ class _Z3ToKeYmaeraX:
         if not z3.is_bool(value):
             raise DLTranslationError(f"expected a Boolean formula, got {value}")
 
-        # KeYmaera X 没有布尔型程序变量；任意 Bool 常量不能安全当作实数编码。
+        # KeYmaera X has no Boolean program variables; encoding arbitrary Bool constants as
+        # reals is unsound.
         if self._is_uninterpreted_constant(value):
             raise DLTranslationError(
                 f"Boolean state variable {value} is not representable as a "
@@ -260,7 +206,7 @@ class _Z3ToKeYmaeraX:
         )
 
     def variable(self, value: Any) -> str:
-        """翻译 ODE 左端变量，并保证它确实是实值自由常量。"""
+        r"""Require a real-valued free constant on the ODE left-hand side."""
 
         self._require_z3(value)
         if (
@@ -274,7 +220,7 @@ class _Z3ToKeYmaeraX:
 
     @staticmethod
     def _require_z3(value: Any) -> None:
-        """给缺少 Z3 或错误中间表示提供直接、稳定的错误信息。"""
+        r"""Reject missing Z3 or an invalid intermediate representation."""
 
         if z3 is None:
             raise DLTranslationError("z3-solver is required to construct dL formulas")
@@ -285,7 +231,7 @@ class _Z3ToKeYmaeraX:
 
     @staticmethod
     def _is_uninterpreted_constant(value: Any) -> bool:
-        """区分自由常量与有参数的未解释函数应用。"""
+        r"""Distinguish free constants from uninterpreted function applications."""
 
         return (
             z3.is_const(value)
@@ -294,7 +240,7 @@ class _Z3ToKeYmaeraX:
         )
 
     def _variable_name(self, value: Any) -> str:
-        """为一个 Z3 自由常量分配确定性的 KeYmaera X 安全名称。"""
+        r"""Assign deterministic, safe KeYmaera X names to free constants."""
 
         key = (str(value.decl().name()), str(value.sort()))
         if key not in self._names:
@@ -302,7 +248,7 @@ class _Z3ToKeYmaeraX:
         return self._names[key]
 
     def _arithmetic(self, kind: int, arguments: Sequence[Any]) -> str:
-        """打印受支持的数值运算，并保留 Z3 AST 的结合结构。"""
+        r"""Preserve arithmetic AST grouping when printing supported operations."""
 
         if not arguments:
             raise DLTranslationError("empty arithmetic application")
@@ -324,7 +270,7 @@ class _Z3ToKeYmaeraX:
         ) + ")"
 
     def _relation(self, kind: int, arguments: Sequence[Any]) -> str:
-        """打印比较关系；多元 ``distinct`` 展开成两两不等式。"""
+        r"""Print comparisons and expand distinct into pairwise inequalities."""
 
         if kind == z3.Z3_OP_DISTINCT:
             if len(arguments) < 2:
@@ -356,7 +302,7 @@ def _ode(
     *,
     domain: Any | None = None,
 ) -> str:
-    """打印含用户方程及自动局部时钟的 ODE 程序 ``{x'=e, ... & B}``。"""
+    r"""Print user ODE equations with the automatically generated local clock."""
 
     rendered = [
         f"{printer.variable(variable)}'={printer.term(derivative)}"
@@ -378,7 +324,7 @@ def _finish(
     source: str,
     role: str,
 ) -> DLFormula:
-    """在所有子式完成翻译后冻结变量表和审计映射。"""
+    r"""Freeze symbol names and audit mappings after translation."""
 
     return DLFormula(source, printer.variables, printer.symbol_map, role)
 
@@ -393,17 +339,7 @@ def safety_formula(
     clock: Any,
     infinite_duration: bool = False,
 ) -> DLFormula:
-    """构造论文 Table 2 的 ODE 安全性 dL 前提。
-
-    ``precondition`` 已包含当前 ODE 自动局部时钟的入口条件 ``t=0``，而
-    ``equations`` 已包含 ``t'=1``。调用方传入的 ``safety`` 只来自 ODE 节点，
-    并留在 box 的后置目标中接受验证，不能作为 ODE 程序的演化域假设。Gamma
-    只登记允许出现的 ODE 演化向量，不再携带另一份连续性质。HCSP 源演化域
-    ``B`` 仍由 Table 2 的其他 premise 验证；参数 ``domain`` 保留在签名中就是
-    为了明确本安全公式不直接使用它。
-    有限时延在后置条件中引用同一个 ``clock``；无限时延仍保留该 ODE 固有的
-    局部时钟方程。
-    """
+    r"""Construct the Table 2 ODE safety premise."""
 
     if z3 is not None and z3.is_true(z3.simplify(safety)):
         return DLFormula("true", (), (), "safety")
@@ -437,14 +373,7 @@ def domain_formula(
     domain: Any,
     domain_definedness: Any,
 ) -> DLFormula:
-    """构造只允许通信中断时的演化域保持前提 ``pre -> [{F}]B``。
-
-    调用方传入的 pre/equations 已分别包含局部时钟的 ``t=0``/``t'=1``；若
-    源演化域 B 使用保留名 ``t``，调用方也已把它翻译成这里的同一个时钟项。
-    B 是这条 premise 要证明的不变量，所以只出现在后置条件。若写成
-    ``[{F & B}]B``，dL 的演化域语义会预设待检查的性质，无法发现动力学离开
-    相应区域的反例。
-    """
+    r"""Construct pre -> [{F}]B for evolution ending only through communication."""
 
     if z3 is not None and z3.is_true(z3.simplify(domain)):
         return DLFormula("true", (), (), "domain")
@@ -468,13 +397,7 @@ def boundary_formula(
     duration: Any,
     clock: Any,
 ) -> DLFormula:
-    """构造当前 Table 2 的准确演化边界前提。
-
-    公式在无演化域假设的动力学 ``{F,t'=1}`` 上证明：当局部时钟还满足
-    ``t<d`` 时 ``B`` 成立，而在 ``t=d`` 时 ``B`` 已经失效。这里不能把待验证
-    的 ``B`` 放入 dL 程序的演化域，否则第二个蕴含无法观察到真实反例。该实现
-    直接编码两个时刻条件，不额外引入可达性近似。
-    """
+    r"""Construct the exact Table 2 evolution-boundary premise."""
 
     printer = _Z3ToKeYmaeraX()
     pre = printer.formula(precondition)

@@ -1,9 +1,4 @@
-"""HCSP Process 语言层：表达式 AST 与 E/P/S 进程 AST。
-
-本子包不依赖输入解析器、行为类型 AST 或 TypeConstructor。它属于项目内部实现层，
-导出集合只服务于逐节点审计和内部测试，不构成面向普通用户的兼容性承诺；
-稳定入口只位于包根 ``hcsp_typechecker``。
-"""
+r"""Expression ASTs and event, process, and system syntax for HCSP."""
 
 from .ast import (
     Assert,

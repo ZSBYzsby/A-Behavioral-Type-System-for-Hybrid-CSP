@@ -1,9 +1,4 @@
-"""项目测试、审计样例和实现开发使用的非稳定内部聚合入口。
-
-普通用户不应从本模块导入对象；受支持的接口只位于包根。这里集中重导出
-Process/Expr/Type AST 构造器、Table 2 TypeConstructor 和证明后端，是为了让项目自身的
-逐节点测试仍能简洁地构造精确内部状态。该符号集合可以随实现重构而变化。
-"""
+r"""Unstable internal imports for implementation tests and audit examples."""
 
 from .backend.type_constructor import TypeConstructor, construct_type
 from .frontend.type_constructor_frontend import (

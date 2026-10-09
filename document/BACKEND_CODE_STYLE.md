@@ -1,48 +1,53 @@
-# 后端代码风格约定
+# Backend code style
 
-本文约束 `hcsp_typechecker/backend` 的实现风格。目标是让共享规则层、
-TypeConstructor、TypeChecker 和 Table 3 操作语义在保持职责差异的同时，具有
-相同的阅读方式。
+These conventions apply to `hcsp_typechecker/backend`. They provide a consistent
+reading structure for shared rules, TypeConstructor, TypeChecker, and Table 3
+operational semantics while preserving their separate responsibilities.
 
-## 模块结构
+## Module structure
 
-每个后端模块依次组织为：
+Organize each backend module in this order:
 
-1. 文件头 docstring：说明职责、输入输出、依赖边界和明确不负责的内容；
-2. future annotations；
-3. 标准库、领域数据结构、当前后端相对导入；
-4. 私有辅助记录；
-5. 核心类或纯函数入口，公开入口在私有实现之前；
-6. 低层便捷函数和明确的 `__all__`。
+1. Module docstring describing responsibilities, inputs, outputs, and dependency boundaries.
+2. Future annotations.
+3. Standard-library imports, domain data structures, and relative backend imports.
+4. Private helper records.
+5. Core classes or pure function entry points, with public entries before private implementation.
+6. Low-level helpers and an explicit `__all__`.
 
-data_structures 不能反向导入后端。backend/common 不能导入两个业务后端，
-两个业务后端也不能彼此导入。
+`data_structures` must not import backends. `backend/common` must not import either
+business backend, and the construction and checking backends must not import each other.
 
-`type_operational_semantics` 只能消费已有 Type/规范 Type/图数据结构，不能反向调用
-Constructor、Checker、Gamma/Theta 环境准备或证明器。其内部状态身份使用循环项图，
-面向用户的规范 AST 只能作为展示代表。
+`type_operational_semantics` consumes existing Type, normalized Type, and graph data
+structures. It must not call construction, checking, Gamma/Theta preparation, or
+provers. Internal state identity uses cyclic term graphs; normalized ASTs serve as
+readable display representatives.
 
-## 命名与类型标注
+## Naming and type annotations
 
-- 业务入口使用 construct/check，共享层使用 rule_t_*、_decide_proof 等
-  描述实际动作的名称。
-- Table 3 后端使用 `normalize/build/derive/minimize` 区分规范化、建图、一步推导和
-  等递归最小化；数据结构本身不执行规则遍历。
-- 所有函数和方法都写参数、返回类型；__init__ 显式写 -> None。
-- 后端 dataclass 统一使用 slots=True；只读请求、结果和 premise 还必须使用
-  frozen=True，只有符号执行上下文等明确可变记录可以不冻结。
-- 业务专属请求和报告放在各自 backend/<business>/model.py；共享证明证据放在
-  backend/common/model.py。
+- Use `construct`/`check` for business entry points and action-based names such as
+  `rule_t_*` and `_decide_proof` in the shared layer.
+- In Table 3, use `normalize/build/derive/minimize` to distinguish normalization,
+  graph construction, one-step derivation, and equi-recursive minimization.
+  Data structures themselves do not traverse the rules.
+- Annotate function and method parameters and returns; `__init__` explicitly returns `None`.
+- Backend dataclasses use `slots=True`. Read-only requests, results, and premises
+  also use `frozen=True`; explicitly mutable records such as symbolic contexts may remain mutable.
+- Place business-specific requests and reports in `backend/<business>/model.py`
+  and shared proof evidence in `backend/common/model.py`.
 
-## 注释与排版
+## Comments and layout
 
-- 模块、类和函数必须有简洁 docstring；复杂规则再说明论文对应、输入、输出、
-  规范化边界和失败条件，不重复逐字解释显然的赋值语句。
-- 中文说明负责解释实现语义；论文规则名、Python 标识符、FOL/dL 等正式术语
-  保留原写法。
-- 源码行宽不超过 100 字符，不使用通配符导入。
-- `result/full` 报告属于展示层；Table 2 规则与 Table 3 转移函数只积累结构化证据，
-  不直接打印。
+- Give modules, classes, and functions concise docstrings. For complex rules,
+  explain their paper references, inputs, outputs, normalization boundaries, and
+  failure conditions. Avoid restating obvious assignments.
+- Use English to explain functions, rule premises, and non-obvious implementation
+  choices. Avoid
+  duplicating definition templates and docstrings. Preserve formal rule names,
+  Python identifiers, and FOL/dL terminology. Errors, proof reports, and demo output use English.
+- Keep source lines within 100 characters and avoid wildcard imports.
+- `result/full` reports belong to the presentation layer. Table 2 rules and Table 3
+  transition functions accumulate structured evidence without printing directly.
 
-这些约定由 `tests/backend/test_backend_style.py` 和
-`tests/backend/test_backend_boundaries.py` 共同锁定。
+`tests/backend/test_backend_style.py` and
+`tests/backend/test_backend_boundaries.py` enforce these conventions.

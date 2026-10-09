@@ -1,16 +1,4 @@
-"""按项目实际 Table 2 规则检查用户给定的行为 Type。
-
-本模块实现真正的 *Type-directed checking*，而不是先调用 TypeConstructor
-构造一个类型、再比较两棵完整 Type AST。检查器把用户 Type 作为每个规则
-judgment 的右侧结论：规则展开产生公式 premise 和子 judgment，公式立即交给
-与 TypeConstructor 相同的证明后端，子 judgment 则递归消费用户 Type 的对应
-子树。
-
-因此，TypeConstructor 与 TypeChecker 共享的是环境规范化、符号状态变换、
-FOL/dL 公式生成和证明机制；二者的递归目标不同：前者组合子结论以构造 Type，
-后者拆解给定 Type 以核对规则结论。多元外部中断按分支数量和源码顺序逐项检查；
-内部选择保留用户圆括号给出的嵌套分块，每一层都按当前规则的元数和顺序逐项检查。
-"""
+r"""Check a supplied behavioral Type directly against the implemented Table 2 rules."""
 
 from __future__ import annotations
 
@@ -76,24 +64,19 @@ from .model import TypeCheckingReport, TypeCheckingRequest
 
 @dataclass(frozen=True, slots=True)
 class _AlphaEnvironment:
-    """按词法作用域关联内部递归变量与用户 Type 变量。
-
-    两侧名称分别映射到同一个不透明绑定身份，而不是直接互相映射字符串。
-    因此内层 ``mu t.`` 即使复用外层名字 ``t``，也会在 ``supplied`` 中遮蔽
-    外层身份；退出该子判断后，父环境仍保持原绑定。
-    """
+    r"""Match internal and supplied recursion variables by lexical scope."""
 
     internal: Mapping[str, object]
     supplied: Mapping[str, object]
 
     @classmethod
     def empty(cls) -> "_AlphaEnvironment":
-        """建立不含递归绑定的根词法环境。"""
+        r"""Create the root lexical environment without recursion bindings."""
 
         return cls({}, {})
 
     def bind(self, internal_name: str, supplied_name: str) -> "_AlphaEnvironment":
-        """为一对新进入的 ``mu`` 绑定建立唯一且可遮蔽的身份。"""
+        r"""Bind a new pair of mu variables with shadowable identity."""
 
         identity = object()
         internal = dict(self.internal)
@@ -103,7 +86,7 @@ class _AlphaEnvironment:
         return _AlphaEnvironment(internal, supplied)
 
     def matches(self, internal_name: str, supplied_name: str) -> bool:
-        """判断两个变量引用是否指向同一层词法递归绑定。"""
+        r"""Check that variable references denote the same lexical recursion binder."""
 
         internal_identity = self.internal.get(internal_name)
         return (
@@ -114,7 +97,7 @@ class _AlphaEnvironment:
 
 @dataclass(frozen=True, slots=True)
 class _ExpectedChild:
-    """一个子 judgment 及其必须匹配的用户 Type 和递归 alpha 环境。"""
+    r"""A child judgment with its expected Type and alpha-renaming environment."""
 
     expected: ConfigurationType | AngelicType
     alpha: _AlphaEnvironment
@@ -122,7 +105,7 @@ class _ExpectedChild:
 
 @dataclass(frozen=True, slots=True)
 class _ODECheckAttempt:
-    """TypeChecker 对一条 ODE 候选规则的隔离匹配结果。"""
+    r"""An isolated TypeChecker attempt for one ODE candidate rule."""
 
     mode: _ODETypeRule
     matched: bool
@@ -134,21 +117,10 @@ class _ODECheckAttempt:
 
 
 class TypeChecker(Table2RuleEngine):
-    """递归验证用户 Type 是否能成为给定 HCSP judgment 的结论。
-
-    本类与 TypeConstructor 分别继承共享 ``Table2RuleEngine``；它只调用已审计的
-    规则展开、符号执行和证明工具，不调用 TypeConstructor，也不调用规则的
-    ``conclude`` 组合函数。
-    """
+    r"""Check whether the supplied Type is a valid conclusion of the HCSP judgment."""
 
     def check(self, request: TypeCheckingRequest) -> TypeCheckingReport:
-        """以用户 Type 为结论递归检查全部适用规则并返回审计报告。
-
-        方法先执行与 Constructor 相同的环境准备，再按源码结构拆解给定 Type。
-        公式 ``FALSE`` 会使当前检查失败；``UNKNOWN`` 会保留证据并继续检查剩余
-        结构，但最终报告不会把该 Type 判为通过。本方法不调用 Constructor，
-        也不负责打印或构造公共异常。
-        """
+        r"""Check the supplied Type and return rule and proof evidence."""
 
         self.obligations = []
         self.diagnostics = []
@@ -224,8 +196,8 @@ class TypeChecker(Table2RuleEngine):
             parameter_condition,
             request.parameters.constraint,
         )
-        # rule_t_parallel 已对共享 Gamma 和状态所有权做完整静态检查。发生错误时不应
-        # 尝试把余下的 Type 分支错配到别的配置。
+        # Do not remap remaining supplied branches after environment or ownership validation
+        # fails.
         if any(item.verdict is Verdict.FALSE for item in self.diagnostics):
             matched = False
         else:
@@ -254,8 +226,15 @@ class TypeChecker(Table2RuleEngine):
         if len(self.steps) > before:
             self._finish_step(
                 before,
-                "给定并行类型的全部分量均匹配" if matched else "给定并行类型不匹配",
-                "TypeChecker 按源码顺序逐项检查配置分量，不构造替代 Type。",
+                (
+                    'All supplied parallel type components match'
+                ) if matched else (
+                    'The supplied parallel type does not match'
+                ),
+                (
+                    'TypeChecker checks components in source order without constructing an '
+                    'alternative Type.'
+                ),
             )
 
         component_types: tuple[ConfigurationType | None, ...] = (
@@ -282,7 +261,7 @@ class TypeChecker(Table2RuleEngine):
         expected: ConfigurationType,
         component_count: int,
     ) -> tuple[ConfigurationType, ...] | None:
-        """把顶层给定 Type 分配给源码的配置分量。"""
+        r"""Assign supplied top-level types to source configurations."""
 
         if component_count == 1:
             return (expected,)
@@ -306,12 +285,7 @@ class TypeChecker(Table2RuleEngine):
         expansion: _RuleExpansion,
         expected_children: Sequence[_ExpectedChild],
     ) -> bool:
-        """按规则顺序判定公式，并递归消费给定 Type 的对应子树。
-
-        ``FALSE`` 公式立即拒绝该规则；``UNKNOWN`` 只保留在证明证据中，结构递归
-        继续进行。因而本方法返回真只表示当前规则没有确定失败，最终是否通过仍由
-        全部证明义务的三值汇总决定。
-        """
+        r"""Decide ordered formulas and consume corresponding supplied Type subtrees."""
 
         child_index = 0
         for premise in expansion.premises:
@@ -352,7 +326,7 @@ class TypeChecker(Table2RuleEngine):
         expected: ConfigurationType | AngelicType,
         alpha: _AlphaEnvironment,
     ) -> bool:
-        """按显式 judgment 类别分派给对应的给定类型检查函数。"""
+        r"""Dispatch checking by explicit judgment kind."""
 
         if isinstance(judgment, _ConfigurationJudgment):
             return self._check_configuration(judgment, expected, alpha)
@@ -382,7 +356,7 @@ class TypeChecker(Table2RuleEngine):
         expected: ConfigurationType | AngelicType,
         alpha: _AlphaEnvironment,
     ) -> bool:
-        """检查 [T-sigma] 的状态前提和系统子判断。"""
+        r"""Check T-sigma's state premise and system child judgment."""
 
         if not isinstance(expected, ConfigurationType):
             return self._mismatch(
@@ -393,7 +367,7 @@ class TypeChecker(Table2RuleEngine):
         step = self._start_step(
             "T-sigma",
             judgment.context.location,
-            "检查初始状态与给定类型 "
+            'Check initial state and supplied type '
             + format_configuration_type(expected),
             context=judgment.context,
         )
@@ -408,7 +382,11 @@ class TypeChecker(Table2RuleEngine):
         )
         self._finish_step(
             step,
-            "给定配置类型匹配" if matched else "给定配置类型不匹配",
+            (
+                'Supplied configuration type matches'
+            ) if matched else (
+                'Supplied configuration type does not match'
+            ),
             self._premise_summary(expansion),
         )
         return matched
@@ -419,7 +397,7 @@ class TypeChecker(Table2RuleEngine):
         expected: ConfigurationType | AngelicType,
         alpha: _AlphaEnvironment,
     ) -> bool:
-        """检查系统层 Process 或二元 Parallel 的给定类型。"""
+        r"""Check the supplied type of a Process or binary Parallel system."""
 
         system = judgment.system
         if isinstance(system, Process):
@@ -479,7 +457,7 @@ class TypeChecker(Table2RuleEngine):
         expected: ProcessType,
         alpha: _AlphaEnvironment,
     ) -> bool:
-        """迭代消费线性规则前缀，并仅对真正分支结构进入分派函数。"""
+        r"""Consume linear prefixes iteratively; dispatch only actual branches."""
 
         deferred_steps: list[tuple[int, _RuleExpansion]] = []
         current_judgment = judgment
@@ -505,7 +483,7 @@ class TypeChecker(Table2RuleEngine):
             step = self._start_step(
                 rule,
                 current_judgment.context.location,
-                f"{self._describe_process_node(head)}；给定 Type = "
+                f"{self._describe_process_node(head)}; supplied Type = "
                 + type(current_expected).__name__,
                 context=current_judgment.context,
             )
@@ -581,7 +559,7 @@ class TypeChecker(Table2RuleEngine):
                     matched = False
                 self._finish_step(
                     step,
-                    "给定 Type 与规则结论不匹配",
+                    'The supplied Type does not match the rule conclusion',
                     self._premise_summary(expansion),
                 )
                 self._finish_linear_steps(deferred_steps, matched)
@@ -611,14 +589,14 @@ class TypeChecker(Table2RuleEngine):
         deferred: Sequence[tuple[int, _RuleExpansion]],
         matched: bool,
     ) -> None:
-        """按递归返回顺序完成显式栈消费过的线性规则日志。"""
+        r"""Complete linear audit steps in stack-unwinding order."""
 
         for step, expansion in reversed(deferred):
             self._finish_step(
                 step,
-                "给定 Type 与规则结论匹配"
+                'The supplied Type matches the rule conclusion'
                 if matched
-                else "给定 Type 与规则结论不匹配",
+                else 'The supplied Type does not match the rule conclusion',
                 self._premise_summary(expansion),
             )
 
@@ -628,7 +606,7 @@ class TypeChecker(Table2RuleEngine):
         expected: ProcessType,
         alpha: _AlphaEnvironment,
     ) -> bool:
-        """按当前 Process 头结点拆解并检查给定 ProcessType。"""
+        r"""Decompose the supplied type according to the current process node."""
 
         nodes = judgment.nodes
         context = judgment.context
@@ -652,7 +630,7 @@ class TypeChecker(Table2RuleEngine):
         step = self._start_step(
             rule,
             context.location,
-            f"{self._describe_process_node(head)}；给定 Type = "
+            f"{self._describe_process_node(head)}; supplied Type = "
             + format_process_type(expected),
             context=context,
         )
@@ -816,7 +794,11 @@ class TypeChecker(Table2RuleEngine):
             matched = self._check_expansion(expansion, children)
         self._finish_step(
             step,
-            "给定 Type 与规则结论匹配" if matched else "给定 Type 与规则结论不匹配",
+            (
+                'The supplied Type matches the rule conclusion'
+            ) if matched else (
+                'The supplied Type does not match the rule conclusion'
+            ),
             self._premise_summary(expansion),
         )
         return matched
@@ -828,7 +810,7 @@ class TypeChecker(Table2RuleEngine):
         alpha: _AlphaEnvironment,
         mode: _ODETypeRule,
     ) -> _ODECheckAttempt:
-        """隔离检查一个 ODE 候选，随后回滚共享报告状态。"""
+        r"""Try one ODE checking candidate, then roll back shared report state."""
 
         obligation_start = len(self.obligations)
         diagnostic_start = len(self.diagnostics)
@@ -837,7 +819,7 @@ class TypeChecker(Table2RuleEngine):
         step = self._start_step(
             "T-ODE",
             judgment.context.location,
-            f"按 {mode.value} 检查给定 Type = "
+            f"Use {mode.value} to check supplied Type = "
             + format_process_type(expected),
             context=judgment.context,
         )
@@ -859,7 +841,7 @@ class TypeChecker(Table2RuleEngine):
         )
         self._finish_step(
             step,
-            "候选规则匹配" if matched else "候选规则不匹配",
+            'Candidate rule matches' if matched else 'Candidate rule does not match',
             "" if expansion is None else self._premise_summary(expansion),
         )
 
@@ -894,12 +876,12 @@ class TypeChecker(Table2RuleEngine):
         expected: ProcessType,
         alpha: _AlphaEnvironment,
     ) -> bool:
-        r"""对 ``ODE;skip`` 的 ``T-\unrhd``/``T-\unrhd'`` 分别检查。"""
+        r"""Check both timed ODE rules independently for ODE; skip."""
 
         step = self._start_step(
             "T-ODE-Select",
             judgment.context.location,
-            "ODE 后继为终端 skip：检查给定 Type 可由哪条规则推出",
+            'ODE followed by terminal skip: determine which rule accepts the supplied Type',
             context=judgment.context,
         )
         attempts = tuple(
@@ -929,12 +911,11 @@ class TypeChecker(Table2RuleEngine):
         warning = ""
         if len(proved) == 1:
             selected = proved[0]
-            # 两条 ODE 规则的适用条件互斥。一个候选已证明接受给定 Type 时，
-            # 另一个 UNKNOWN 候选只作为未选中的审计记录保存，不影响结论。
+            # A proved matching candidate wins; an unselected UNKNOWN attempt remains audit
+            # evidence only.
         elif len(proved) > 1:
-            # Checker 的右侧 Type 已固定；若两条规则都证明并完整消费同一棵
-            # supplied Type，它们在本次检查中给出等价结论。保留第一条即可，
-            # 与 Constructor 对等价候选的规范化策略一致。
+            # If both candidates prove and consume the supplied Type, keep the first equivalent
+            # result.
             selected = proved[0]
         elif unknown:
             selected = next(
@@ -981,7 +962,7 @@ class TypeChecker(Table2RuleEngine):
         if selected is not None:
             self._finish_step(
                 step,
-                f"给定 Type 由 {selected.mode.value} 接受",
+                f"Supplied Type accepted by {selected.mode.value}",
                 summary,
             )
             return True
@@ -1009,7 +990,7 @@ class TypeChecker(Table2RuleEngine):
             )
             if not self._type_mismatches:
                 self._type_mismatches.append(message)
-        self._finish_step(step, "给定 Type 未通过 ODE 候选选择", summary)
+        self._finish_step(step, 'The supplied Type failed ODE candidate selection', summary)
         return False
 
     def _check_ode_shape(
@@ -1021,7 +1002,7 @@ class TypeChecker(Table2RuleEngine):
         *,
         candidate: _ODETypeRule | None = None,
     ) -> tuple[_RuleExpansion | None, tuple[_ExpectedChild, ...]]:
-        """检查 ODE 的 delay 外形，并把 A/T 分配给事件和自然后继。"""
+        r"""Check delay structure and allocate interrupt and timeout types to premises."""
 
         node = judgment.nodes[0]
         assert isinstance(node, ODE)
@@ -1069,8 +1050,7 @@ class TypeChecker(Table2RuleEngine):
                 )
                 return None, ()
             return expansion, (_ExpectedChild(expected.interrupts, alpha),)
-        # 非 skip 后继或显式选择的 T-\unrhd' 都把 continuation 作为真实子
-        # judgment；该真实后继本身允许是终端 skip。
+        # A real timeout continuation may itself be terminal skip.
         if isinstance(expected.continuation, BottomType):
             self._finish_mismatch_step(
                 step,
@@ -1089,7 +1069,7 @@ class TypeChecker(Table2RuleEngine):
         expected: AngelicType,
         alpha: _AlphaEnvironment,
     ) -> bool:
-        """按规范多元分支顺序检查 ODE 外部中断的 angelic type。"""
+        r"""Check angelic branches in their canonical source order."""
 
         reaction = judgment.reaction
         if isinstance(reaction, EmptyEvent):
@@ -1140,7 +1120,7 @@ class TypeChecker(Table2RuleEngine):
         alpha: _AlphaEnvironment,
         location: str,
     ) -> bool:
-        """匹配 T-End 的 EmptyType 或递归体的类型变量终点。"""
+        r"""Match terminal EmptyType or the recursion body's type-variable endpoint."""
 
         if isinstance(terminal, EmptyType) and isinstance(expected, EmptyType):
             return True
@@ -1158,7 +1138,7 @@ class TypeChecker(Table2RuleEngine):
 
     @staticmethod
     def _parallel_leaf_count(system: Any) -> int:
-        """计算二元 Parallel 系统中的 Process 叶子数。"""
+        r"""Count Process leaves in a binary Parallel system."""
 
         count = 0
         pending = [system]
@@ -1174,7 +1154,7 @@ class TypeChecker(Table2RuleEngine):
     def _group_parallel_type(
         components: Sequence[ConfigurationType],
     ) -> ConfigurationType:
-        """把一个或多个连续 Type 分量恢复为对应的系统子类型。"""
+        r"""Group consecutive Type components to match the system subtree."""
 
         if len(components) == 1:
             return components[0]
@@ -1186,10 +1166,10 @@ class TypeChecker(Table2RuleEngine):
         message: str,
         location: str,
     ) -> bool:
-        """记录 Type 结构不匹配并完成当前规则步骤。"""
+        r"""Record a structural mismatch and complete the rule step."""
 
         self._mismatch(self.steps[step].rule, message, location)
-        self._finish_step(step, "给定 Type 与规则结论不匹配", message)
+        self._finish_step(step, 'The supplied Type does not match the rule conclusion', message)
         return False
 
     def _mismatch(
@@ -1198,14 +1178,14 @@ class TypeChecker(Table2RuleEngine):
         message: str,
         location: str = "judgment",
     ) -> bool:
-        """记录可定位的用户 Type 结构错误并返回 False。"""
+        r"""Record a located Type mismatch and return False."""
 
         self._type_mismatches.append(message)
         self._diagnose(Verdict.FALSE, message, rule, location)
         return False
 
     def _last_mismatch_message(self) -> str:
-        """返回最后一条明确失败诊断，供公共异常摘要使用。"""
+        r"""Return the last definite mismatch diagnostic for public summaries."""
 
         return self._type_mismatches[-1] if self._type_mismatches else ""
 

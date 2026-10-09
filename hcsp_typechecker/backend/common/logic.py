@@ -1,18 +1,4 @@
-"""项目表达式 AST 到 Z3 的翻译与一阶逻辑证明基础设施。
-
-Process AST 节点在构造阶段已经把字符串和 Python 常量转换为项目自有
-:class:`~hcsp_typechecker.data_structures.process_ast.expressions.Expr`。本模块因此只需要访问确定的节点
-类型，不再根据外部对象类名或字段进行兼容性猜测。
-
-Z3 项仍可在通道 callable refinement 和证明器内部出现，但它们不是 HCSP AST
-的一部分。不支持的数学函数会被建模为未解释函数，以保持证明结论保守。
-
-本模块同时服务于推导的两个职责：``ExpressionTranslator`` 在规则展开时
-确定性地产生带类型的 Z3 项和有定义性条件；``Z3ProofEngine`` 在统一求解器
-遇到相应公式 premise 时立即判定具体 FOL 公式。它不综合路径谓词或赋值后置
-条件。T-Assign 已经由 ``rule_engine.py`` 把右值项写入后继符号映射，因此传到
-这里的证明目标中不存在等待 Z3 搜索的未知 ``phi'``。
-"""
+r"""Translate expression ASTs to Z3 and prove first-order obligations."""
 
 from __future__ import annotations
 
@@ -50,18 +36,13 @@ from .model import Verdict
 try:
     import z3  # type: ignore
 except ImportError:  # pragma: no cover - exercised when dependency is absent
-    # 包仍可导入；需要自动证明时返回 UNKNOWN 并说明依赖缺失。
+    # Allow imports without Z3; proof requests report UNKNOWN with the missing dependency.
     z3 = None
 
 
 @dataclass(frozen=True, slots=True)
 class ExprResult:
-    """表达式翻译结果：Z3 项、静态类型及求值有定义所需的条件。
-
-    Z3 的除法和幂运算本身采用全函数语义，不能直接表达论文中“表达式求值
-    失败”的情况。因此 ``definedness`` 单独保存诸如除数非零、平方根参数
-    非负等侧条件；类型规则再把这些条件放入显式公式 premise 或演化域。
-    """
+    r"""A translated term with its static type and definedness conditions."""
 
     term: Any
     value_type: BasicType
@@ -69,23 +50,23 @@ class ExprResult:
 
 
 class ExpressionError(ValueError):
-    """表达式无法解析、类型不匹配或使用了不支持的构造。"""
+    r"""An expression is malformed, ill-typed, or unsupported."""
 
     pass
 
 
 def z3_available() -> bool:
-    """报告当前环境是否可以执行自动一阶逻辑证明。"""
+    r"""Report whether automatic first-order proofs are available."""
     return z3 is not None
 
 
 def _is_z3(value: Any) -> bool:
-    """避免在未安装 Z3 时访问其类型对象。"""
+    r"""Avoid accessing Z3 types when the dependency is unavailable."""
     return z3 is not None and isinstance(value, z3.AstRef)
 
 
 def lvalue_name(value: str | Variable) -> str:
-    """提取项目标量左值的变量名。"""
+    r"""Extract the variable name from a scalar assignment target."""
     try:
         return ensure_variable(value).name
     except (TypeError, ValueError) as exc:
@@ -93,11 +74,7 @@ def lvalue_name(value: str | Variable) -> str:
 
 
 class ExpressionTranslator:
-    """把项目表达式 AST 翻译为带类型的 Z3 项。
-
-    一个 translator 对应一个 ``Gamma`` 和当前符号状态。控制流分支复制
-    translator 的符号映射，使赋值和输入产生的状态更新不会跨分支泄漏。
-    """
+    r"""Translate project expression ASTs into typed Z3 terms."""
 
     def __init__(
         self,
@@ -106,7 +83,7 @@ class ExpressionTranslator:
         *,
         name_prefix: str = "",
     ) -> None:
-        """建立标量值环境，并忽略不具有表达式值的 ODE 向量声明。"""
+        r"""Create a scalar environment, excluding ODE vector declaration labels."""
         invalid_names = {
             repr(name) for name in gamma if not is_hcsp_identifier(name)
         }
@@ -131,7 +108,7 @@ class ExpressionTranslator:
         self,
         symbols: MutableMapping[str, Any] | None = None,
     ) -> "ExpressionTranslator":
-        """复制分支局部符号状态，同时共享未解释函数声明。"""
+        r"""Clone branch-local symbols while sharing uninterpreted function declarations."""
         other = ExpressionTranslator(
             self.gamma,
             dict(self.symbols) if symbols is None else symbols,
@@ -141,7 +118,7 @@ class ExpressionTranslator:
         return other
 
     def symbol(self, name: str, value_type: GammaType | None = None) -> Any:
-        """按需按 Gamma 项的当前值基础类型创建并缓存 Z3 常量。"""
+        r"""Cache a Z3 constant using the current Gamma value type."""
         if z3 is None:
             raise ExpressionError("z3-solver is not installed")
         if not is_hcsp_identifier(name):
@@ -160,12 +137,12 @@ class ExpressionTranslator:
         return value
 
     def fresh_symbol(self, name: str, value_type: GammaType, suffix: str) -> Any:
-        """按 Gamma 项的当前值类型创建不写入符号表的新鲜符号。"""
+        r"""Create a fresh symbol without inserting it into the symbol table."""
         normalized = gamma_value_type(value_type, subject="Fresh symbol type")
         return self._fresh_scalar(f"{name}{suffix}", normalized)
 
     def _fresh_scalar(self, name: str, value_type: BasicType) -> Any:
-        """把基础类型映射到一个 Z3 sort 并创建常量。"""
+        r"""Map a basic value type to a Z3 constant of the corresponding sort."""
         if z3 is None:
             raise ExpressionError("z3-solver is not installed")
         normalized = normalize_type(value_type, subject="Scalar type")
@@ -187,11 +164,7 @@ class ExpressionTranslator:
         *,
         local_symbols: Mapping[str, Any] | None = None,
     ) -> ExprResult:
-        """翻译项目表达式或证明器内部产生的 Z3 项。
-
-        非 Z3 输入必须能够由 ``ensure_expr`` 转换成项目表达式；任意第三方
-        对象会被明确拒绝，而不会按类名猜测其含义。
-        """
+        r"""Translate an expression AST or an internally generated Z3 term."""
         if z3 is None:
             raise ExpressionError("z3-solver is not installed")
         locals_map = {} if local_symbols is None else dict(local_symbols)
@@ -209,7 +182,7 @@ class ExpressionTranslator:
         *,
         local_symbols: Mapping[str, Any] | None = None,
     ) -> Any:
-        """翻译并强制要求结果为布尔公式。"""
+        r"""Require translation to produce a Boolean formula."""
         result = self.boolean_result(value, local_symbols=local_symbols)
         return result.term
 
@@ -219,7 +192,7 @@ class ExpressionTranslator:
         *,
         local_symbols: Mapping[str, Any] | None = None,
     ) -> ExprResult:
-        """翻译布尔公式，同时保留其全部求值有定义条件。"""
+        r"""Translate a Boolean formula with all definedness conditions."""
 
         result = self.translate(value, local_symbols=local_symbols)
         if result.value_type != BasicType.BOOL:
@@ -233,7 +206,7 @@ class ExpressionTranslator:
         channel_type: ChannelType,
         value_terms: Sequence[Any],
     ) -> Any:
-        """把联合通道精化同时实例化到本次通信的全部标量值。"""
+        r"""Instantiate joint channel refinement with all communicated scalar values."""
 
         return self.refinement_result(channel_type, value_terms).term
 
@@ -242,7 +215,7 @@ class ExpressionTranslator:
         channel_type: ChannelType,
         value_terms: Sequence[Any],
     ) -> ExprResult:
-        """实例化通道精化，并保留精化表达式的求值有定义条件。"""
+        r"""Instantiate refinement while retaining definedness conditions."""
 
         terms = tuple(value_terms)
         if len(terms) != channel_type.arity:
@@ -273,7 +246,7 @@ class ExpressionTranslator:
                 binder = self.fresh_symbol(name, value_type, "")
                 replacement = value_term
                 if not binder.sort().eq(replacement.sort()):
-                    # Int 可以安全提升到 Real；其他 sort 不执行隐式强制转换。
+                    # Promote Int to Real; do not implicitly coerce other sorts.
                     if z3.is_real(binder) and z3.is_int(replacement):
                         replacement = z3.ToReal(replacement)
                     else:
@@ -297,7 +270,7 @@ class ExpressionTranslator:
         expression: Expr,
         local_symbols: Mapping[str, Any],
     ) -> ExprResult:
-        """按项目表达式节点类型递归翻译。"""
+        r"""Dispatch translation by expression node kind."""
         if isinstance(expression, BinaryExpr):
             return self._translate_binary_expr(expression, local_symbols)
         if isinstance(expression, Literal):
@@ -417,7 +390,7 @@ class ExpressionTranslator:
         expression: BinaryExpr,
         local_symbols: Mapping[str, Any],
     ) -> ExprResult:
-        """用显式后序栈翻译任意深度的二元算术表达式树。"""
+        r"""Translate deep binary expression trees using an explicit postorder stack."""
         pending: list[tuple[Expr, bool]] = [(expression, False)]
         translated: dict[int, ExprResult] = {}
 
@@ -435,9 +408,8 @@ class ExpressionTranslator:
                 pending.append((current.left, False))
                 continue
 
-            # Expr 是不可变对象，程序化 AST 可以让左右操作数共享同一子树。
-            # 因此结果表不能在第一次读取时 pop；否则 ``BinaryExpr('+', x, x)``
-            # 会在读取第二个 ``x`` 时丢失结果。保留后序结果也与旧递归求值完全等价。
+            # Shared immutable AST operands need cached results for every reference; popping
+            # loses the second use.
             left = translated[id(current.left)]
             right = translated[id(current.right)]
             translated[id(current)] = self._combine_binary_results(
@@ -454,7 +426,7 @@ class ExpressionTranslator:
         left: ExprResult,
         right: ExprResult,
     ) -> ExprResult:
-        """组合两个已翻译操作数，保持原算术类型和有定义性规则。"""
+        r"""Combine operand results with arithmetic typing and definedness rules."""
         self._require_numeric(left)
         self._require_numeric(right)
         result_type = self._join_numeric(left.value_type, right.value_type)
@@ -469,7 +441,7 @@ class ExpressionTranslator:
             elif operator == "*":
                 term = left.term * right.term
             elif operator == "/":
-                # 数学除法统一提升到 Real，避免 Z3 构造整数除法。
+                # Promote division operands to Real to avoid Z3 integer division.
                 numerator = self._as_real(left.term)
                 denominator = self._as_real(right.term)
                 term = numerator / denominator
@@ -505,7 +477,7 @@ class ExpressionTranslator:
         name: str,
         args: Sequence[ExprResult],
     ) -> ExprResult:
-        """翻译已知数学函数，其他数值函数保守建模为未解释函数。"""
+        r"""Translate known math functions; model other numeric functions conservatively."""
         lower = name.lower()
         if lower == "sqrt" and len(args) == 1:
             self._require_numeric(args[0])
@@ -565,7 +537,7 @@ class ExpressionTranslator:
 
     @staticmethod
     def _definedness_of(values: Sequence[ExprResult]) -> tuple[Any, ...]:
-        """按求值顺序合并子表达式的有定义条件。"""
+        r"""Merge child definedness conditions in evaluation order."""
 
         return tuple(
             condition
@@ -575,12 +547,12 @@ class ExpressionTranslator:
 
     @staticmethod
     def _as_real(term: Any) -> Any:
-        """把 Z3 Int 项显式提升到 Real，其他实数项保持不变。"""
+        r"""Promote Z3 Int terms to Real."""
 
         return z3.ToReal(term) if z3.is_int(term) else term
 
     def _sort_for_type(self, value_type: BasicType) -> Any:
-        """返回值类型在未解释函数签名中对应的 Z3 sort。"""
+        r"""Select the Z3 sort for an uninterpreted function signature."""
         normalized = normalize_type(value_type)
         if normalized == BasicType.BOOL:
             return z3.BoolSort()
@@ -597,13 +569,13 @@ class ExpressionTranslator:
 
     @staticmethod
     def _require_bool(value: ExprResult) -> None:
-        """拒绝把数值或字符串表达式误用为逻辑条件。"""
+        r"""Reject non-Boolean logical conditions."""
         if value.value_type != BasicType.BOOL:
             raise ExpressionError(f"Expected Bool, got {value.value_type}")
 
     @staticmethod
     def _require_numeric(value: ExprResult) -> None:
-        """拒绝对非数值表达式应用算术或序关系运算。"""
+        r"""Reject nonnumeric arithmetic and ordering operands."""
         if value.value_type not in {
             BasicType.NAT,
             BasicType.INT,
@@ -616,7 +588,7 @@ class ExpressionTranslator:
 
     @staticmethod
     def _join_numeric(left: BasicType, right: BasicType) -> BasicType:
-        """计算二元算术结果所需的最小公共数值类型。"""
+        r"""Find the least common numeric type for binary arithmetic."""
         ranks = {
             BasicType.NAT: 0,
             BasicType.INT: 1,
@@ -631,7 +603,7 @@ class ExpressionTranslator:
 
     @staticmethod
     def _type_of_z3(value: Any) -> BasicType:
-        """从 Z3 sort 反向恢复两个业务后端共用的值类型。"""
+        r"""Recover the shared value type from a Z3 sort."""
         if z3.is_bool(value):
             return BasicType.BOOL
         if z3.is_int(value):
@@ -642,14 +614,14 @@ class ExpressionTranslator:
 
 
 class Z3ProofEngine:
-    """用“否定式不可满足”判定一阶逻辑公式是否有效。"""
+    r"""Prove validity by checking unsatisfiability of the negated formula."""
 
     def __init__(self, timeout_ms: int = 5_000) -> None:
-        """设置每个证明义务独立使用的求解超时。"""
+        r"""Set the timeout used independently for each obligation."""
         self.timeout_ms = int(timeout_ms)
 
     def valid(self, formula: Any) -> tuple[Verdict, str]:
-        """判定公式全称有效性，并附上反例或未知原因。"""
+        r"""Decide universal validity with a counterexample or unknown reason."""
         if z3 is None:
             return Verdict.UNKNOWN, "z3-solver is not installed"
         if not z3.is_bool(formula):
@@ -665,7 +637,7 @@ class Z3ProofEngine:
         return Verdict.UNKNOWN, solver.reason_unknown() or "Z3 returned unknown"
 
     def satisfiable(self, formula: Any) -> tuple[Verdict, str]:
-        """判定共享参数约束是否至少存在一个合法预赋值。"""
+        r"""Check whether the shared parameter constraint has a satisfying valuation."""
 
         if z3 is None:
             return Verdict.UNKNOWN, "z3-solver is not installed"
@@ -687,13 +659,7 @@ class Z3ProofEngine:
         state: Mapping[str, Any],
         symbols: Mapping[str, Any],
     ) -> tuple[Verdict, str]:
-        """按 ``|= phi[sigma]`` 检查部分状态是否满足路径条件。
-
-        ``symbols`` 是 Gamma 声明产生的有类型符号表。状态 ``sigma`` 可以只给
-        其中一部分变量赋值；未赋值变量保留在 ``phi[sigma]`` 中，由有效性检查
-        隐式全称量化。反之，sigma 中出现 symbols/Gamma 未声明的键没有可用的
-        类型解释，属于未定义状态，必须拒绝而不能静默忽略。
-        """
+        r"""Check partial-state substitution using validity of phi[sigma]."""
         if z3 is None:
             return Verdict.UNKNOWN, "z3-solver is not installed"
         undeclared = set(state) - set(symbols)
@@ -743,7 +709,7 @@ class Z3ProofEngine:
 
     @staticmethod
     def _concrete(value: Any, sort: Any) -> Any:
-        """按目标符号 sort 把 Python 状态值转换为 Z3 常量。"""
+        r"""Convert a Python state value to the target Z3 sort."""
         if sort.kind() == z3.Z3_BOOL_SORT:
             if type(value) is not bool:
                 raise ExpressionError(
@@ -769,28 +735,28 @@ class Z3ProofEngine:
 
 
 def implies(left: Any, right: Any) -> Any:
-    """构造蕴含；无 Z3 时保留可打印的结构化占位值。"""
+    r"""Build implication, retaining a printable placeholder without Z3."""
     if z3 is None:
         return ("implies", left, right)
     return z3.Implies(left, right)
 
 
 def conjunction(*items: Any) -> Any:
-    """构造任意元合取。"""
+    r"""Build an n-ary conjunction."""
     if z3 is None:
         return ("and",) + items
     return z3.And(*items)
 
 
 def negation(item: Any) -> Any:
-    """构造逻辑否定。"""
+    r"""Build logical negation."""
     if z3 is None:
         return ("not", item)
     return z3.Not(item)
 
 
 def simplify(item: Any) -> Any:
-    """在 Z3 可用时化简公式，否则原样返回。"""
+    r"""Simplify with Z3 when available; otherwise retain the input."""
     if z3 is None:
         return item
     return z3.simplify(item)

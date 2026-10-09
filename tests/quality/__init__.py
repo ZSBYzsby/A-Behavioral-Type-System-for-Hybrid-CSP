@@ -1,1 +1,1 @@
-"""项目文档完整性等非功能质量测试。"""
+r"""Regression tests for quality."""

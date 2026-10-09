@@ -1,1 +1,1 @@
-"""表达式语义翻译、偏函数有定义性和一阶逻辑证明测试包。"""
+r"""Regression tests for logic."""

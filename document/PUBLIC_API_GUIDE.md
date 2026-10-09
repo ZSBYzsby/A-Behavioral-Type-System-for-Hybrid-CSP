@@ -1,11 +1,11 @@
-# 公共接口使用手册
+# Public API guide
 
-本文面向只想调用项目功能、而不需要直接构造内部 AST 或判断对象的用户。项目根包
-只承诺四个业务函数：
+This guide is for users calling the project without constructing internal ASTs
+or judgments. The package root provides four stable application functions:
 
-本文负责解释怎样调用接口、读取返回值和处理异常；它不以接口摘要代替内部语义。
-需要了解解析、符号执行、Table 2/3 推导和证明阶段具体做了什么，请阅读
-[当前代码的实现语义与论文规则落地方式](IMPLEMENTATION_SEMANTICS.md)。
+This page explains calls, return values, and exceptions. For the operations
+performed during parsing, symbolic execution, Table 2/3 derivation, and proof,
+see [Implementation semantics and the paper's rules](IMPLEMENTATION_SEMANTICS.md).
 
 ```python
 from hcsp_typechecker import (
@@ -16,32 +16,47 @@ from hcsp_typechecker import (
 )
 ```
 
-四个函数分别完成“从 HCSP 构造 Type”“检查用户 Type”“从 Type 构造 Table 3
-状态图”“在完整图上检查锁、Bottom 错误和综合行为正确性”。它们都支持
-`output="none" | "result" | "full"`，但输入和成功结果不同。
+The functions construct Types from HCSP, check supplied Types, build Table 3
+transition graphs from Types, and analyze lock freedom, Bottom errors, and
+behavioral correctness on complete graphs. All accept
+`output="none" | "result" | "full"`, with different inputs and successful results.
 
-## 1. 四个接口之间的数据流
+## 1. Data flow between the four interfaces
 
 ```mermaid
 flowchart LR
     S1["Gamma + Parameters + Theta + HCSP"] --> C["construct_hcsp_type"]
-    C -->|"全部证明为 true"| T1["可信 TypeAST"]
+    C -->|"All proofs true"| T1["Trusted TypeAST"]
     S2["Gamma + Parameters + Theta + HCSP + Type"] --> K["check_hcsp_type"]
-    K -->|"结构匹配且全部证明为 true"| T2["已验证 TypeAST"]
+    K -->|"Structure matches and all proofs true"| T2["Verified TypeAST"]
     T1 --> G["build_type_transition_graph"]
     T2 --> G
-    G --> TG["完整 TypeTransitionGraph"]
+    G --> TG["Complete TypeTransitionGraph"]
     TG --> L["analyze_type_lock_freedom"]
-    L --> R["LockFreedomReport + 反例"]
+    L --> R["LockFreedomReport + witnesses"]
 ```
 
-Constructor 与 Checker 都在内部解析 HCSP、Gamma、Theta 和参数。它们不会向普通
-调用者返回 Process AST。图接口只接收已经存在的正式 `TypeAST`，不接收 HCSP 文本
-或用户 Type 文本。锁分析接口只接收第三接口已经生成的完整图。
+Construction and checking parse HCSP, Gamma, Theta, and parameters internally;
+they do not return Process ASTs. Graph construction accepts an existing formal
+`TypeAST`, not HCSP or Type text. Lock analysis accepts a complete graph from interface 3.
 
-## 2. 最短可运行示例
+| Function | Input | Successful return |
+|---|---|---|
+| `construct_hcsp_type` | Complete annotated HCSP source | Trusted `TypeAST` |
+| `check_hcsp_type` | Complete source with a supplied `type` section | Verified supplied `TypeAST` |
+| `build_type_transition_graph` | Formal `TypeAST` | Complete reachable `TypeTransitionGraph` |
+| `analyze_type_lock_freedom` | Complete transition graph | `LockFreedomReport`, with witnesses for failed properties |
 
-### 2.1 构造 Type
+The package root also exports the result and option types `TypeAST`,
+`TypeTransitionGraph`, `LockFreedomReport`, and `OutputMode`; the exceptions
+described in section 8; and `HCSPErrorDetail`, `TypeConstructionErrorKind`,
+`TypeCheckingErrorKind`, `TypeTransitionGraphErrorKind`, and
+`TypeLockAnalysisErrorKind` for structured error handling. Concrete AST
+constructors and internal prover adapters have no stable import contract.
+
+## 2. Minimal runnable examples
+
+### 2.1 Construct a Type
 
 ```python
 from hcsp_typechecker import construct_hcsp_type
@@ -55,10 +70,10 @@ process {{ch?(x); ch!(x)}}
 type_ast = construct_hcsp_type(source, output="result")
 ```
 
-正常返回说明：输入已成功转换为内部 Process AST，Table 2 规则已形成完整 Type，
-并且所有必要的一阶逻辑和 dL 证明义务均为 `true`。
+A normal return means input parsing produced a Process AST, Table 2 produced
+a complete Type, and every required FOL/dL obligation was proved `true`.
 
-### 2.2 检查用户 Type
+### 2.2 Check a supplied Type
 
 ```python
 from hcsp_typechecker import check_hcsp_type
@@ -77,10 +92,11 @@ type forever interrupt angelic {
 checked = check_hcsp_type(typed_source, output="result")
 ```
 
-Checker 直接把用户 Type 当作规则结论逐层检查，不先运行 Constructor 再比较两棵
-完整树。正常返回的 `checked` 就是 `type` 分节解析出的正式 AST。
+The checker consumes the supplied Type directly as rule conclusions, rather
+than constructing a second complete tree for comparison. The returned `checked`
+is the formal AST parsed from the `type` section.
 
-### 2.3 构造状态图
+### 2.3 Build a transition graph
 
 ```python
 from hcsp_typechecker import build_type_transition_graph
@@ -90,12 +106,55 @@ print(graph.initial_state)
 print(len(graph.states), len(graph.transitions))
 ```
 
-图接口先对 Type 做单向规范化和等递归状态取商，再生成 Table 3 关键-deadline
-约化下的完整可达闭包。
+The graph interface performs one-way normalization and equi-recursive state
+quotienting, then computes the complete reachable closure under Table 3's
+critical-deadline reduction.
 
-## 3. Constructor 接口
+### 2.4 Analyze the graph
 
 ```python
+from hcsp_typechecker import analyze_type_lock_freedom
+
+report = analyze_type_lock_freedom(graph, output="result")
+print(report.lock_free, report.error_free, report.behavior_correct)
+```
+
+The single component above has no communication partner, so analysis reports a
+deadlock witness. This is a normal property result. The next example provides
+a synchronized, lock-free execution.
+
+### 2.5 Construct and analyze a parallel program
+
+This complete example requires no KeYmaera X configuration:
+
+```python
+from hcsp_typechecker import (
+    construct_hcsp_type,
+    build_type_transition_graph,
+    analyze_type_lock_freedom,
+)
+
+parallel_source = """
+gamma(x: Int)
+theta(ch: channel(value: Int))
+process {
+    {ch?(x)},
+    {ch!(1)}
+}
+"""
+
+parallel_type = construct_hcsp_type(parallel_source, output="result")
+parallel_graph = build_type_transition_graph(
+    parallel_type, max_states=10_000, max_transitions=50_000, output="result"
+)
+parallel_report = analyze_type_lock_freedom(parallel_graph, output="result")
+assert parallel_report.lock_free
+assert parallel_report.behavior_correct
+```
+
+## 3. Constructor interface
+
+```text
 construct_hcsp_type(
     source: str,
     *,
@@ -111,72 +170,84 @@ construct_hcsp_type(
 
 ### 3.1 `source`
 
-Constructor 输入固定为：
+Constructor input has this fixed form:
 
 ```ebnf
 constructor_source ::= gamma [parameters] theta process EOF
 ```
 
-最小输入是 `gamma() theta() process {{skip}}`。各分节含义如下：
+The smallest input is `gamma() theta() process {{skip}}`. Sections mean:
 
-| 分节 | 作用 | 是否必写 |
+| Section | Purpose | Required? |
 |---|---|---|
-| `gamma(...)` | 声明状态变量基础类型和允许出现的 ODE 左端变量集合 | 是，可为空 |
-| `parameters(...) where(H)` | 声明所有分量共享、执行期间只读的参数及背景约束 | 否 |
-| `theta(...)` | 声明通道槽位、槽位 binder 和联合 refinement | 是，可为空 |
-| `process {...}` | 一个或多个顶层 HCSP 顺序分量；多个分量表示并行系统 | 是且非空 |
+| `gamma(...)` | Scalar state types and permitted ODE left-hand-side variable sets | Yes; may be empty |
+| `parameters(...) where(H)` | Shared read-only parameters and background constraint | No |
+| `theta(...)` | Channel slots, binders, and joint refinements | Yes; may be empty |
+| `process {...}` | One or more sequential components; multiple components run in parallel | Yes; nonempty |
 
-完整语法分别见[上下文语法](GAMMA_THETA_INPUT_SYNTAX.md)与
-[Process/表达式语法](HCSP_INPUT_SYNTAX.md)。
+See [Context syntax](GAMMA_THETA_INPUT_SYNTAX.md) and
+[Process/expression syntax](HCSP_INPUT_SYNTAX.md) for the complete grammars.
 
 ### 3.2 `initial_states`
 
-初态是 Gamma 标量变量上的部分赋值，不要求给出所有变量：
+Initial states are partial assignments to Gamma scalars; not every variable needs a value:
 
 ```python
-# 一个顶层 Process
-construct_hcsp_type(source, initial_states={"x": 0, "ready": False})
+# One top-level Process.
+single_source = "gamma(x: Int, ready: Bool) theta() process {{skip}}"
+construct_hcsp_type(single_source, initial_states={"x": 0, "ready": False})
 
-# 两个顶层并行分量，顺序与 process { {P1}, {P2} } 一致
-construct_hcsp_type(source, initial_states=({"x": 0}, {"y": 1}))
+# Two parallel components, in the order of process { {P1}, {P2} }.
+parallel_source = "gamma(x: Int, y: Int) theta() process {{skip}, {skip}}"
+construct_hcsp_type(parallel_source, initial_states=({"x": 0}, {"y": 1}))
 ```
 
-允许的键是 Gamma 中映射到 `Bool/Nat/Int/Rational/Real` 的变量。未知变量、参数名和
-`continuous(...)` 声明标签都不是状态键。并行时 mapping 数量必须与顶层分量数
-完全相同；接口不会猜测怎样拆分一个全局状态 mapping。
+Keys must be Gamma variables of type `Bool/Nat/Int/Rational/Real`. Unknown names,
+parameters, and `continuous(...)` labels are invalid state keys. For parallel
+input, the mapping count must exactly match the top-level component count;
+the interface does not infer how to split a global state.
 
 ### 3.3 `path_condition`
 
-路径条件可以是 Python `True/False`，也可以是项目表达式字符串：
+Path conditions accept Python `True/False` or project expression strings:
 
 ```python
+parameter_source = """
+gamma(x: Real)
+parameters(limit: Real) where(limit >= 0)
+theta()
+process {{skip}}
+"""
+
 construct_hcsp_type(
-    source,
+    parameter_source,
+    initial_states={"x": 0},
     path_condition="x >= 0 and x <= limit",
 )
 ```
 
-字符串使用与 HCSP 公式相同的严格表达式解析器，并可引用 Gamma 标量和共享参数。
-字符串语法错误属于 `HCSPInputError`；传入 list 等非字符串、非 bool 对象属于 Python
-调用契约错误，抛 `TypeError`。
+Strings use the same strict expression parser as HCSP formulas and may reference
+Gamma scalars and shared parameters. Syntax errors raise `HCSPInputError`.
+A non-string, non-bool argument, such as a list, raises `TypeError`.
 
-### 3.4 成功、否证与未决
+### 3.4 Success, refutation, and unresolved proofs
 
-Constructor 使用三值证明结论，但公共返回协议不会把它们混在一起：
+The constructor uses three-valued proof results with distinct public outcomes:
 
-| 内部结论 | 是否形成完整 Type | 公共行为 |
+| Internal verdict | Complete Type? | Public behavior |
 |---|---:|---|
-| `true` | 是 | 正常返回可信 `TypeAST` |
-| `false` | 任意 | 抛 `HCSPTypeConstructionError` |
-| `unknown` | 否 | 抛 `HCSPTypeConstructionError` |
-| `unknown` | 是 | 抛 `HCSPUntrustedTypeConstructionError`，候选在 `untrusted_type` |
+| `true` | Yes | Return trusted `TypeAST` |
+| `false` | Either | Raise `HCSPTypeConstructionError` |
+| `unknown` | No | Raise `HCSPTypeConstructionError` |
+| `unknown` | Yes | Raise `HCSPUntrustedTypeConstructionError`; candidate in `untrusted_type` |
 
-证明器返回 `unknown` 后，Constructor 会记录义务并继续规则推导；因此它可能仍形成
-完整候选。候选只适合审计或外部补证，不能当作已经证明的成功返回值。
+After an `unknown` proof, construction records the obligation and continues
+deriving rules, potentially forming a complete candidate. The candidate is for
+review or further proof, not a verified successful return value.
 
-## 4. Checker 接口
+## 4. Checker interface
 
-```python
+```text
 check_hcsp_type(
     source: str,
     *,
@@ -190,28 +261,31 @@ check_hcsp_type(
 ) -> TypeAST
 ```
 
-Checker 的调用参数与 Constructor 相同，但 source 末尾必须再有一个 `type` 分节：
+Arguments match construction, but the source must end with a `type` section:
 
 ```ebnf
 checking_source ::= gamma [parameters] theta process type EOF
 ```
 
-Type 输入语法见[用户 Type 输入语法](TYPE_INPUT_SYNTAX.md)。尤其要注意：
+See [Supplied Type syntax](TYPE_INPUT_SYNTAX.md). In particular:
 
-- `internal` 的每个当前层分支必须显式加圆括号，圆括号决定它对应哪个 Process
-  内部选择分支；
-- `angelic { ... }` 可以为空，也可以包含一到多个有序通信分支；
-- `empty` 是正常无通信行为，`bottom` 是不可达后继，两者不能互换；
-- 并行 Type 的分量数量和顺序必须与顶层 Process 分量一致；
-- Checker 不用交换律或结合律搜索另一种 Type 括号结构。
+- Each current-level `internal` branch requires parentheses, defining its
+  corresponding Process branch.
+- `angelic { ... }` may be empty or have one or more ordered communication branches.
+- `empty` is normal empty communication behavior; `bottom` is an unreachable
+  continuation. They are not interchangeable.
+- Parallel Type component count and order must match top-level Process components.
+- The checker does not use associativity or commutativity to search alternative grouping.
 
-Checker 遇到证明 `unknown` 时会继续检查余下 Type 结构，以提供尽可能完整的报告，
-但最终仍抛 `HCSPTypeCheckingError(kind="proof-unknown")`。与 Constructor 不同，
-Checker 没有“交付一个不可信新类型”的职责。
+After an `unknown` proof, checking continues through the remaining Type structure
+where possible. If structure matches and no definite failure overrides the
+unresolved proof, it raises `HCSPTypeCheckingError(kind="proof-unknown")`.
+A later mismatch or refuted premise instead determines the final error category.
+Checking does not construct and deliver a new untrusted Type.
 
-## 5. 状态图接口
+## 5. Transition graph interface
 
-```python
+```text
 build_type_transition_graph(
     type_ast: TypeAST,
     *,
@@ -222,23 +296,23 @@ build_type_transition_graph(
 ) -> TypeTransitionGraph
 ```
 
-### 5.1 返回对象
+### 5.1 Result object
 
-`TypeTransitionGraph` 是不可变对象，包含：
+The immutable `TypeTransitionGraph` contains:
 
-| 字段/方法 | 含义 |
+| Field/method | Meaning |
 |---|---|
-| `initial_state: int` | 初始状态编号 |
-| `states: tuple[TypeState, ...]` | 按 `0..n-1` 连续编号的状态 |
-| `transitions: tuple[TypeTransition, ...]` | 已去重的全部可达边 |
-| `outgoing(state_id)` | 按稳定顺序返回指定状态的所有出边 |
+| `initial_state: int` | Initial state identifier |
+| `states: tuple[TypeState, ...]` | Consecutively numbered states `0..n-1` |
+| `transitions: tuple[TypeTransition, ...]` | All deduplicated reachable edges |
+| `outgoing(state_id)` | Outgoing edges in stable order |
 
-`state.type_ast` 是用于输出的规范 Type AST。`edge.label` 是无耗时 `tau` 标签或携带
-精确时长与 ready set 的时间标签；`edge.derivations` 保存产生同一源/标签/目标边的
-所有不同 Table 3 规则证据。图不混入性质结论；第四接口单独产生锁、Bottom
-错误和综合行为正确性报告。
+`state.type_ast` is a normalized display AST. `edge.label` is a zero-time `tau`
+or a timed label with an exact duration and ready set. `edge.derivations`
+retains every distinct Table 3 derivation for the same source/label/target.
+The graph contains no property verdicts; interface 4 produces those separately.
 
-### 5.2 规模限制
+### 5.2 Size limits
 
 ```python
 graph = build_type_transition_graph(
@@ -248,13 +322,13 @@ graph = build_type_transition_graph(
 )
 ```
 
-两个上限必须是严格正整数或 `None`。一旦触及上限，接口抛
-`HCSPTypeTransitionGraphError(kind="size-limit")`，并且不返回部分图。这样调用者
-不会把尚未穷尽的前缀误认为完整状态空间。
+Limits are strictly positive integers or `None`. If construction would exceed
+a limit, it raises `HCSPTypeTransitionGraphError(kind="size-limit")` without
+returning a partial graph. An unexplored prefix cannot be mistaken for the full state space.
 
-## 6. 锁自由分析接口
+## 6. Lock-freedom analysis interface
 
-```python
+```text
 analyze_type_lock_freedom(
     graph: TypeTransitionGraph,
     *,
@@ -263,24 +337,24 @@ analyze_type_lock_freedom(
 ) -> LockFreedomReport
 ```
 
-报告保留 `deadlock_free`、`livelock_free` 和 `lock_free`，并提供
-`error_free` 与 `behavior_correct`。最后一项严格等于
-`lock_free and error_free`。性质为假时接口正常返回，并分别在
-`deadlock_witness`、`livelock_witness` 或 `bottom_error_witness` 中给出有限反例；
-输入不是完整图时才抛 `HCSPTypeLockAnalysisError`。详细定义、算法和复杂度见
-[锁与 Bottom 错误分析](TYPE_LOCK_ANALYSIS.md)。
+The report exposes `deadlock_free`, `livelock_free`, `lock_free`, `error_free`, and
+`behavior_correct`; the last is exactly `lock_free and error_free`.
+False properties return normally, with finite witnesses in `deadlock_witness`,
+`livelock_witness`, or `bottom_error_witness`. Invalid/incomplete input raises
+`HCSPTypeLockAnalysisError`. See [Lock and Bottom-error analysis](TYPE_LOCK_ANALYSIS.md)
+for definitions, algorithms, and complexity.
 
-## 7. 输出模式
+## 7. Output modes
 
-四个接口共享同一展示协议：
+All four interfaces share the presentation contract:
 
-| `output` | 内容 | 推荐用途 |
+| `output` | Content | Typical use |
 |---|---|---|
-| `"none"` | 不打印 | 库调用、自动测试、Web 服务 |
-| `"result"` | 最终结论、Type、图规模或行为正确性摘要、首要错误 | 命令行普通运行 |
-| `"full"` | 原始输入、推导/证明轨迹、完整图或锁反例路径 | 人工审计和排错 |
+| `"none"` | No printing | Library calls, tests, web services |
+| `"result"` | Final verdict, Type, graph size or behavioral summary, primary error | Ordinary command-line runs |
+| `"full"` | Original input, derivation/proof trace, full graph or witness paths | Review and debugging |
 
-`stream` 可传任何支持 `write()` 的文本流：
+`stream` accepts any writable text stream with `write()`:
 
 ```python
 from io import StringIO
@@ -290,10 +364,11 @@ type_ast = construct_hcsp_type(source, output="full", stream=buffer)
 audit_log = buffer.getvalue()
 ```
 
-`output="none"` 时，即使失败也不打印；异常对象仍可调用 `format_result()` 或
-`format_full()`。不要通过解析中文日志控制程序流程，应读取异常的结构化字段。
+`output="none"` prints nothing even on failure; exceptions still provide
+`format_result()` and `format_full()`. Logs and error messages use English.
+Use structured exception fields for program control flow.
 
-## 8. 统一异常处理
+## 8. Exception handling
 
 ```python
 from hcsp_typechecker import (
@@ -305,33 +380,33 @@ from hcsp_typechecker import (
 )
 ```
 
-### 8.1 输入错误
+### 8.1 Input errors
 
-`HCSPInputError` 的核心字段：
+Core `HCSPInputError` fields are:
 
-| 字段 | 含义 |
+| Field | Meaning |
 |---|---|
-| `phase` | `lexical`、`syntax` 或 `validation` |
+| `phase` | `lexical`, `syntax`, or `validation` |
 | `kind` | `input-<phase>` |
-| `source_name` | 调用时给出的来源名 |
-| `line`, `column` | 从 1 开始的位置 |
-| `offset` | 从 0 开始的字符偏移 |
-| `found`, `expected` | 实际 token 与期望 token |
+| `source_name` | Source label supplied by the caller |
+| `line`, `column` | One-based location |
+| `offset` | Zero-based character offset |
+| `found`, `expected` | Actual and expected tokens |
 
-`format_diagnostic()` 会生成源码行与插入符。输入错误发生后，Constructor/Checker
-后端不会启动。
+`format_diagnostic()` renders the source line and caret. Construction/checking
+backends do not start after an input error.
 
-### 8.2 Constructor 错误
+### 8.2 Construction errors
 
-`HCSPTypeConstructionError.kind` 取值：
+`HCSPTypeConstructionError.kind` values are:
 
-- `environment`：Gamma、Theta、参数或路径上下文不良构；
-- `derivation`：当前 Process 结构无法应用已实现规则形成完整类型；
-- `proof-failed`：必要公式被证明为 false 或产生可信反例；
-- `proof-unknown`：必要公式未被可信证明器判定。
+- `environment`: ill-formed Gamma, Theta, parameters, or path context.
+- `derivation`: implemented rules cannot derive a complete Type from the Process.
+- `proof-failed`: a required formula is refuted or has a trustworthy counterexample.
+- `proof-unknown`: a required formula is unresolved by the trusted prover.
 
-公共字段包括 `verdict`、`kind`、`phase`、`reason`、`rule`、`location`、
-`details` 和 `partial_types`。必须先捕获子类，才能安全读取不可信候选：
+Public fields include `verdict`, `kind`, `phase`, `reason`, `rule`, `location`,
+`details`, and `partial_types`. Catch the subclass first to access an untrusted candidate:
 
 ```python
 try:
@@ -343,68 +418,73 @@ except HCSPTypeConstructionError as error:
     print(error.kind, error.reason)
 ```
 
-### 8.3 Checker 错误
+### 8.3 Checking errors
 
-`HCSPTypeCheckingError.kind` 取值：`environment`、`type-mismatch`、
-`rule-application`、`proof-failed` 或 `proof-unknown`。除通用字段外还提供：
+`HCSPTypeCheckingError.kind` is `environment`, `type-mismatch`, `rule-application`,
+`proof-failed`, or `proof-unknown`. Beyond common fields, it provides:
 
-- `expected_type`：用户给出的 Type AST；
-- `type_mismatch_detected`：是否明确发现结构不匹配；
-- `type_structure_matched`：`True` 表示结构已完整消费，`False` 表示明确不匹配，
-  `None` 表示更早的环境/规则失败使检查未走完。
+- `expected_type`: the supplied Type AST.
+- `type_mismatch_detected`: whether a definite structural mismatch was found.
+- `type_structure_matched`: `True` for complete structural consumption, `False`
+  for a definite mismatch, or `None` when an earlier environment/rule failure stopped checking.
 
-### 8.4 图错误
+### 8.4 Graph errors
 
-`HCSPTypeTransitionGraphError.kind` 取值：`invalid-type`、`invalid-limit`、
-`normalization` 或 `size-limit`。规模错误额外给出 `limit_name/limit`，非法选项给出
-`option_name/option_value`。该异常从不携带部分状态图。
+`HCSPTypeTransitionGraphError.kind` is `invalid-type`, `invalid-limit`,
+`normalization`, or `size-limit`. Size errors expose `limit_name/limit`; invalid
+options expose `option_name/option_value`. The exception never contains a partial graph.
 
-### 8.5 锁分析错误
+### 8.5 Lock-analysis errors
 
-`HCSPTypeLockAnalysisError.kind` 是 `invalid-graph` 或 `incomplete-graph`；同时公开
-`phase`、`reason`、`state_count`、`transition_count` 和 `details`。该异常只描述
-分析输入无效。发现死锁或活锁时接口正常返回带见证的 `LockFreedomReport`。
+`HCSPTypeLockAnalysisError.kind` is `invalid-graph` or `incomplete-graph`, with
+`phase`, `reason`, `state_count`, `transition_count`, and `details`. These errors
+describe invalid analysis inputs. Deadlock/livelock findings return a
+`LockFreedomReport` with witnesses normally.
 
 ### 8.6 `HCSPErrorDetail`
 
-Constructor 和 Checker 的 `details` 是 `HCSPErrorDetail` 元组。每项含
-`category/verdict/message/rule/location`；证明错误还含
-`proof_kind/formula/backend_detail`。这是一套面向程序的稳定证据格式，比解析完整
-日志可靠。
+Construction/checking `details` is a tuple of `HCSPErrorDetail` records, each with
+`category/verdict/message/rule/location`. Proof errors additionally have
+`proof_kind/formula/backend_detail`. These stable structured fields support
+programmatic handling without parsing complete logs.
 
-## 9. 证明器与 `unknown`
+Invalid Python argument shapes can also raise `TypeError` or `ValueError`.
 
-Z3 用于表达式、状态和 FOL 义务；KeYmaera X 用于非平凡 ODE 的 dL 义务。若未配置
-KeYmaera X，离散程序仍可正常运行，但需要 dL 后端的义务通常得到 `unknown`。
+## 9. Provers and `unknown`
 
-可用环境变量配置证明器：`KEYMAERAX_JAR`、`KEYMAERAX_JAVA`、
-`KEYMAERAX_HOME`、`KEYMAERAX_TIMEOUT`、`KEYMAERAX_KEEP_ARTIFACTS` 和
-`KEYMAERAX_ARTIFACTS`。运行 `python -m hcsp_typechecker --require-keymaerax`
-可检查完整环境。
+Z3 handles expression, state, and FOL obligations; KeYmaera X handles nontrivial
+ODE dL obligations. Without KeYmaera X, discrete programs still work, but
+obligations requiring the dL backend generally become `unknown`.
 
-接口参数 `keymaerax_timeout_seconds` 只覆盖本次调用的超时；其他配置仍从环境读取。
-证明器缺失、超时和无法可靠翻译都会保守产生 `unknown`，项目不会猜测为 true。
+See [Environment configuration](ENVIRONMENT_SETUP.md) for setup commands,
+the full environment-variable table, and dependency diagnostics.
 
-## 9. 输入限制速查
+`keymaerax_timeout_seconds` overrides the timeout for one call; other settings
+come from the environment. Missing provers, timeouts, or unreliable translation
+conservatively yield `unknown`, never an assumed true result.
 
-- 所有用户标识符使用 ASCII `[A-Za-z_][A-Za-z0-9_]*`，且不能是保留字；
-- 基础类型只有 `Bool/Nat/Int/Rational/Real`；
-- Gamma 状态变量是单值，`continuous(...)` 只登记完整 ODE 左端集合；
-- 通道至少一个槽，多槽是一次同步中的多个标量，不是 tuple 值；
-- 参数是所有并行分量可共享读取的只读量，不能赋值、输入绑定或连续演化；
-- 每个 ODE 必须有 `delay`，可省略 `safety` 和 `interrupt`；
-- ODE 隐式时钟 `t` 不进入 Gamma，也不能写在 `dot` 左端；
-- 不支持 `wait(d)`，应显式写空 flow ODE；
-- Constructor 与 Checker 的前端/后端主路径使用显式工作栈。自动回归覆盖 2000 条
-  顺序语句、1500 层 Type continuation、300 个并行分量，以及 Constructor 生成的
-  180 层通信 Type 回送 Checker/图接口；这些是已测试基线，不是静态硬上限；
-- 图状态空间仍可能组合爆炸，应按应用需要设置 `max_states/max_transitions`。
+## 10. Input restrictions at a glance
 
-## 10. 进一步阅读
+- User identifiers use ASCII `[A-Za-z_][A-Za-z0-9_]*` and cannot be reserved words.
+- Basic types are `Bool/Nat/Int/Rational/Real`.
+- Gamma variables are scalar; `continuous(...)` registers an entire ODE left-hand-side set.
+- Channels have at least one slot. Multiple slots carry separate scalars in one synchronization.
+- Shared parameters are read-only: assignment, input binding, and continuous evolution cannot modify them.
+- Every ODE requires `delay`; `safety` and `interrupt` are optional.
+- The implicit ODE clock `t` is outside Gamma and cannot be a `dot` left-hand side.
+- `wait(d)` is unsupported; use an explicit empty-flow ODE.
+- Construction/checking frontend and backend paths use explicit work stacks.
+  Tests cover 2000 sequential statements, 1500 nested Type continuations, 300
+  parallel components, and a constructed 180-level communication Type passed
+  back to checking/graph construction. These are tested baselines, not hard limits.
+- Graph state spaces can still grow combinatorially; set `max_states/max_transitions`
+  to suit the application.
 
-- [完整输入环境语法](GAMMA_THETA_INPUT_SYNTAX.md)
-- [Process 与表达式语法](HCSP_INPUT_SYNTAX.md)
-- [用户 Type 输入语法](TYPE_INPUT_SYNTAX.md)
-- [TypeConstructor 规则实现](TYPE_CONSTRUCTOR.md)
-- [TypeChecker 规则实现](TYPE_CHECKER.md)
-- [Table 3 状态图实现](TYPE_OPERATIONAL_SEMANTICS.md)
+## 11. Further reading
+
+- [Complete input environment syntax](GAMMA_THETA_INPUT_SYNTAX.md)
+- [Process and expression syntax](HCSP_INPUT_SYNTAX.md)
+- [Supplied Type syntax](TYPE_INPUT_SYNTAX.md)
+- [TypeConstructor rules](TYPE_CONSTRUCTOR.md)
+- [TypeChecker rules](TYPE_CHECKER.md)
+- [Table 3 graph implementation](TYPE_OPERATIONAL_SEMANTICS.md)

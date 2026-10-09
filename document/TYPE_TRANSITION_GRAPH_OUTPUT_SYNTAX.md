@@ -1,11 +1,11 @@
-# Table 3 状态迁移图只读输出语法
+# Read-only Table 3 transition graph output syntax
 
-`build_type_transition_graph(..., output="full")` 把构造结果一次性输出为稳定文本。
-格式包含初始状态、全部规范状态、全部转移标签，以及每条边的
-Table 3 推导证据。底层 formatter 只服务接口内部展示和审计，不提供 parser，也
-不允许用户用文本伪造状态图。
+`build_type_transition_graph(..., output="full")` prints the complete result as
+stable text: the initial state, every normalized state, all transition labels,
+and each edge's Table 3 derivation evidence. The formatter supports internal
+presentation and review; there is no parser for constructing graphs from this text.
 
-## 接口
+## Interface
 
 ```python
 from hcsp_typechecker import build_type_transition_graph
@@ -13,7 +13,7 @@ from hcsp_typechecker import build_type_transition_graph
 graph = build_type_transition_graph(type_ast, output="full")
 ```
 
-## 输出文法
+## Output grammar
 
 ```ebnf
 graph_output
@@ -71,33 +71,39 @@ state_id
     ::= "S" NONNEGATIVE_INTEGER
 ```
 
-空格和换行不参与语义；formatter 固定使用四空格缩进。`tau` 表示不消耗时间的
-转移。时间边中的 ready set 按信道名和方向稳定排序。相同图边的多份推导证据会
-全部列在同一个 `by` 块中；递归或并行规则的前提证据嵌套在所属规则块中。
+Whitespace and line breaks are not semantic; formatting uses four-space indentation.
+`tau` denotes a transition that consumes no time. Ready sets are sorted by channel
+name and direction. All derivations of the same graph edge appear in one `by`
+block, with recursive or parallel premise evidence nested inside its parent rule.
 
-`components=[...]` 中的编号从零开始，指向该边源状态右侧
-`normalized_type_output` 实际展示的并行分量。`branches=[...]` 同样从零开始，
-指向相应可见分量中的内部选择或 Angelic 分支；通信规则中两个列表的同一位置组成
-一个“参与分量—所选中断分支”对。编号不暴露循环项图的内部结点顺序，重复并行
-分量也各自拥有独立的可见位置。
+Indices in `components=[...]` are zero-based positions in the source state's
+displayed `normalized_type_output` parallel components. `branches=[...]` similarly
+indexes visible internal-choice or Angelic branches. For communication, matching
+positions in the two lists identify a participating component and its selected
+interrupt branch. Indices do not expose internal term-graph node order; duplicate
+parallel components retain separate visible positions.
 
-当前 `RULE_NAME` 及其证据含义为：
+Current `RULE_NAME` values and evidence are:
 
-- `P-unrhd`：通信同步，保存两个分量、两个 Angelic 分支和通道；
-- `P-triangleright`：零时延 timeout，保存发生 timeout 的分量；
-- `P-sqcup`：内部选择，保存分量和被选分支；
-- `P-unrhd-prime`：单分量时间推进；
-- `P-parallel`：并行共同时间推进，`components` 与嵌套前提按同一顺序对应。
+- `P-unrhd`: communication synchronization; two components, two Angelic branches, and a channel.
+- `P-triangleright`: zero-delay timeout; the component taking the timeout.
+- `P-sqcup`: internal choice; the component and selected branch.
+- `P-unrhd-prime`: time advancement of one component.
+- `P-parallel`: common parallel time advancement; `components` and nested premises have matching order.
 
-递归规则 `P-mu` 不单独出现在输出中。递归已经在状态身份中编译为项图回边，证据
-编号针对经过前导递归展开后可执行的分量或分支；不会生成仅用于展开递归的行政边。
+`P-mu` is not printed separately. Recursion is compiled into term-graph back edges
+as part of state identity. Evidence indices refer to executable components or
+branches after leading recursion is unfolded; no administrative unfolding-only
+edges are generated.
 
-状态右侧的 `normalized_type_output` 使用
-[规范化 Type AST 只读输出语法](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)。图节点按等递归
-正规树判重，所以 `mu t.T` 与其有限展开共用一个 `state_id`；右侧文本打印该等价类
-由最小循环项图确定性生成的规范 AST 展示代表。该展示树不参与状态判等或转移计算。
+Each state's `normalized_type_output` follows the
+[Read-only normalized Type syntax](NORMALIZED_TYPE_OUTPUT_SYNTAX.md).
+Nodes are deduplicated by equi-recursive regular trees, so `mu t.T` and its finite
+unfoldings share a `state_id`. The displayed normalized AST is deterministically
+generated from the equivalence class's minimal cyclic term graph; it does not
+participate in state equality or transition calculation.
 
-## 示例
+## Example
 
 ```text
 type transition graph {
@@ -118,8 +124,9 @@ type transition graph {
 }
 ```
 
-状态图输出永远表示完整的可达闭包。若构造过程达到 `max_states` 或
-`max_transitions`，接口抛出 `HCSPTypeTransitionGraphError`，其 `kind` 为
-`size-limit`，不会调用成功结果 formatter，也不会输出或返回部分图。错误文本由
-第三个接口自己的 `result/full` 错误 formatter 负责，不属于本页定义的成功图语法。
-`output="result"` 也不使用本页完整图文法，只输出状态数、边数和初始规范 Type。
+Successful graph output always represents the complete reachable closure. If
+`max_states` or `max_transitions` is exceeded, the interface raises
+`HCSPTypeTransitionGraphError(kind="size-limit")` without displaying or returning
+a partial graph. Its `result/full` error formatter is separate from the successful
+graph grammar defined here. `output="result"` also uses a summary rather than
+this full grammar: state count, edge count, and the initial normalized Type.

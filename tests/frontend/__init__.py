@@ -1,1 +1,1 @@
-"""完整用户输入组合前端的测试包。"""
+r"""Regression tests for frontend."""

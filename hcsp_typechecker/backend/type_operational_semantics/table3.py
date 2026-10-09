@@ -1,19 +1,4 @@
-r"""直接在有限循环 Type 项图上计算 Table 3 的一步操作语义。
-
-递归 ``mu`` 与递归变量在进入本模块前已经编译成项图回边；内部/外部选择也已经
-按照项目采用的结合、交换和幂等律取商。因此，本模块不选择某棵规范 Type AST
-作为状态代表，也不执行语法树展开。每条转移直接读取项图根，替换相应的根或
-deadline 节点，再把目标项图裁剪并按等递归正规树重新最小化。
-
-时间语义采用项目确认的“下一个关键 deadline”策略：全部非空并行分量必须能够
-共同等待，且不同分量的 ready set 中不能存在互补动作；有限 deadline 取最小值，
-全部为无穷时生成 ``infinity`` 时间自循环。
-任一并行根为 ``Bottom`` 时，当前配置已经错误终止，所有 Table 3 规则均不再适用；
-``Empty`` 则是不阻塞其他分量的正常完成单位元。
-
-规则计算始终使用项图位置；写入公开 ``TransitionDerivation`` 前，再借助同一状态
-确定生成的展示映射，把分量和分支索引转换为用户实际看到的规范 AST 位置。
-"""
+r"""Derive one-step Table 3 successors directly on finite cyclic term graphs."""
 
 from __future__ import annotations
 
@@ -46,7 +31,7 @@ from .regular_tree import (
 
 @dataclass(frozen=True, slots=True)
 class DerivedTransition:
-    """尚未分配状态编号的一条项图级 Table 3 直接后继。"""
+    r"""A direct Table 3 successor before assigning a state identifier."""
 
     target: EquiRecursiveStateKey
     label: TransitionLabel
@@ -55,7 +40,7 @@ class DerivedTransition:
 
 @dataclass(frozen=True, slots=True)
 class _RootStep:
-    """一个并行根能够独立完成的瞬时替换。"""
+    r"""An instantaneous replacement of one parallel root."""
 
     target_root: int
     derivation: TransitionDerivation
@@ -63,7 +48,7 @@ class _RootStep:
 
 @dataclass(frozen=True, slots=True)
 class _CommunicationOffer:
-    """一个 delay 根的 angelic 子图暴露出的通信分支。"""
+    r"""A communication branch exposed by a delay's angelic subgraph."""
 
     branch_index: int
     channel: str
@@ -73,7 +58,7 @@ class _CommunicationOffer:
 
 @dataclass(frozen=True, slots=True)
 class _WaitProfile:
-    """一个项图根当前剩余的 deadline 与 ready set。"""
+    r"""A root's remaining deadline and ready set."""
 
     deadline: Fraction | InfiniteTime
     ready: frozenset[ReadyAction]
@@ -82,24 +67,13 @@ class _WaitProfile:
 def derive_one_step(
     state: EquiRecursiveStateKey,
 ) -> tuple[DerivedTransition, ...]:
-    """枚举一个规范循环项图状态的全部瞬时和最大时间转移。
-
-    若任一并行根已是 ``Bottom``，整个配置是错误终止状态，立即返回
-    空后继集。否则枚举内部选择、零时延且后继非 ``Bottom`` 的 timeout、
-    任意两并行分量之间的互补通信，以及满足等待前提时唯一的最大关键时间步。
-
-    ``state`` 已经是等递归正规树的最小有限表示，所以 ``[P-mu]`` 在这里表现为
-    沿回边读取 continuation，而不是额外的 AST 展开规则。返回的每个目标也立即
-    重新最小化，因而调用者无需再次做状态等价判定。推导证据中的索引已经转换为
-    ``normalized_type_from_state_key(state)`` 所展示的可见位置。
-    """
+    r"""Enumerate instantaneous and maximal-time successors of a canonical state."""
 
     if not isinstance(state, EquiRecursiveStateKey):
         raise TypeError("Table 3 semantics requires an equi-recursive state key")
 
-    # Bottom 不是一个可被忽略的并行单位元，而是整个配置已经出错的标志。
-    # 这个全局检查必须先于其他分量的选择、通信和时间步。Empty 则会在并行
-    # 规范化中被当作单位元删除（或在全部完成时保留唯一 Empty 根），不触发错误终止。
+    # A parallel Bottom root terminates the whole configuration before any transition; Empty is
+    # the parallel identity.
     if any(
         state.nodes[root].kind is RegularTypeNodeKind.BOTTOM
         for root in state.component_roots
@@ -167,7 +141,7 @@ def _communication_transition(
     right_offer: _CommunicationOffer,
     presentation: _StatePresentation,
 ) -> DerivedTransition:
-    """把项图通信参与者及分支位置转换为展示 AST 的可见位置。"""
+    r"""Map communication participants and branches to visible display AST positions."""
 
     participants = [
         (
@@ -200,12 +174,7 @@ def _root_silent_steps(
     state: EquiRecursiveStateKey,
     root: int,
 ) -> tuple[_RootStep, ...]:
-    """计算项图根的内部选择与合法的零时延 timeout 瞬时步。
-
-    Table 3 的 ``[P-triangleright]`` 具有 ``T != bottom`` 前提。后继为
-    ``bottom`` 表示自然演化边界不可达；即使剩余时延已经是零，也只能尝试
-    angelic 通信，不能通过一条 timeout 边进入 ``bottom``。
-    """
+    r"""Derive internal-choice and valid zero-delay timeout steps."""
 
     node = state.nodes[root]
     if node.kind is RegularTypeNodeKind.INTERNAL_CHOICE:
@@ -239,7 +208,7 @@ def _communication_offers(
     state: EquiRecursiveStateKey,
     root: int,
 ) -> tuple[_CommunicationOffer, ...]:
-    """提取 delay 根的全部输入/输出中断分支。"""
+    r"""Extract input and output interrupt offers from a delay root."""
 
     node = state.nodes[root]
     if node.kind not in {
@@ -275,7 +244,7 @@ def _communication_branch_nodes(
     state: EquiRecursiveStateKey,
     interrupt_root: int,
 ) -> tuple[int, ...]:
-    """把 angelic 子图根统一查看为零个或多个通信节点编号。"""
+    r"""View an angelic root as a sequence of communication node identifiers."""
 
     node = state.nodes[interrupt_root]
     if node.kind is RegularTypeNodeKind.NO_INTERRUPT:
@@ -290,7 +259,7 @@ def _communication_branch_nodes(
 
 
 def _offers_match(left: _CommunicationOffer, right: _CommunicationOffer) -> bool:
-    """判断两个 offer 是否同信道且输入输出方向互补。"""
+    r"""Match complementary input/output offers on the same channel."""
 
     return (
         left.channel == right.channel
@@ -302,7 +271,7 @@ def _ready_set(
     state: EquiRecursiveStateKey,
     interrupt_root: int,
 ) -> frozenset[ReadyAction]:
-    """直接从 angelic 子图计算 Table 3 ready set。"""
+    r"""Compute the Table 3 ready set from the angelic subgraph."""
 
     actions: set[ReadyAction] = set()
     for branch_id in _communication_branch_nodes(state, interrupt_root):
@@ -322,7 +291,7 @@ def _wait_profile(
     state: EquiRecursiveStateKey,
     root: int,
 ) -> _WaitProfile | None:
-    """返回项图根的剩余 deadline/ready set；不能等待时返回 ``None``。"""
+    r"""Return a root's deadline and ready set, or None if it cannot wait."""
 
     node = state.nodes[root]
     if node.kind is RegularTypeNodeKind.FINITE_DELAY:
@@ -343,11 +312,7 @@ def _derive_maximal_time_step(
     state: EquiRecursiveStateKey,
     presentation: _StatePresentation,
 ) -> DerivedTransition | None:
-    """在全部根可等待且无互补 ready 动作时生成唯一最大共同时间步。
-
-    至少一个有限 deadline 时取最小正值；全部为无限 delay 时生成 ``infinity``
-    自循环。存在零时延、内部选择、Bottom 或可立即同步的互补 ready 动作时不生成。
-    """
+    r"""Advance all waiting roots to the next deadline unless complementary actions are ready."""
 
     profiles: list[_WaitProfile] = []
     for root in state.component_roots:
@@ -432,7 +397,7 @@ def _replace_roots(
     state: EquiRecursiveStateKey,
     replacements: dict[int, int],
 ) -> EquiRecursiveStateKey:
-    """替换指定并行根并把目标项图重新裁剪、最小化。"""
+    r"""Replace selected parallel roots and minimize the resulting graph."""
 
     roots = tuple(
         replacements.get(index, root)
@@ -445,7 +410,7 @@ def _canonicalize_graph(
     roots: tuple[int, ...],
     nodes: tuple[CanonicalRegularTypeNode, ...],
 ) -> EquiRecursiveStateKey:
-    """删除不可达节点，建立普通项图，再复用统一双模拟最小化器。"""
+    r"""Remove unreachable nodes and apply common bisimulation minimization."""
 
     reachable: set[int] = set()
     pending = list(roots)
@@ -476,7 +441,7 @@ def _with_component(
     component_index: int,
     presentation: _StatePresentation,
 ) -> TransitionDerivation:
-    """把局部项图位置转换为规范配置及其选择分支的可见位置。"""
+    r"""Map local term-graph positions to visible configuration and branch positions."""
 
     visible_branches = derivation.branch_indices
     if derivation.rule is Table3Rule.INTERNAL_CHOICE:
@@ -499,7 +464,7 @@ def _with_component(
 def _deduplicate_derived(
     transitions: list[DerivedTransition],
 ) -> tuple[DerivedTransition, ...]:
-    """删除完全相同的规则实例，保留同边的不同推导证据。"""
+    r"""Deduplicate identical rule instances while retaining distinct edge derivations."""
 
     seen: set[DerivedTransition] = set()
     ordered: list[DerivedTransition] = []

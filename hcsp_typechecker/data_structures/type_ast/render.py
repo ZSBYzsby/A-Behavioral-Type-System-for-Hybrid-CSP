@@ -1,4 +1,4 @@
-"""把行为 Type AST 渲染为带缩进、可再次输入的规范 Type 语法。"""
+r"""Render behavioral Types as indented, round-trippable source syntax."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .ast import (
 
 
 def format_type_source(value: ConfigurationType) -> str:
-    """输出带 ``type`` 前缀和四空格缩进的完整源码。"""
+    r"""Render complete source with a type prefix and four-space indentation."""
 
     if not isinstance(value, ConfigurationType):
         raise TypeError("type source root must be a configuration type")
@@ -34,7 +34,7 @@ def format_type_source(value: ConfigurationType) -> str:
 
 
 def format_configuration_type(value: ConfigurationType) -> str:
-    """输出不带 ``type`` 前缀的缩进 configuration type 语法。"""
+    r"""Render a configuration type without the type prefix."""
 
     return _render_configuration_type(value, 0)
 
@@ -43,43 +43,43 @@ def _render_configuration_type(
     value: ConfigurationType,
     level: int,
 ) -> str:
-    """在指定缩进层级渲染 configuration type。"""
+    r"""Render a configuration at the requested indentation level."""
 
     return _render_iterative(value, level, "configuration")
 
 
 def format_process_type(value: ProcessType) -> str:
-    """输出缩进过程类型 ``T``；内部选择分支固定带圆括号。"""
+    r"""Render process syntax with explicitly parenthesized internal-choice branches."""
 
     return _render_process_type(value, 0)
 
 
 def _render_process_type(value: ProcessType, level: int) -> str:
-    """在指定缩进层级渲染过程类型 ``T``。"""
+    r"""Render a process type at the requested indentation level."""
 
     return _render_iterative(value, level, "process")
 
 
 def format_angelic_type(value: AngelicType) -> str:
-    """输出带缩进的中断类型 ``A`` 规范语法。"""
+    r"""Render canonical, indented angelic syntax."""
 
     return _render_angelic_type(value, 0)
 
 
 def _render_angelic_type(value: AngelicType, level: int) -> str:
-    """在指定缩进层级渲染中断类型 ``A``。"""
+    r"""Render an angelic type at the requested indentation level."""
 
     return _render_iterative(value, level, "angelic")
 
 
 def _render_parenthesized_process(value: ProcessType, level: int) -> str:
-    """给一个 internal 分支添加保持规则分块所需的圆括号。"""
+    r"""Parenthesize an internal branch to preserve rule grouping."""
 
     return _render_iterative(value, level, "parenthesized")
 
 
 def _parenthesize_rendered(rendered: str, level: int) -> str:
-    """给已经渲染的 internal 分支补上保持分组所需的圆括号。"""
+    r"""Add grouping parentheses to an already rendered internal branch."""
 
     lines = rendered.splitlines()
     indentation = _indent(level)
@@ -96,7 +96,7 @@ def _parenthesize_rendered(rendered: str, level: int) -> str:
 
 
 def _render_iterative(value: Any, level: int, mode: str) -> str:
-    """用显式后序工作栈渲染 Type，避免深 continuation 消耗调用栈。"""
+    r"""Render deep Types with an explicit postorder stack."""
 
     results: list[str] = []
     pending: list[tuple[Any, ...]] = [("visit", value, level, mode)]
@@ -244,7 +244,7 @@ def _render_iterative(value: Any, level: int, mode: str) -> str:
 
 
 def _render_block(name: str, entries: list[str], level: int) -> str:
-    """渲染以花括号包围、以逗号分隔的缩进列表。"""
+    r"""Render an indented, brace-enclosed, comma-separated block."""
 
     if not entries:
         return _line(level, f"{name} {{}}")
@@ -259,7 +259,7 @@ def _render_block(name: str, entries: list[str], level: int) -> str:
 
 
 def _append_document(left: str, separator: str, right: str) -> str:
-    """把右侧文档首行接到左侧末行，并保留后续缩进。"""
+    r"""Join adjacent documents while preserving continuation indentation."""
 
     left_lines = left.splitlines()
     right_lines = right.splitlines()
@@ -270,7 +270,7 @@ def _append_document(left: str, separator: str, right: str) -> str:
 
 
 def _prepend_to_first_line(prefix: str, rendered: str) -> str:
-    """把前缀放在文档首行现有缩进之后。"""
+    r"""Insert a prefix after the first line's indentation."""
 
     lines = rendered.splitlines()
     indentation = lines[0][: len(lines[0]) - len(lines[0].lstrip())]
@@ -279,26 +279,26 @@ def _prepend_to_first_line(prefix: str, rendered: str) -> str:
 
 
 def _indent_text(rendered: str, levels: int) -> str:
-    """给文档中的每一行增加指定层数的四空格缩进。"""
+    r"""Add four-space indentation levels to each line."""
 
     prefix = _indent(levels)
     return "\n".join(prefix + line for line in rendered.splitlines())
 
 
 def _line(level: int, value: str) -> str:
-    """构造带指定缩进的单行。"""
+    r"""Create one line at the requested indentation."""
 
     return _indent(level) + value
 
 
 def _indent(level: int) -> str:
-    """返回项目 Type 规范输出采用的四空格缩进。"""
+    r"""Return four-space indentation for Type source output."""
 
     return "    " * level
 
 
 def _format_duration(value: Fraction) -> str:
-    """把规范有理时延写成整数或最简分数。"""
+    r"""Render an exact rational duration as an integer or reduced fraction."""
 
     if value.denominator == 1:
         return str(value.numerator)

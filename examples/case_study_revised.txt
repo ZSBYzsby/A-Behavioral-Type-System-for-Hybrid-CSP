@@ -1,0 +1,188 @@
+Revised paper case study (Section 5): case_study_revised.py
+=========================================================
+
+Notation and parameters
+------------------------
+
+    end   >= 0
+    vmax  >= 0
+    amin  < 0
+    amax  >= 0
+    d     > 0    A concrete positive rational annotation for each derivation
+    sb    = vmax^2 / (-2*amin)
+
+The current position, velocity, and acceleration are p, v, and a.
+end, vmax, amin, and amax belong to a shared parameter environment separate
+from the state environment Gamma. Type derivation applies to all parameter
+valuations satisfying these constraints, with d fixed for each run.
+
+The predicted state after one control period d is:
+
+    p_d = p + v*d + a*d^2/2
+    v_d = v + a*d
+
+
+1. Position invariant phi_p
+---------------------------
+
+Definition:
+
+    phi_p(p) := p <= end
+
+This is the basic position-safety requirement: the vehicle must not cross
+the target position end. The original counterexample does not result from
+an incorrect definition of phi_p, so this condition is retained.
+
+
+2. Velocity invariant phi_v
+---------------------------
+
+Definition:
+
+    phi_v(p,v) :=
+
+        (p >= end and v <= 0)
+
+        or
+
+        (end-p >= sb and v <= vmax)
+
+        or
+
+        (0 < end-p < sb
+         and
+         (v <= 0 or v^2 <= (-2*amin)*(end-p)))
+
+phi_v constrains velocity according to the distance to the target:
+
+1. At or beyond the target, velocity must be nonpositive.
+2. Far from the target, velocity must not exceed vmax.
+3. Near the target, forward motion must satisfy the braking-distance bound:
+
+       v^2 <= (-2*amin)*(end-p)
+
+The last bound allows the vehicle to stop before the target if maximum
+braking a=amin is applied immediately. The original three-case definition
+is retained; the repair changes the acceleration prediction condition.
+
+In generated source, comparisons involving sb are multiplied by -2*amin,
+which is positive, to avoid division by the symbolic parameter amin.
+
+
+3. Strengthened acceleration invariant phi_a
+--------------------------------------------
+
+Using the predicted endpoint p_d and v_d defined above:
+
+    phi_a(p,v,a) :=
+
+        amin <= a <= amax
+
+        and phi_p(p_d)
+
+        and phi_v(p_d,v_d)
+
+        and
+
+        (a >= 0
+         or v <= 0
+         or v_d > 0
+         or v^2 <= -2*a*(end-p))
+
+The original phi_a checks velocity safety at time d. It can miss an unsafe
+intermediate position when a<0, v>0, and v_d<=0: the vehicle first moves
+forward, stops, then moves backward. Its endpoint may be safe even though
+its maximum forward position crosses end.
+
+The strengthened condition adds two checks.
+
+First, the endpoint must satisfy both position and velocity safety:
+
+    phi_p(p_d) and phi_v(p_d,v_d)
+
+This explicitly excludes an endpoint that has already crossed the target,
+even if its velocity satisfies phi_v.
+
+Second, the maximum forward position must be safe when a turning point
+occurs during the period. The relevant conditions are:
+
+    a < 0
+    v > 0
+    v_d <= 0
+
+The turning time lies in (0,d] and is:
+
+    t_turn = -v/a
+
+The position at that time is:
+
+    p_turn = p - v^2/(2*a)
+
+Because a<0, requiring p_turn <= end is equivalent to:
+
+    v^2 <= -2*a*(end-p)
+
+Thus the final conjunct:
+
+    a >= 0
+    or v <= 0
+    or v_d > 0
+    or v^2 <= -2*a*(end-p)
+
+requires the turning-point position check exactly when the relevant turning
+point exists. Otherwise, position safety follows from the initial and
+endpoint checks for this constant-acceleration trajectory.
+
+The repair retains phi_p and phi_v and strengthens phi_a to account for
+intermediate positions. The same parameterized invariant schema is used
+for every admissible end, vmax, amin, and amax at a given concrete d.
+
+
+4. Executable verification pipeline
+-----------------------------------
+
+case_study_revised.py builds the complete annotated HCSP vehicle/controller
+program from the revised paper version with these invariants and uses three
+public interfaces in sequence:
+
+1. construct_hcsp_type must return a trusted Type AST with all required
+   obligations verified.
+2. build_type_transition_graph must produce the complete reachable graph.
+3. analyze_type_lock_freedom must report both deadlock_free and livelock_free.
+
+Exit code 0 means all three stages completed and report.lock_free is true.
+Input errors, unverified candidates, failed construction or graph analysis,
+and lock counterexamples give exit code 1. The final success condition is
+lock freedom; error_free and behavior_correct are separate report fields.
+
+OUTPUT_MODE, GRAPH_OUTPUT_MODE, and LOCK_ANALYSIS_OUTPUT_MODE select the
+amount of displayed evidence. Set the relevant constant to "full" to inspect
+proof traces, all graph states and transitions, or lock witnesses.
+
+Each external proof has a 180-second per-call timeout. Prover configuration
+and retained .kyx/.kyp artifacts use these Git-ignored directories:
+
+    examples/tmp/general-case-keymaerax-home
+    examples/tmp/general-case-keymaerax-artifacts
+
+
+5. Running the case
+-------------------
+
+Install dependencies as described in README.md, and configure KeYmaera X
+using document/ENVIRONMENT_SETUP.md. From the repository root, run:
+
+    python examples/case_study_revised.py --d 1
+
+The default period is 1. A positive rational such as 3/2 is also accepted:
+
+    python examples/case_study_revised.py --d 3/2
+
+On Windows, use the virtual environment's interpreter if it is not activated:
+
+    .\.venv\Scripts\python.exe examples/case_study_revised.py --d 1
+
+The --d argument fixes only the period; the four physical parameters remain
+symbolic. The script requires working ODE proofs before graph construction
+and lock analysis can proceed. See examples/case_study_original.txt for the original
+endpoint-only condition and its mathematical counterexample.

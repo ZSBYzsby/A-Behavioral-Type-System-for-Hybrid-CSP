@@ -1,1 +1,1 @@
-"""公共输入/输出数据模型测试包。"""
+r"""Regression tests for model."""

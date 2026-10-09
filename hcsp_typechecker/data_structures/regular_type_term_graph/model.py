@@ -1,10 +1,4 @@
-r"""等递归正规树使用的有限循环 Type 项图数据结构。
-
-``RegularTypeTermGraph`` 仍保留构造阶段的结点编号；后端完成双模拟最小化和
-稳定重编号后生成 ``EquiRecursiveStateKey``。两种图都只包含实际 Type 构造，
-``mu`` 与受绑定变量通过有向环表示，不占用独立结点。最小化项图既用于状态判重，
-也是 Table 3 操作语义实际读取和改写的状态本体。
-"""
+r"""Finite term-graph representations of equi-recursive regular trees."""
 
 from __future__ import annotations
 
@@ -17,7 +11,7 @@ from ...identifiers import is_hcsp_identifier
 
 
 class RegularTypeNodeKind(str, Enum):
-    """正规 Type 项图中可观察的过程或 angelic 构造种类。"""
+    r"""Observable process and angelic constructors in a regular Type graph."""
 
     EMPTY = "empty"
     BOTTOM = "bottom"
@@ -38,7 +32,7 @@ def _validate_node(
     payload: RegularTypePayload,
     children: tuple[int, ...],
 ) -> None:
-    """验证一个普通或规范项图结点的标签、载荷和子边元数。"""
+    r"""Validate node labels, payloads, and child-edge arity."""
 
     if not isinstance(kind, RegularTypeNodeKind):
         raise TypeError("Regular type node kind must be RegularTypeNodeKind")
@@ -89,14 +83,14 @@ def _validate_node(
 
 @dataclass(frozen=True, slots=True)
 class RegularTypeNode:
-    """最小化前有限循环 Type 项图中的一个带编号子边结点。"""
+    r"""A pre-minimization cyclic Type node with numbered child edges."""
 
     kind: RegularTypeNodeKind
     payload: RegularTypePayload = None
     children: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        """冻结子边并验证结点产生式。"""
+        r"""Freeze child edges and validate the node constructor."""
 
         object.__setattr__(self, "children", tuple(self.children))
         _validate_node(self.kind, self.payload, self.children)
@@ -104,14 +98,14 @@ class RegularTypeNode:
 
 @dataclass(frozen=True, slots=True)
 class CanonicalRegularTypeNode:
-    """双模拟最小化后、使用稳定类别编号的一项正规 Type 结点。"""
+    r"""A bisimulation-minimized Type node with stable class identifiers."""
 
     kind: RegularTypeNodeKind
     payload: RegularTypePayload = None
     children: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        """冻结子边并验证规范结点产生式。"""
+        r"""Freeze child edges and validate the canonical constructor."""
 
         object.__setattr__(self, "children", tuple(self.children))
         _validate_node(self.kind, self.payload, self.children)
@@ -121,7 +115,7 @@ def _validate_graph(
     component_roots: tuple[int, ...],
     nodes: tuple[RegularTypeNode | CanonicalRegularTypeNode, ...],
 ) -> None:
-    """验证根、结点编号、引用范围和从配置根出发的可达性。"""
+    r"""Validate roots, identifiers, references, and root reachability."""
 
     if not component_roots:
         raise ValueError("Regular type term graph requires a configuration root")
@@ -157,7 +151,7 @@ def _validate_node_sorts(
     component_roots: tuple[int, ...],
     nodes: tuple[RegularTypeNode | CanonicalRegularTypeNode, ...],
 ) -> None:
-    """验证过程根与 angelic 子边符合 Type 项图的双类别产生式。"""
+    r"""Check process/angelic sorts of roots and child edges."""
 
     process_kinds = {
         RegularTypeNodeKind.EMPTY,
@@ -205,13 +199,13 @@ def _validate_node_sorts(
 
 @dataclass(frozen=True, slots=True)
 class RegularTypeTermGraph:
-    """从规范 Type 构造出的有限循环项图，保留并行分量重数。"""
+    r"""A finite cyclic Type graph preserving parallel multiplicity."""
 
     component_roots: tuple[int, ...]
     nodes: tuple[RegularTypeNode, ...]
 
     def __post_init__(self) -> None:
-        """冻结配置根和结点表并验证图内部引用。"""
+        r"""Freeze roots and nodes, then validate references."""
 
         object.__setattr__(self, "component_roots", tuple(self.component_roots))
         object.__setattr__(self, "nodes", tuple(self.nodes))
@@ -222,13 +216,13 @@ class RegularTypeTermGraph:
 
 @dataclass(frozen=True, slots=True)
 class EquiRecursiveStateKey:
-    """正规树等价类的可哈希规范编码，也是 Table 3 的项图状态。"""
+    r"""A hashable canonical regular-tree class used as a Table 3 state."""
 
     component_roots: tuple[int, ...]
     nodes: tuple[CanonicalRegularTypeNode, ...]
 
     def __post_init__(self) -> None:
-        """冻结最小项图并验证稳定编号引用。"""
+        r"""Freeze the minimized graph and validate stable identifiers."""
 
         object.__setattr__(self, "component_roots", tuple(self.component_roots))
         object.__setattr__(self, "nodes", tuple(self.nodes))

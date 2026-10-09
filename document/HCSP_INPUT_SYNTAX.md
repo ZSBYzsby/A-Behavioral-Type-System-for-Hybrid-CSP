@@ -1,14 +1,15 @@
-# HCSP Process 与表达式输入语法参考
+# HCSP Process and expression input syntax
 
-本文档定义完整用户输入中 `process` 部分使用的 HCSP 系统、语句和表达式子语法，
-以及这些片段如何转换为项目已有的 Process AST 和 `Expr` AST。包含 Gamma、Theta
-和 Process 的唯一完整 `source` 根语法见
-[`GAMMA_THETA_INPUT_SYNTAX.md`](GAMMA_THETA_INPUT_SYNTAX.md)。
+This page defines the HCSP system, statement, and expression subgrammars in a
+complete source's `process` section, and their lowering to the existing Process
+and `Expr` ASTs. [GAMMA_THETA_INPUT_SYNTAX.md](GAMMA_THETA_INPUT_SYNTAX.md)
+defines the complete `source` grammar, including Gamma, Theta, and Process.
 
-本文件中的 Process/Expr 子语法已经由内部输入层实现，且不会改变项目中 Python
-AST 节点的语义。普通用户不单独调用片段解析器，而是把本语法放在完整 source 的
-`process` 分节中。没有 `type` 分节时调用 `construct_hcsp_type(...)`；需要检查
-用户给定类型时追加 `type` 分节并调用 `check_hcsp_type(...)`。下面先展示构造入口：
+The internal input layer implements these subgrammars without changing Python
+AST node semantics. Users place them in complete source rather than calling
+fragment parsers. Call `construct_hcsp_type(...)` without a `type` section, or
+append `type` and call `check_hcsp_type(...)` to check a supplied Type.
+A construction example follows:
 
 ```python
 from hcsp_typechecker import construct_hcsp_type
@@ -22,26 +23,26 @@ process {{ch?(x); out!(x)}}
 type_ast = construct_hcsp_type(source, source_name="example.hcsp")
 ```
 
-解析失败会抛出 `HCSPInputError`，错误信息包含词法或语法阶段、源文件名、行列位置
-和源码指示符。`parse_annotated_hcsp(...)`、`parse_annotated_expression(...)` 和直接 AST 构造器仍保留
-给实现、测试与语法审计，但属于内部开发接口，不从包根导出，也不承诺兼容性。
-手工修改完整 Gamma、Theta、Process 输入并查看最终 Type AST 时，
-在仓库根目录编辑并运行 `python demo.py`。
+Parsing failures raise `HCSPInputError` with the lexical/syntax phase, source name,
+line, column, and source indicator. `parse_annotated_hcsp(...)`,
+`parse_annotated_expression(...)`, and direct AST constructors remain internal
+interfaces for implementation, testing, and review; they have no package-root
+compatibility guarantee. To edit complete Gamma/Theta/Process examples and inspect
+their Types, run `python examples/demo_type_construction.py` from the repository root.
 
-## 1. 总体约定
+## 1. General conventions
 
-- 一个 `process_system` 由一个或多个非空语句块组成。
-- `process_system` 中只有一个语句块时，该语句块就是整个顺序进程。
-- `process_system` 中有多个语句块时，这些语句块互相并行。
-- 同一语句块中的语句使用 `;` 连接，表示顺序组合。
-- 最后一条语句后不写 `;`。
-- `{...}` 只用于整个系统和可执行语句块。
-- `(...)` 用于参数、条件、批注以及 ODE 的具名配置。
-- `,` 用于分隔并行进程、通信参数、函数参数、ODE 方程和 ODE 中断分支。
-- 空白和换行本身没有语义。
-- 支持 `//` 单行注释和非嵌套的 `/* ... */` 块注释。
+- A `process_system` contains one or more nonempty statement blocks.
+- One block represents a sequential process; multiple blocks run in parallel.
+- Within a block, `;` denotes sequential composition, without a trailing semicolon.
+- `{...}` encloses the system and executable statement blocks.
+- `(...)` encloses arguments, conditions, annotations, and named ODE configuration.
+- `,` separates parallel processes, communication and function arguments, ODE
+  equations, and interrupt branches.
+- Whitespace and line breaks have no semantics.
+- Comments use `//` for a line or non-nested `/* ... */` blocks.
 
-## 2. Process 语法
+## 2. Process grammar
 
 ```ebnf
 process_source
@@ -247,11 +248,15 @@ rational_primary_expression
       | "(" rational_constant_expression ")"
 ```
 
-有限时延表达式不允许变量、函数、布尔运算、比较、取模或 `inf`。其最终结果必须非负；除数必须非零；乘方指数必须是整数。`inf` 只能通过 `duration` 的独立分支用于普通 ODE 的 `delay`。
+Finite-duration expressions exclude variables, functions, Boolean operations,
+comparisons, modulo, and `inf`. Their value must be nonnegative, divisors nonzero,
+and power exponents integers. Only the separate `duration` alternative allows
+`inf` for an ordinary ODE's `delay`.
 
-## 3. 表达式语法
+## 3. Expression grammar
 
-Process 语法中出现的每个 `expr` 都使用本节定义的统一表达式语法。语法层不分别定义数值表达式和布尔公式；表达式的实际类型由后续类型检查判断。
+Every Process `expr` uses this grammar. Numeric expressions and Boolean formulas
+share syntax; subsequent type checking determines their actual types.
 
 ```ebnf
 expr
@@ -408,13 +413,14 @@ decimal_digits
         { DIGIT }
 ```
 
-`true` 和 `false` 不区分大小写。规范打印统一使用小写形式。
+`true` and `false` are case-insensitive; canonical output uses lowercase.
 
-为避免恶意或误写的巨大字面量在精确有理数转换时耗尽内存，实现额外限制单个
-数值最多含 4096 位有效数字，十进制指数绝对值不超过 10000。超出限制会产生
-带源码位置的 lexical 诊断，不会泄漏宿主 Python 数值异常。
+To bound memory use during exact rational conversion, a numeric literal may have
+at most 4096 significant digits and a decimal exponent of absolute value at most
+10000. Exceeding these bounds gives a source-located lexical diagnostic rather
+than exposing a host Python numeric exception.
 
-## 4. 标识符和保留字
+## 4. Identifiers and reserved words
 
 ```ebnf
 IDENT
@@ -422,15 +428,16 @@ IDENT
         { ASCII_LETTER | DIGIT | "_" }
 ```
 
-等价的正则表达式是：
+The equivalent regular expression is:
 
 ```text
 [A-Za-z_][A-Za-z0-9_]*
 ```
 
-状态变量、通道名、进程变量和函数名使用同一条词法规则，并区分大小写。HCSP 关键字和表达式关键字不能作为标识符。
+State variables, channels, Process variables, and functions use the same
+case-sensitive lexical rule. HCSP and expression keywords cannot be identifiers.
 
-当前保留字包括：
+Current reserved words include:
 
 ```text
 skip assert call if else choose or mu invariant
@@ -439,37 +446,43 @@ true false inf not and
 None
 ```
 
-完整 source 还保留环境分节和环境类型所需的下列名称：
+Complete source also reserves these environment-section and type names:
 
 ```text
 gamma parameters theta process continuous channel where
 Bool Nat Int Rational Real
 ```
 
-这些名称属于完整输入层，不能再作为 Process 中的普通 IDENT。公共入口
-`construct_hcsp_type(...)` 所调用的完整解析流程与内部片段解析器共享同一份
-保留字表，因此不会在不同解析路径把同一源码名称解释成不同 token。
+Type-section keywords are also reserved across complete and fragment inputs:
 
-其中 `None` 是“保留但非法”的词，只用于给出明确的“不支持空值”诊断；它不属于
-任何字面量产生式。小写 `none` 仍可作为普通、区分大小写的标识符。
+```text
+type empty bottom internal forever angelic then parallel
+```
 
-## 5. 运算符优先级和结合性
+These names cannot be ordinary Process IDENTs. Complete-source parsing for
+`construct_hcsp_type(...)` and internal fragment parsing share the reserved-word
+table, so names have the same token interpretation across parsing paths.
 
-从高到低：
+`None` is reserved but invalid, enabling an explicit unsupported-null diagnostic;
+it is not a literal production. Lowercase `none` remains an ordinary case-sensitive identifier.
 
-| 优先级 | 形式 | 结合性 |
+## 5. Operator precedence and associativity
+
+From highest to lowest:
+
+| Precedence | Form | Associativity |
 |---|---|---|
-| 1 | 圆括号、函数调用 | — |
-| 2 | `**`、`^` | 右结合 |
-| 3 | 一元 `+`、一元 `-` | 右结合 |
-| 4 | `*`、`/`、`%` | 左结合 |
-| 5 | `+`、`-` | 左结合 |
-| 6 | `==`、`!=`、`<`、`<=`、`>`、`>=`、`<->` | 链式比较 |
-| 7 | `not`、`!` | 右结合 |
-| 8 | `and`、`&&` | 左到右收集为同一个多元结点 |
-| 9 | `or`、`||` | 左到右收集为同一个多元结点 |
+| 1 | Parentheses, function calls | — |
+| 2 | `**`, `^` | Right |
+| 3 | Unary `+`, unary `-` | Right |
+| 4 | `*`, `/`, `%` | Left |
+| 5 | `+`, `-` | Left |
+| 6 | `==`, `!=`, `<`, `<=`, `>`, `>=`, `<->` | Chained comparison |
+| 7 | `not`, `!` | Right |
+| 8 | `and`, `&&` | Collected left-to-right into one n-ary node |
+| 9 | `or`, `||` | Collected left-to-right into one n-ary node |
 
-例如：
+For example:
 
 ```text
 -x ** 2       = -(x ** 2)
@@ -479,21 +492,21 @@ not x < y     = not (x < y)
 a or b and c  = a or (b and c)
 ```
 
-链式比较保存在一个 `CompareExpr` 中：
+Chained comparisons are stored in one `CompareExpr`:
 
 ```text
 0 <= x < limit
 ```
 
-表示逐段关系的合取：
+They represent the conjunction of successive relations:
 
 ```text
 0 <= x and x < limit
 ```
 
-## 6. Process 输入的语义约定
+## 6. Process input semantics
 
-### 6.1 顶层并行
+### 6.1 Top-level parallelism
 
 ```text
 lower_source({P}) = P
@@ -502,90 +515,93 @@ lower_source({P1, ..., Pn})
     = Parallel.of(P1, ..., Pn), n >= 2
 ```
 
-外层列表是非空、有序列表，不是数学集合；不进行去重，并保留用户书写顺序。
+The outer list is nonempty and ordered, not a mathematical set. It preserves
+source order and duplicate components.
 
-### 6.2 顺序组合
+### 6.2 Sequential composition
 
 ```text
 lower_block({P1; ...; Pn})
     = Sequence.of(P1, ..., Pn)
 ```
 
-对于 `if`、内部选择和 ODE，块中位于控制节点之后的语句是它的公共后继。
-解析器必须把该后继直接写入相应节点的 `continuation` 字段，不能再包一层普通
-`Sequence`。因此这些控制节点只会位于各自顺序主干的末端；它们内部的 Q 仍按
-Table 2 继续执行。
+For `if`, internal choice, and ODE, subsequent block statements are the control
+node's common continuation. The parser places them directly in its `continuation`
+field rather than wrapping the control node in `Sequence`. Such nodes therefore
+end their sequence spine; their internal Q still executes under Table 2.
 
-### 6.3 通信
+### 6.3 Communication
 
-- `ch?(x1, ..., xn)` 接收一个或多个独立标量。
-- `ch!(e1, ..., en)` 发送一个或多个独立标量表达式。
-- 输入变量必须互不相同。
-- 参数列表不能为空，不支持 unit 通信。
-- 多个参数不构成 tuple 值。
+- `ch?(x1, ..., xn)` receives one or more independent scalars.
+- `ch!(e1, ..., en)` sends one or more scalar expressions.
+- Input targets are distinct.
+- Argument lists are nonempty; unit communication is unsupported.
+- Multiple arguments do not form a tuple value.
 
-### 6.4 递归
+### 6.4 Recursion
 
-- `mu X invariant(phi) { ... }` 必须显式提供递归不变量。
-- 无非平凡不变量时写 `invariant(true)`。
-- `call X` 构造进程变量引用 `Var("X")`。
-- 递归作用域、通信守卫、尾位置及 Assumption 2.1/2.2 由 AST 构造和
-  TypeConstructor 阶段继续验证。
+- `mu X invariant(phi) { ... }` requires an explicit invariant.
+- Use `invariant(true)` when no nontrivial invariant is needed.
+- `call X` constructs `Var("X")`.
+- AST construction and TypeConstructor further check recursion scope,
+  communication guarding, tail position, and Assumptions 2.1/2.2.
 
 ### 6.5 ODE
 
-- `flow(...)`、`domain(...)` 和 `delay(...)` 必须出现。
-- `safety(...)` 可以省略；省略时自动补为 `true`。
-- `interrupt(...)` 可以省略；省略时构造 `EmptyEvent()`，表示连续演化过程中没有通信中断。
-- 只要写出 `interrupt(...)`，其中就必须至少有一个事件分支；不接受 `interrupt()`。
-- `flow()` 合法，表示没有用户声明的连续变量方程。
-- ODE 方程左端写成 `dot x`，例如 `dot x = v`。
-- 同一个 `flow` 中的方程左端必须互不相同。
-- 每个 ODE 自动建立隐藏局部时钟 `t`，初值为 `0`，导数为 `1`。
-- `t` 可以用于方程右端、`domain` 和 `safety`，但不能写在用户方程左端。
-- 隐式时钟不计入用户连续变量向量，也不进入中断分支或 ODE 外部后继的作用域。
-- 有限 `delay` 必须求值为非负有理数；普通 ODE 还允许 `delay(inf)`。
-- 不支持 `wait(d)` 语法糖。若要表示在 `d` 时自然结束的有限等待，应显式写
-  `ode(flow(), domain(t < d), delay(d)); skip`。
-- 每个 ODE 后都必须显式存在顺序语句；没有实际后继时也要写 `; skip`。裸 ODE
-  结束语句块会在输入前端报错。
-- 前端把 `ODE; Q` 规范为 `ODE(..., continuation=Q)`；不会生成
-  `Sequence(ODE(...), Q)`。
-- `ODE; skip` 同时试用两种解释：`skip` 可作为 `T-\unrhd` 的无后继占位，
-  也可作为 `T-\unrhd'` 的真实空后继；Constructor 根据 domain/boundary 的
-  证明结果选择。`ODE; P` 且 `P` 非 skip 时只使用 prime 规则。
+- `flow(...)`, `domain(...)`, and `delay(...)` are required.
+- Omitted `safety(...)` defaults to `true`.
+- Omitted `interrupt(...)` produces `EmptyEvent()`, meaning no communication interrupts.
+- An explicit interrupt contains at least one branch; `interrupt()` is invalid.
+- `flow()` is valid and declares no user continuous-variable equations.
+- Left-hand sides use `dot x`, for example `dot x = v`, and are distinct within a flow.
+- Every ODE adds a hidden local clock `t` initialized to `0` with derivative `1`.
+- `t` may occur in right-hand sides, `domain`, and `safety`, but not in user left-hand sides.
+- The clock is outside the user evolution vector and is not scoped into interrupt
+  branches or the ODE's external continuation.
+- Finite delays evaluate to nonnegative rationals; ordinary ODEs also allow `delay(inf)`.
+- `wait(d)` is unsupported. A finite wait that naturally ends at `d` uses
+  `ode(flow(), domain(t < d), delay(d)); skip`.
+- Every ODE requires an explicit following statement, including `; skip` when
+  there is no substantive continuation. A bare ODE ending a block is an input error.
+- `ODE; Q` lowers to `ODE(..., continuation=Q)`, not `Sequence(ODE(...), Q)`.
+- `ODE; skip` tries both `T-\unrhd`, treating skip as an unreachable-continuation
+  placeholder, and `T-\unrhd'`, treating it as a real empty continuation.
+  Domain/boundary proofs select a candidate. `ODE; P` for non-skip `P` uses only the prime rule.
 
-## 7. Expr AST 对应关系
+## 7. Expr AST mapping
 
-| 输入形式 | AST 结点 |
+| Input form | AST node |
 |---|---|
-| 布尔、整数、实数字面量 | `Literal` |
+| Boolean, integer, real literals | `Literal` |
 | `x` | `Variable` |
-| `not e`、`!e`、`+e`、`-e` | `UnaryExpr` |
-| `+`、`-`、`*`、`/`、`%` | `BinaryExpr` |
-| `**`、`^` | `BinaryExpr("**", ...)` |
-| `and`、`&&`、`or`、`||` | `BooleanExpr` |
-| 单个或链式比较 | `CompareExpr` |
+| `not e`, `!e`, `+e`, `-e` | `UnaryExpr` |
+| `+`, `-`, `*`, `/`, `%` | `BinaryExpr` |
+| `**`, `^` | `BinaryExpr("**", ...)` |
+| `and`, `&&`, `or`, `||` | `BooleanExpr` |
+| Single or chained comparison | `CompareExpr` |
 | `f(e1, ..., en)` | `CallExpr` |
 
-表达式语法本身不执行类型检查。例如，解析器能够构造 `1 and 2` 的表达式树，但后续类型检查必须因为 `and` 的操作数不是 Bool 而拒绝它。
+Parsing does not perform type checking. For example, `1 and 2` produces an
+expression tree, but subsequent checking rejects non-Bool operands of `and`.
 
-函数调用在解析阶段允许任意普通函数名和任意数量的位置参数。后续证明后端只对部分函数具有专门语义；不能翻译的函数形式应在表达式静态类型检查或证明阶段产生明确诊断。
+Parsing permits ordinary function names with any number of positional arguments.
+The proof backend gives specific semantics to only some functions; unsupported
+forms produce explicit expression-typing or proof diagnostics.
 
-## 8. 明确不支持的表达式
+## 8. Unsupported expressions
 
-- 表达式级条件：`a if B else b`；
-- 属性访问和方法调用：`plant.temperature`、`obj.f(x)`；
-- 下标、切片和动态调用：`array[i]`、`functions[i](x)`；
-- lambda、生成器和各种推导式；
-- tuple、list、dict 和 set 值；
-- 字符串、bytes、复数、`None` 和省略号字面量；
-- 关键字参数、`*args` 和 `**kwargs`；
-- `//`、`@`、`<<`、`>>`、`&`、`|` 等未定义运算；
-- `in`、`not in`、`is`、`is not`；
-- 表达式内部赋值、海象运算和解构左值。
+- Conditional expressions: `a if B else b`.
+- Attribute access and methods: `plant.temperature`, `obj.f(x)`.
+- Indexing, slicing, and dynamic calls: `array[i]`, `functions[i](x)`.
+- Lambdas, generators, and comprehensions.
+- Tuple, list, dictionary, and set values.
+- String, bytes, complex, `None`, and ellipsis literals.
+- Keyword arguments, `*args`, and `**kwargs`.
+- Undefined operators such as `//`, `@`, `<<`, `>>`, `&`, and `|`.
+- `in`, `not in`, `is`, and `is not`.
+- Assignment expressions, the walrus operator, and destructuring targets.
 
-## 9. Process 片段示例
+## 9. Process fragment examples
 
 ```hcsp
 {
@@ -622,9 +638,9 @@ Table 2 继续执行。
 }
 ```
 
-## 10. 公共完整入口与内部兼容边界
+## 10. Complete-source interface and internal compatibility boundaries
 
-普通用户完整的 TypeConstructor 入口是：
+The complete public construction entry point is:
 
 ```python
 from hcsp_typechecker import construct_hcsp_type
@@ -632,17 +648,17 @@ from hcsp_typechecker import construct_hcsp_type
 type_ast = construct_hcsp_type(
     complete_source,
     source_name="example.hcsp",
-    output="none",  # 也可为 "result" 或 "full"
+    output="none",  # Also accepts "result" or "full".
 )
 ```
 
-它解析 `GAMMA_THETA_INPUT_SYNTAX.md` 规定的 `constructor_source`，在内部构造
-参数、Gamma、Theta 和 Process AST，随后进行类型构造与公式证明。若追加 `type`
-分节，则调用 `check_hcsp_type(...)` 递归检查用户 Type；详见
-[TYPE_CHECKER.md](TYPE_CHECKER.md)。两个接口的输出和异常协议集中记录在
-[README](../README.md#稳定用户接口)，本语法文档不重复维护。
+It parses `constructor_source` from `GAMMA_THETA_INPUT_SYNTAX.md`, creates internal
+parameters, Gamma, Theta, and Process ASTs, then constructs and proves the Type.
+For an appended `type` section, call `check_hcsp_type(...)` to check the supplied
+Type; see [TYPE_CHECKER.md](TYPE_CHECKER.md). Output and exception contracts are
+centralized in the [Public API guide](PUBLIC_API_GUIDE.md).
 
-以下入口只属于内部开发与审计层：
+These entry points belong to internal development and review:
 
 ```python
 from hcsp_typechecker.frontend.annotated_hcsp_syntax import (
@@ -652,18 +668,21 @@ from hcsp_typechecker.frontend.annotated_hcsp_syntax import (
 from hcsp_typechecker.frontend.type_constructor_frontend import parse_hcsp_source
 ```
 
-- `parse_annotated_hcsp(...)` 解析一个非空 `process_system` 片段并 lower 为 Process/Parallel AST；
-- `parse_annotated_expression(...)` 使用第 3 节的严格表达式文法构造 `Expr`；
-- `parse_hcsp_source(...)` 是公共门面内部共用的 program prefix 解析实现，返回内部
-  `ParsedHCSPSource`；
-- `parse_expr(...)` 是 Process 表达式节点的旧便捷构造入口。
+- `parse_annotated_hcsp(...)` parses a nonempty `process_system` fragment and lowers
+  it to a Process/Parallel AST.
+- `parse_annotated_expression(...)` builds `Expr` using Section 3's strict grammar.
+- `parse_hcsp_source(...)` is the facade's shared program-prefix parser, returning
+  internal `ParsedHCSPSource`.
+- `parse_expr(...)` is the legacy convenience constructor for Process expressions.
 
-这些名称不从包根公开，其签名和返回记录均不属于用户兼容性承诺。它们共享以下
-实现边界：只接受 ASCII `IDENT` 和本文档列出的十进制数值；`^` 与 `**` 都按
-高优先级、右结合乘方解析并保存为 `BinaryExpr("**", ...)`；函数实参允许空表和
-尾逗号，通信参数和顶层块列表不允许尾逗号；`&&`、`||`、`!`、`<->` 和大小写
-不敏感的布尔字面量都规范化为对应 Expr 节点。
+Their signatures and records are outside the public compatibility contract.
+They accept ASCII IDENTs and the decimal numbers listed here. `^` and `**` parse
+as high-precedence right-associative power, stored as `BinaryExpr("**", ...)`.
+Function arguments allow an empty list and trailing comma; communication arguments
+and top-level blocks do not allow trailing commas. `&&`, `||`, `!`, `<->`, and
+case-insensitive Boolean literals normalize to the corresponding Expr nodes.
 
-内部 `parse_expr(...)` 还保留部分旧 Python 数值字面量便利输入，但与严格前端
-共享 ASCII IDENT 边界，并在 Python 建树前把 `^` token 改写成真正的 `**`，
-不会继承异或优先级、左结合性或 Python 的 Unicode/NFKC 标识符扩展。
+Internal `parse_expr(...)` additionally accepts some legacy Python numeric literal
+forms. It shares the ASCII IDENT restriction and rewrites `^` tokens to actual
+`**` before Python parsing, avoiding XOR precedence, left associativity, and
+Python's Unicode/NFKC identifier extensions.

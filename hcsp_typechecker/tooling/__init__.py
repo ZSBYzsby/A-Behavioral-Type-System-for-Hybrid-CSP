@@ -1,1 +1,1 @@
-"""命令行环境诊断等辅助工具。"""
+r"""Command-line environment diagnostics and support tooling."""

@@ -1,32 +1,22 @@
-r"""用多个并行 Type AST 演示 Table 3 状态迁移图构造器。
+r"""Build Table 3 transition graphs for parallel, recursive, and timed types.
 
-本脚本刻意从 Type AST 开始，而不先解析 HCSP 或调用 TypeConstructor。这样用户
-可以直接比较：
-
-1. Python 中手工构造的原始 Type AST；
-2. 图接口打印的规范化 Type 状态；
-3. Table 3 产生的全部 ``tau``、通信和最大共同时间迁移；
-4. 每条边附带的规则及分量/分支证据。
-
-三个例子分别覆盖：多个相同通信伙伴的非确定性配对、递归协议与 watchdog 的
-并发竞争、内部选择与不同 deadline 的组合。运行方式：
-
-    python -B graph_demo.py
-
-``GRAPH_OUTPUT_MODE="full"`` 会打印完整图；改成 ``"result"`` 时只打印图规模
-和初始规范 Type。这里导入具体 Type AST 节点是为了演示内部数据结构；普通用户
-取得 Type AST 后只需调用包根的 ``build_type_transition_graph``。
-
-本脚本不解析 HCSP，也不调用 TypeConstructor/TypeChecker，因此不会产生这两套
-业务的结构化异常；第三个接口用自身的 ``HCSPTypeTransitionGraphError`` 报告
-Type 规范化和图规模错误，且不会返回部分图。
+From the repository root: python examples/demo_type_transition_graph.py
+Requires Python/Z3. Exit code 0 means all three graphs were built completely.
+The examples illustrate graph rules and can contain lock counterexamples.
+The fixtures use internal AST constructors to exercise those rules directly.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
+from pathlib import Path
 import sys
+
+# Resolve the checkout package when this file is run directly.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from hcsp_typechecker import (
     HCSPTypeTransitionGraphError,
@@ -49,13 +39,13 @@ from hcsp_typechecker.data_structures.type_ast import (
 )
 
 
-# 可设为 "result" 或 "full"；只改变图的显示详细程度。
+# Use "result" or "full" to select graph display verbosity.
 GRAPH_OUTPUT_MODE = "full"
 
 
 @dataclass(frozen=True, slots=True)
 class GraphExample:
-    """一份可直接交给图构造器的命名 Type AST 示例。"""
+    r"""A named Type AST example ready for graph construction."""
 
     title: str
     purpose: str
@@ -63,7 +53,7 @@ class GraphExample:
 
 
 def _racing_clients_example() -> GraphExample:
-    """构造一个递归服务器与两个同构客户端竞争同步的并行类型。"""
+    r"""Model a recursive server competing to synchronize with two identical clients."""
 
     server = MuType(
         "server_loop",
@@ -73,18 +63,16 @@ def _racing_clients_example() -> GraphExample:
     )
     client = InfiniteDelayType(OutputType("request", EmptyType()))
     return GraphExample(
-        "1. 递归服务器与两个竞争客户端",
+        '1. Recursive server with two competing clients',
         (
-            "服务器可与任意客户端在 request 上同步；两个客户端结构相同，"
-            "所以两种配对到达同一图边，但边中必须保留两份推导证据。服务端的 "
-            "mu 折叠态与一次展开态按同一棵等递归正规树合并，最终只产生三个状态。"
+            'Either client can synchronize with the server on request. Identical clients produce the same edge with two derivations. Equi-recursive states merge the folded server and its unfolding, yielding three states.'
         ),
         ParallelType((server, client, client)),
     )
 
 
 def _watchdog_protocol_example() -> GraphExample:
-    """构造请求/应答协议与可抢先停止服务器的 watchdog 并行类型。"""
+    r"""Model a request/reply protocol with a watchdog that can stop the server."""
 
     server = MuType(
         "server_loop",
@@ -121,18 +109,16 @@ def _watchdog_protocol_example() -> GraphExample:
         EmptyType(),
     )
     return GraphExample(
-        "2. 请求/应答服务器、客户端与 watchdog",
+        '2. Request/reply server, client, and watchdog',
         (
-            "初态既可执行 request 同步，也可执行 stop 同步；request 分支随后"
-            "经历 watchdog 的 1 单位 deadline、服务器的第 2 单位 deadline、"
-            "reply 同步并回到递归服务器。"
+            'The initial state permits request or stop synchronization. After request, two time steps of duration 1 reach the watchdog deadline at elapsed time 1 and the server deadline at elapsed time 2, followed by reply synchronization and the recursive server.'
         ),
         ParallelType((server, client, watchdog)),
     )
 
 
 def _choice_and_deadlines_example() -> GraphExample:
-    """构造带三元内部选择、不同 deadline 和空并行单位元的类型。"""
+    r"""Combine three internal choices, distinct deadlines, and an Empty parallel component."""
 
     worker = InternalChoiceType(
         (
@@ -151,18 +137,16 @@ def _choice_and_deadlines_example() -> GraphExample:
     )
     observer = InfiniteDelayType(InputType("done", EmptyType()))
     return GraphExample(
-        "3. 内部选择、错开 deadline 与 Empty 并行单位元",
+        '3. Internal choice, staggered deadlines, and the Empty parallel identity',
         (
-            "worker 首先非确定性选择三种行为；其中一支在 1 单位后与 observer "
-            "完成 done 同步，另一支等待 3 单位，最后一支永久等待。显式 Empty "
-            "分量应在规范化时消失且不阻塞其他分量时间推进。"
+            'The worker chooses among three behaviors: synchronize on done after time 1, wait until time 3, or wait forever. Normalization removes the Empty component without blocking time progress.'
         ),
         ParallelType((worker, observer, EmptyType())),
     )
 
 
 def build_examples() -> tuple[GraphExample, ...]:
-    """返回按演示顺序排列、彼此独立的全部并行 Type AST 示例。"""
+    r"""Return independent Type AST examples in display order."""
 
     return (
         _racing_clients_example(),
@@ -172,47 +156,46 @@ def build_examples() -> tuple[GraphExample, ...]:
 
 
 def _run_example(example: GraphExample) -> None:
-    """打印一个原始 Type AST 及其完整可达图。"""
+    r"""Display a Type AST and its complete reachable graph."""
 
     print("\n" + "=" * 76)
     print(example.title)
     print(example.purpose)
     print("-" * 76)
-    print("输入 Type AST 的用户语法：")
+    print('Input Type AST in user syntax:')
     print(format_type_source(example.type_ast))
-    print("\nTable 3 状态迁移图：")
+    print('\nTable 3 transition graph:')
     graph = build_type_transition_graph(
         example.type_ast,
         output=GRAPH_OUTPUT_MODE,
     )
     print(
-        "\n图摘要："
-        f"{len(graph.states)} 个规范状态，"
-        f"{len(graph.transitions)} 条迁移。"
+        '\nGraph summary: '
+        f"{len(graph.states)} normalized states, "
+        f"{len(graph.transitions)} transitions."
     )
 
 
 def main() -> int:
-    """依次生成三个并行 Type AST 的完整 Table 3 状态迁移图。"""
+    r"""Build complete Table 3 graphs for all three parallel examples."""
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
     if GRAPH_OUTPUT_MODE not in {"result", "full"}:
-        print('GRAPH_OUTPUT_MODE 只能设为 "result" 或 "full"。')
+        print('GRAPH_OUTPUT_MODE must be "result" or "full".')
         return 2
 
-    print("并行 Type AST -> 规范化 Type -> Table 3 状态图演示")
-    print(f"图输出模式：{GRAPH_OUTPUT_MODE!r}")
+    print('Parallel Type AST -> normalized Type -> Table 3 transition graph demo')
+    print(f"Graph output mode: {GRAPH_OUTPUT_MODE!r}")
     try:
         for example in build_examples():
             _run_example(example)
     except HCSPTypeTransitionGraphError:
-        # ``_run_example`` 使用 result/full 模式；接口已经打印一次结构化错误，
-        # 此处只决定演示脚本退出码，避免重复输出同一错误。
+        # The API already printed the error; only determine the script exit code here.
         return 1
 
     print("\n" + "=" * 76)
-    print("演示结束：全部状态图均已成功构造。")
+    print('Demo complete: all transition graphs were constructed successfully.')
     return 0
 
 

@@ -1,9 +1,4 @@
-"""按用户 Type 风格输出规范化 Type AST 的稳定只读文本。
-
-输出只服务第三个公共接口的摘要和状态节点展示：扁平选择直接列出分支，匿名递归
-使用 ``mu { ... }``，De Bruijn 引用使用 ``recursion_position(index)``。本模块
-不解析文本，也不把规范化 AST 转回正式 Type AST。
-"""
+r"""Render normalized Types using stable, user-oriented syntax."""
 
 from __future__ import annotations
 
@@ -28,7 +23,7 @@ from ...data_structures.normalized_type_ast import (
 
 
 def format_normalized_type_ast(value: NormalizedConfigurationType) -> str:
-    """以 ``normalized type`` 开头输出稳定、四空格缩进的完整配置。"""
+    r"""Render a complete normalized type with four-space indentation."""
 
     if not isinstance(value, NormalizedConfigurationType):
         raise TypeError(
@@ -42,7 +37,7 @@ def _render_configuration(
     value: NormalizedConfigurationType,
     level: int,
 ) -> str:
-    """按原 ``parallel`` 风格渲染排序后的一个或多个配置分量。"""
+    r"""Render sorted configuration components in parallel syntax."""
 
     if len(value.components) == 1:
         return _render_process(value.components[0], level)
@@ -54,13 +49,13 @@ def _render_configuration(
 
 
 def _render_process(value: NormalizedProcessType, level: int) -> str:
-    """渲染一个规范过程类型，并显式显示扁平选择和 De Bruijn 位置。"""
+    r"""Render flattened choices and explicit De Bruijn positions."""
 
     return _render_iterative(value, level, is_angelic=False)
 
 
 def _render_angelic(value: NormalizedAngelicType, level: int) -> str:
-    """按原 ``angelic { ch? -> T, ... }`` 风格输出规范通信集合。"""
+    r"""Render normalized communications in angelic branch syntax."""
 
     return _render_iterative(value, level, is_angelic=True)
 
@@ -71,7 +66,7 @@ def _render_iterative(
     *,
     is_angelic: bool,
 ) -> str:
-    """用显式后序工作栈渲染深层 continuation 和递归体。"""
+    r"""Render deep continuations and recursion bodies with an explicit stack."""
 
     results: list[str] = []
     pending: list[tuple[object, ...]] = [
@@ -180,7 +175,7 @@ def _render_iterative(
 
 
 def _render_block(name: str, entries: tuple[str, ...], level: int) -> str:
-    """渲染带花括号、逗号和四空格缩进的多项结构。"""
+    r"""Render a brace-enclosed block with commas and indentation."""
 
     if not entries:
         return _line(level, f"{name} {{}}")
@@ -195,7 +190,7 @@ def _render_block(name: str, entries: tuple[str, ...], level: int) -> str:
 
 
 def _append_document(left: str, separator: str, right: str) -> str:
-    """把后继类型首行接到左文档末行，并保持后续缩进。"""
+    r"""Join a successor's first line to the preceding document."""
 
     left_lines = left.splitlines()
     right_lines = right.splitlines()
@@ -206,7 +201,7 @@ def _append_document(left: str, separator: str, right: str) -> str:
 
 
 def _prepend_to_first_line(prefix: str, rendered: str) -> str:
-    """把语法前缀插入已有文档首行的缩进之后。"""
+    r"""Insert a syntax prefix after existing indentation."""
 
     lines = rendered.splitlines()
     indentation = lines[0][: len(lines[0]) - len(lines[0].lstrip())]
@@ -215,7 +210,7 @@ def _prepend_to_first_line(prefix: str, rendered: str) -> str:
 
 
 def _format_duration(value: Fraction) -> str:
-    """按原用户 Type 语法输出整数或最简有理时延。"""
+    r"""Render an integer or reduced rational duration."""
 
     if value.denominator == 1:
         return str(value.numerator)
@@ -223,13 +218,13 @@ def _format_duration(value: Fraction) -> str:
 
 
 def _line(level: int, value: str) -> str:
-    """构造一行四空格层级缩进文本。"""
+    r"""Create a line using four-space indentation levels."""
 
     return _indent(level) + value
 
 
 def _indent(level: int) -> str:
-    """返回规范化 Type 输出采用的层级缩进。"""
+    r"""Return indentation for normalized Type output."""
 
     return "    " * level
 

@@ -1,11 +1,4 @@
-"""后端 Python 风格与可读性约定的自动化回归测试。
-
-测试内容：检查后端行宽、future annotations、通配符导入、dataclass slots 和
-__init__ 返回标注。
-
-论文对应：本文件不改变 Table 2/3 数学规则，只保证 Constructor、Checker、共享
-证明层与 Type 操作语义持续采用一致、可审计的实现风格。
-"""
+r"""Regression tests for backend style. Paper reference: Table 2/3."""
 
 from __future__ import annotations
 
@@ -17,14 +10,11 @@ import hcsp_typechecker
 
 
 class BackendStyleTests(unittest.TestCase):
-    """锁定后端模块共同遵守的机械代码风格。"""
+    r"""Tests for Backend Style."""
 
-    # 测试输入：backend 下全部 Python 文件及其抽象语法树。
-    # 预期行为：行宽、future import、显式导入、slots 和初始化标注全部统一。
-    # 检查内容：集中报告所有不符合 BACKEND_CODE_STYLE.md 的文件和行号。
-    # 论文对应：只约束实现形式，不修改任何 HCSP 类型判断或证明前提。
+
     def test_backend_sources_follow_shared_style(self) -> None:
-        """检查全部后端源码的稳定机械风格。"""
+        r"""Verify backend sources follow shared style."""
 
         backend = Path(hcsp_typechecker.__file__).parent / "backend"
         violations: list[str] = []

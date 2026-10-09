@@ -1,11 +1,4 @@
-"""把规范 HCSP 用户输入转换为现有项目模型的递归下降解析器。
-
-完整入口按 ``document/GAMMA_THETA_INPUT_SYNTAX.md`` 从同一 token 流中依次构造
-Gamma、可选共享参数环境、Theta 和 Process AST；Process/Expr 子语法仍由
-``document/HCSP_INPUT_SYNTAX.md`` 定义。语句块统一交给 ``Sequence.of`` lowering，
-使条件、内部选择和 ODE 后面的公共后继进入各自的 ``continuation`` 字段，
-而不会形成项目禁止的外置 ``Sequence(control, Q)`` 结构。
-"""
+r"""Recursive-descent input parsing with explicit stacks for deep process structure."""
 
 from __future__ import annotations
 
@@ -66,10 +59,10 @@ _BASIC_TYPE_TOKENS = {
 
 
 class Parser:
-    """在单一 token 序列上解析完整 source 或低层片段。"""
+    r"""Parse complete input or fragments on one token stream."""
 
     def __init__(self, source: str, source_name: str) -> None:
-        """扫描源文本并初始化语法游标。"""
+        r"""Tokenize source and initialize the parser cursor."""
 
         self.source = source
         self.source_name = source_name
@@ -77,14 +70,14 @@ class Parser:
         self.index = 0
 
     def parse_source(self) -> HCSP:
-        """解析低层非空 Process 系统片段，并要求随后为 EOF。"""
+        r"""Parse a nonempty process-system fragment followed by EOF."""
 
         process = self._parse_process_system()
         self._expect("EOF")
         return process
 
     def parse_complete_source(self) -> ParsedHCSPSource:
-        """从同一 token 流解析环境与 Process 的完整输入。"""
+        r"""Parse complete environments and Process on one token stream."""
 
         gamma = self._parse_gamma_section()
         parameters = (
@@ -106,7 +99,7 @@ class Parser:
         )
 
     def parse_complete_source_without_eof(self) -> ParsedHCSPSource:
-        """解析完整构造器输入，但把 EOF 留给可选的 ``type`` 分节。"""
+        r"""Parse a program prefix, leaving a possible type section unconsumed."""
 
         gamma = self._parse_gamma_section()
         parameters = (
@@ -131,7 +124,7 @@ class Parser:
         *,
         shared_parameters: frozenset[str] = frozenset(),
     ) -> HCSP:
-        """解析非空顶层块列表，并 lower 为 Process 或 Parallel。"""
+        r"""Lower nonempty top-level process blocks into Process or Parallel."""
 
         start = self._expect("{")
         if self.current.kind != "{":
@@ -159,7 +152,7 @@ class Parser:
         )
 
     def _parse_gamma_section(self) -> dict[str, GammaType]:
-        """解析 Gamma，在读完后验证所有连续向量的 Real 成员声明。"""
+        r"""Parse Gamma and validate Real members of continuous vectors."""
 
         self._expect("gamma")
         self._expect("(")
@@ -189,8 +182,8 @@ class Parser:
                     )
         self._expect(")")
 
-        # continuous 成员可以在向量声明之后才定型，因此必须等整个
-        # Gamma 读完后再检查，不能错误拒绝合法的向前引用。
+        # Validate continuous-vector members after parsing all Gamma entries to permit forward
+        # references.
         for declaration, members in continuous_entries:
             for member in members:
                 member_type = gamma.get(member.text)
@@ -212,7 +205,7 @@ class Parser:
     def _parse_gamma_type(
         self,
     ) -> tuple[GammaType, tuple[Token, ...] | None]:
-        """解析一个基础类型或非空 ``continuous(...)`` 声明。"""
+        r"""Parse a basic type or nonempty continuous declaration."""
 
         if self.current.kind in _BASIC_TYPE_TOKENS:
             token = self._advance()
@@ -261,7 +254,7 @@ class Parser:
         return value, tuple(members)
 
     def _parse_theta_section(self) -> dict[str, ChannelType]:
-        """解析 Theta 并将每项直接 lowering 为现有 ``ChannelType``。"""
+        r"""Parse Theta entries directly into ChannelType."""
 
         self._expect("theta")
         self._expect("(")
@@ -288,7 +281,7 @@ class Parser:
         return theta
 
     def _parse_channel_type(self) -> ChannelType:
-        """解析非空多标量通道签名与可选联合 refinement。"""
+        r"""Parse a nonempty scalar channel signature and optional joint refinement."""
 
         start = self._expect("channel")
         self._expect("(")
@@ -326,8 +319,7 @@ class Parser:
             self._expect("(")
             parsed_refinement = self._parse_expression()
             self._expect(")")
-            # 省略 where 和显式 where(true) 使用唯一的内部表示；其他公式
-            # 始终保留为项目 Expr，而不接受字符串/callable/Z3 便捷值。
+            # Canonicalize omitted where as true; other refinements remain strict Expr objects.
             if not (
                 isinstance(parsed_refinement, Literal)
                 and parsed_refinement.value is True
@@ -344,7 +336,7 @@ class Parser:
         )
 
     def _parse_basic_type(self) -> BasicType:
-        """解析用户输入层唯一的五种规范基础类型名。"""
+        r"""Parse one of the five supported basic type names."""
 
         token = self.current
         if token.kind not in _BASIC_TYPE_TOKENS:
@@ -360,7 +352,7 @@ class Parser:
         *,
         forbidden_names: frozenset[str],
     ) -> ParameterEnvironment:
-        """解析可选共享只读参数声明及其联合约束。"""
+        r"""Parse optional shared read-only parameters and their joint constraint."""
 
         self._expect("parameters")
         self._expect("(")
@@ -415,7 +407,7 @@ class Parser:
         return ParameterEnvironment(declarations, constraint)
 
     def parse_expression_source(self) -> Expr:
-        """解析一个独立表达式并要求其后立即到达 EOF。"""
+        r"""Parse a standalone expression followed by EOF."""
 
         expression = self._parse_expression()
         self._expect("EOF")
@@ -423,12 +415,12 @@ class Parser:
 
     @property
     def current(self) -> Token:
-        """返回尚未消费的当前 token。"""
+        r"""Return the current unconsumed token."""
 
         return self.tokens[self.index]
 
     def _parse_statement_block(self) -> Process:
-        """用显式任务栈解析非空语句块及任意深度控制语句。"""
+        r"""Parse nonempty blocks and deep control structures using explicit tasks."""
 
         values: list[Process] = []
         pending: list[tuple[object, ...]] = [("block",)]
@@ -559,7 +551,7 @@ class Parser:
         return values[0]
 
     def _parse_statement(self) -> Process:
-        """按首 token 分派并解析一条完整 Process 语句。"""
+        r"""Dispatch process statements by their first token."""
 
         kind = self.current.kind
         if kind == "skip":
@@ -585,7 +577,7 @@ class Parser:
         )
 
     def _parse_identifier_statement(self) -> Process:
-        """解析以普通标识符开始的赋值、输入或输出动作。"""
+        r"""Parse identifier-led assignment, input, or output."""
 
         name = self._expect("IDENT")
         if self._match(":=") is not None:
@@ -612,7 +604,7 @@ class Parser:
         )
 
     def _parse_assertion(self) -> Process:
-        """解析 ``assert(expr)``。"""
+        r"""Parse assert(expr)."""
 
         start = self._expect("assert")
         self._expect("(")
@@ -621,14 +613,14 @@ class Parser:
         return self._construct(start, lambda: Assert(condition))
 
     def _parse_process_call(self) -> Process:
-        """解析显式进程变量调用 ``call X``。"""
+        r"""Parse an explicit call X recursion invocation."""
 
         start = self._expect("call")
         variable = self._expect("IDENT")
         return self._construct(start, lambda: Var(variable.text))
 
     def _parse_if(self) -> Process:
-        """解析具有两个必填语句块分支的条件语句。"""
+        r"""Parse a conditional with two required statement-block branches."""
 
         start = self._expect("if")
         self._expect("(")
@@ -643,7 +635,7 @@ class Parser:
         )
 
     def _parse_choice(self) -> Process:
-        """解析至少两个内部选择分支并建立无公共尾的初始选择节点。"""
+        r"""Parse at least two internal-choice branches before attaching a shared tail."""
 
         start = self._expect("choose")
         branches = [self._parse_statement_block()]
@@ -654,7 +646,7 @@ class Parser:
         return self._construct(start, lambda: InternalChoice.of(*branches))
 
     def _parse_recursion(self) -> Process:
-        """解析带必填边界不变量的 ``mu`` 递归。"""
+        r"""Parse mu recursion with a required boundary invariant."""
 
         start = self._expect("mu")
         variable = self._expect("IDENT")
@@ -673,7 +665,7 @@ class Parser:
         )
 
     def _parse_ode(self) -> Process:
-        """解析固定顺序、带可选 safety/interrupt 的 ODE 配置。"""
+        r"""Parse ordered ODE clauses with optional safety and interrupts."""
 
         start = self._expect("ode")
         self._expect("(")
@@ -705,7 +697,7 @@ class Parser:
         )
 
     def _parse_flow_clause(self) -> tuple[tuple[str, Expr], ...]:
-        """解析保持书写顺序的零个或多个 ``dot x = e`` 方程。"""
+        r"""Parse zero or more dot equations in source order."""
 
         self._expect("flow")
         self._expect("(")
@@ -734,7 +726,7 @@ class Parser:
         return tuple(equations)
 
     def _parse_named_expression(self, name: str) -> Expr:
-        """解析 ``name(expr)`` 形式的单表达式 ODE clause。"""
+        r"""Parse a single-expression ODE clause of the form name(expr)."""
 
         self._expect(name)
         self._expect("(")
@@ -743,7 +735,7 @@ class Parser:
         return expression
 
     def _parse_delay_clause(self) -> tuple[Expr | float, Token]:
-        """解析有限有理常量或正无穷 ODE delay。"""
+        r"""Parse an exact rational or positive-infinity ODE delay."""
 
         self._expect("delay")
         self._expect("(")
@@ -756,7 +748,7 @@ class Parser:
         return duration, duration_token
 
     def _parse_interrupt_clause(self):
-        """解析非空中断分支表并构造递归 EventReaction。"""
+        r"""Parse a nonempty communication interrupt branch table."""
 
         start = self._expect("interrupt")
         self._expect("(")
@@ -774,7 +766,7 @@ class Parser:
     def _parse_event_branch(
         self,
     ) -> tuple[InputChannel | OutputChannel, Process]:
-        """解析一个通信守卫及其专属语句块后继。"""
+        r"""Parse a communication guard and its statement-block continuation."""
 
         self._expect("on")
         channel = self._expect("IDENT")
@@ -799,7 +791,7 @@ class Parser:
         return communication, continuation
 
     def _parse_identifier_arguments(self) -> tuple[str, ...]:
-        """解析非空、无尾逗号且目标互异的输入变量列表。"""
+        r"""Parse distinct nonempty input targets without a trailing comma."""
 
         self._expect("(")
         first = self._expect("IDENT")
@@ -822,7 +814,7 @@ class Parser:
         *,
         allow_trailing: bool,
     ) -> tuple[Expr, ...]:
-        """解析非空表达式参数表，并按上下文决定是否允许尾逗号。"""
+        r"""Parse nonempty expression arguments with context-specific trailing commas."""
 
         self._expect("(")
         if self.current.kind == ")":
@@ -844,12 +836,12 @@ class Parser:
         return tuple(values)
 
     def _parse_expression(self) -> Expr:
-        """解析统一、后续再进行值类型检查的表达式。"""
+        r"""Parse expressions before static value-type checking."""
 
         return self._parse_or_expression()
 
     def _parse_or_expression(self) -> Expr:
-        """解析 ``or``/``||`` 层并构造规范多元 BooleanExpr。"""
+        r"""Parse or/|| into an n-ary BooleanExpr."""
 
         operands = [self._parse_and_expression()]
         while self.current.kind in {"or", "||"}:
@@ -858,7 +850,7 @@ class Parser:
         return operands[0] if len(operands) == 1 else BooleanExpr("or", operands)
 
     def _parse_and_expression(self) -> Expr:
-        """解析 ``and``/``&&`` 层并构造规范多元 BooleanExpr。"""
+        r"""Parse and/&& into an n-ary BooleanExpr."""
 
         operands = [self._parse_not_expression()]
         while self.current.kind in {"and", "&&"}:
@@ -867,7 +859,7 @@ class Parser:
         return operands[0] if len(operands) == 1 else BooleanExpr("and", operands)
 
     def _parse_not_expression(self) -> Expr:
-        """解析低于比较、高于 and 的逻辑否定。"""
+        r"""Parse logical negation between comparison and conjunction precedence."""
 
         if self.current.kind in {"not", "!"}:
             self._advance()
@@ -875,7 +867,7 @@ class Parser:
         return self._parse_comparison_expression()
 
     def _parse_comparison_expression(self) -> Expr:
-        """解析零个或多个关系运算，并保留单个链式 CompareExpr。"""
+        r"""Preserve chained relations in one CompareExpr."""
 
         operands = [self._parse_additive_expression()]
         operators: list[str] = []
@@ -886,7 +878,7 @@ class Parser:
         return operands[0] if not operators else CompareExpr(operands, operators)
 
     def _parse_additive_expression(self) -> Expr:
-        """按左结合解析加法和减法。"""
+        r"""Parse left-associative addition and subtraction."""
 
         result = self._parse_multiplicative_expression()
         while self.current.kind in {"+", "-"}:
@@ -899,7 +891,7 @@ class Parser:
         return result
 
     def _parse_multiplicative_expression(self) -> Expr:
-        """按左结合解析乘法、实除法和取模。"""
+        r"""Parse left-associative multiplication, division, and modulo."""
 
         result = self._parse_unary_expression()
         while self.current.kind in {"*", "/", "%"}:
@@ -908,7 +900,7 @@ class Parser:
         return result
 
     def _parse_unary_expression(self) -> Expr:
-        """解析算术正负号，并保持乘方高于左侧一元符号。"""
+        r"""Parse unary signs with power binding more tightly on their right."""
 
         if self.current.kind in {"+", "-"}:
             operator = self._advance().kind
@@ -916,7 +908,7 @@ class Parser:
         return self._parse_power_expression()
 
     def _parse_power_expression(self) -> Expr:
-        """把 ``**`` 和 ``^`` 都按高优先级右结合乘方解析。"""
+        r"""Parse ** and ^ as right-associative exponentiation."""
 
         left = self._parse_primary_expression()
         if self.current.kind in {"**", "^"}:
@@ -925,7 +917,7 @@ class Parser:
         return left
 
     def _parse_primary_expression(self) -> Expr:
-        """解析字面量、变量、简单函数调用或括号分组。"""
+        r"""Parse literals, variables, named calls, and parenthesized expressions."""
 
         token = self.current
         if token.kind == "INTEGER":
@@ -953,7 +945,7 @@ class Parser:
         )
 
     def _parse_function_arguments(self) -> tuple[Expr, ...]:
-        """解析允许空表和尾逗号的简单函数位置实参。"""
+        r"""Parse function arguments, permitting empty lists and trailing commas."""
 
         self._expect("(")
         if self._match(")") is not None:
@@ -967,12 +959,12 @@ class Parser:
         return tuple(arguments)
 
     def _parse_rational_expression(self) -> Expr:
-        """解析仅含有理数字面量和允许算术运算的常量表达式。"""
+        r"""Parse a variable-free rational constant expression."""
 
         return self._parse_rational_additive()
 
     def _parse_rational_additive(self) -> Expr:
-        """按左结合解析有理常量加减法。"""
+        r"""Parse left-associative rational addition and subtraction."""
 
         result = self._parse_rational_multiplicative()
         while self.current.kind in {"+", "-"}:
@@ -985,7 +977,7 @@ class Parser:
         return result
 
     def _parse_rational_multiplicative(self) -> Expr:
-        """按左结合解析有理常量乘除法。"""
+        r"""Parse left-associative rational multiplication and division."""
 
         result = self._parse_rational_unary()
         while self.current.kind in {"*", "/"}:
@@ -994,7 +986,7 @@ class Parser:
         return result
 
     def _parse_rational_unary(self) -> Expr:
-        """解析有理常量表达式的一元正负号。"""
+        r"""Parse unary signs in rational constant expressions."""
 
         if self.current.kind in {"+", "-"}:
             operator = self._advance().kind
@@ -1002,7 +994,7 @@ class Parser:
         return self._parse_rational_power()
 
     def _parse_rational_power(self) -> Expr:
-        """按右结合解析有理常量乘方。"""
+        r"""Parse right-associative rational exponentiation."""
 
         left = self._parse_rational_primary()
         if self.current.kind in {"**", "^"}:
@@ -1011,7 +1003,7 @@ class Parser:
         return left
 
     def _parse_rational_primary(self) -> Expr:
-        """解析数值字面量或括号包围的有理常量表达式。"""
+        r"""Parse rational literals and parenthesized constant expressions."""
 
         token = self.current
         if token.kind == "INTEGER":
@@ -1030,7 +1022,7 @@ class Parser:
         )
 
     def _numeric_literal(self, token: Token) -> Literal:
-        """把已通过词法限制的数字 token 安全转换为项目 Literal。"""
+        r"""Convert a lexically validated number token into Literal."""
 
         try:
             value = (
@@ -1051,7 +1043,7 @@ class Parser:
         token: Token,
         factory: Callable[[], _T],
     ) -> _T:
-        """运行正式 AST 构造器，并把良构失败包装为定位诊断。"""
+        r"""Wrap AST constructor failures as located validation diagnostics."""
 
         try:
             return factory()
@@ -1069,7 +1061,7 @@ class Parser:
             raise error from exc
 
     def _advance(self) -> Token:
-        """消费并返回当前 token。"""
+        r"""Consume and return the current token."""
 
         token = self.current
         if token.kind != "EOF":
@@ -1077,14 +1069,14 @@ class Parser:
         return token
 
     def _match(self, *kinds: str) -> Token | None:
-        """当前 token 属于给定集合时消费它，否则保持游标不变。"""
+        r"""Consume a matching token; otherwise leave the cursor unchanged."""
 
         if self.current.kind not in kinds:
             return None
         return self._advance()
 
     def _expect(self, kind: str) -> Token:
-        """要求并消费指定 token，否则抛出带期望信息的语法错误。"""
+        r"""Require a token kind or raise a located syntax error."""
 
         token = self.current
         if token.kind != kind:
@@ -1100,7 +1092,7 @@ class Parser:
         *,
         expected: tuple[str, ...] = (),
     ) -> HCSPInputError:
-        """在当前 token 处建立语法阶段异常。"""
+        r"""Create a syntax diagnostic at the current token."""
 
         token = self.current
         return HCSPInputError(
@@ -1114,7 +1106,7 @@ class Parser:
         )
 
     def _validation_error(self, message: str, token: Token) -> HCSPInputError:
-        """在指定 token 处建立 lowering/AST 良构异常。"""
+        r"""Create a lowering/well-formedness diagnostic at a selected token."""
 
         return HCSPInputError(
             message,
@@ -1127,7 +1119,7 @@ class Parser:
 
 
 def _checked_source(source: object, source_name: str) -> str:
-    """把公共入口的非字符串参数转换成一致的词法诊断。"""
+    r"""Convert non-string public inputs into consistent lexical diagnostics."""
 
     if isinstance(source, str):
         return source
@@ -1142,7 +1134,7 @@ def _checked_source(source: object, source_name: str) -> str:
 
 
 def parse_hcsp(source: str, *, source_name: str = "<input>") -> HCSP:
-    """把一个 Process 系统片段转换为 Process/Parallel AST。"""
+    r"""Parse a process-system fragment into existing HCSP ASTs."""
 
     return Parser(_checked_source(source, source_name), source_name).parse_source()
 
@@ -1152,7 +1144,7 @@ def parse_hcsp_source(
     *,
     source_name: str = "<input>",
 ) -> ParsedHCSPSource:
-    """解析完整环境与 Process 输入并返回现有模型。"""
+    r"""Parse complete environments and Process input into domain models."""
 
     return Parser(
         _checked_source(source, source_name),
@@ -1161,7 +1153,7 @@ def parse_hcsp_source(
 
 
 def parse_expression(source: str, *, source_name: str = "<expression>") -> Expr:
-    """用用户输入前端的严格表达式文法构造一个项目 Expr。"""
+    r"""Parse an Expr using the strict frontend grammar."""
 
     return Parser(
         _checked_source(source, source_name),

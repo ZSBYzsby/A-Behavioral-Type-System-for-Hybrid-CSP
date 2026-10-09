@@ -1,26 +1,18 @@
-r"""通过新版公共接口复现论文 Section 5 原始 case study 的 ``unknown``。
+r"""Run the original paper's Section 5 case and report its unverified candidate type.
 
-本例故意保留论文原始的加速度条件：
+From the repository root: python examples/case_study_original.py --d 1
+Requires Python/Z3 and configured Java/KeYmaera X.
 
-    phi_a(p, v, a) :=
-        amin <= a <= amax
-        and phi_v(p + v*d + a*d^2/2, v + a*d)
+Expected results (--d 1; physical parameters remain symbolic):
+- Construction produces a complete candidate Type AST but raises
+  HCSPUntrustedTypeConstructionError with kind="proof-unknown".
+- The candidate is available as error.untrusted_type. The unresolved ODE
+  safety proof is reported under T-ODE-safety at K1.X.
+- No transition graph or lock-freedom analysis is performed.
 
-它没有加入 ``new_case.py`` 使用的周期终点位置检查和区间内转向点检查，
-因此用于复现相应 dL 前提不能被证明的情况。四个物理量 ``end``、``vmax``、
-``amin``、``amax`` 是 source 中声明的共享符号参数；只有 ODE 批注 ``d``
-由命令行给出具体正有理数：
-
-    python -B case_study/case.py
-    python -B case_study/case.py --d 3/2
-
-脚本只使用项目承诺兼容的单一公共接口。默认 ``result`` 模式打印结构化摘要；
-把 ``OUTPUT_MODE`` 改成 ``"full"`` 后，接口会进一步打印 source、规则轨迹、
-FOL/dL 义务、完整候选类型及其可信性。脚本自身只补充案例结论。
-对本问题复现脚本而言，预期结果是：证明义务得到 ``unknown`` 后继续完成规则
-构造，并通过 ``HCSPUntrustedTypeConstructionError.untrusted_type`` 给出完整但
-不可信的候选 Type AST。解析错误、确定的 ``false``、未能完成类型结构，或者意外
-得到可信 Type AST，退出码均为 1。
+Exit code 0 means the expected unverified candidate was reproduced; it does
+not certify safety. See case_study_original.txt for the mathematical
+counterexample and interpretation of the unresolved proofs.
 """
 
 from __future__ import annotations
@@ -33,14 +25,13 @@ import sys
 from typing import Sequence
 
 
-# 该文件位于项目子目录中。把源码仓库根目录加入模块搜索路径后，用户可直接
-# 运行上面给出的命令，而不必先把项目安装为 Python 包或手工设置 PYTHONPATH。
-_CASE_STUDY_DIRECTORY = Path(__file__).resolve().parent
-_PROJECT_ROOT = _CASE_STUDY_DIRECTORY.parent
+# Add the checkout root so this script also runs without package installation.
+_EXAMPLES_DIRECTORY = Path(__file__).resolve().parent
+_PROJECT_ROOT = _EXAMPLES_DIRECTORY.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from hcsp_typechecker import (  # noqa: E402 - 搜索路径必须先指向源码根目录
+from hcsp_typechecker import (  # noqa: E402 - resolve the checkout root before importing the package
     HCSPInputError,
     HCSPTypeConstructionError,
     HCSPUntrustedTypeConstructionError,
@@ -52,17 +43,17 @@ from hcsp_typechecker import (  # noqa: E402 - 搜索路径必须先指向源码
 PARAMETER_CONSTRAINT = (
     "end >= 0 and vmax >= 0 and amin < 0 and amax >= 0"
 )
-_KEYMAERAX_HOME = _CASE_STUDY_DIRECTORY / "tmp" / "paper-case-unknown-home"
+_KEYMAERAX_HOME = _EXAMPLES_DIRECTORY / "tmp" / "paper-case-unknown-home"
 _KEYMAERAX_ARTIFACTS = (
-    _CASE_STUDY_DIRECTORY / "tmp" / "paper-case-unknown-artifacts"
+    _EXAMPLES_DIRECTORY / "tmp" / "paper-case-unknown-artifacts"
 )
 
-# 设为 "full" 可查看每条公式、证明器说明和完整规则轨迹。
+# Set to "full" to include proof formulas and rule traces.
 OUTPUT_MODE = "result"
 
 
 def _number_text(value: Fraction) -> str:
-    """把具体正有理数批注写成用户表达式语法可精确解析的文本。"""
+    r"""Render an exact positive rational in the input expression syntax."""
 
     if value.denominator == 1:
         return str(value.numerator)
@@ -70,18 +61,13 @@ def _number_text(value: Fraction) -> str:
 
 
 def _position_safety(position: str) -> str:
-    """生成论文的位置条件 ``phi_p(position)``。"""
+    r"""Generate the paper's position condition phi_p."""
 
     return f"({position}) <= end"
 
 
 def _velocity_safety(position: str, velocity: str) -> str:
-    r"""生成论文中无除法形式的三段式速度条件 ``phi_v``。
-
-    ``sb=vmax^2/(-2*amin)`` 在参数约束 ``amin < 0`` 下等价改写为
-    ``(-2*amin)*(end-p)`` 与 ``vmax^2`` 的比较，避免给 dL 公式引入与
-    本案例无关的除法有定义性问题。
-    """
+    r"""Generate the three-part velocity condition without introducing division."""
 
     remaining = f"(end - ({position}))"
     braking_capacity = f"((-2 * amin) * {remaining})"
@@ -103,10 +89,8 @@ def _acceleration_safety(
     acceleration: str,
     period: Fraction,
 ) -> str:
-    r"""生成论文原始的一步预测条件 ``phi_a``。
-
-    这里有意不添加预测终点的 ``phi_p``，也不检查 ``0..d`` 内的速度
-    转向点；这正是本脚本要保留和展示的原始案例特征。
+    r"""Generate the original one-step prediction without endpoint or turning-point position
+    checks.
     """
 
     duration = _number_text(period)
@@ -125,7 +109,7 @@ def _acceleration_safety(
 
 
 def _build_original_case_source(period: Fraction) -> str:
-    """生成原始 case study 对应的一份完整、可复制的用户输入 source。"""
+    r"""Build the original vehicle/controller input with endpoint-only phi_a."""
 
     phi_p = _position_safety("p")
     phi_v = _velocity_safety("p", "v")
@@ -152,8 +136,7 @@ def _build_original_case_source(period: Fraction) -> str:
     )
     duration = _number_text(period)
 
-    # 双花括号只负责转义 Python f-string。函数返回的 source 中仍是用户语法
-    # 规定的单花括号，例如 ``process { {Vehicle}, {Controller} }``。
+    # Double braces escape the f-string; generated HCSP uses single braces.
     return f"""
 gamma(
     p: Real,
@@ -247,7 +230,7 @@ process {{
 
 
 def _positive_fraction(value: str) -> Fraction:
-    """把 ``--d`` 解析为 ODE 批注所要求的具体正有理数。"""
+    r"""Parse --d as a strictly positive rational ODE annotation."""
 
     try:
         result = Fraction(value)
@@ -261,7 +244,7 @@ def _positive_fraction(value: str) -> Fraction:
 
 
 def _parse_period(argv: Sequence[str] | None = None) -> Fraction:
-    """读取具体批注 ``d``；四个物理参数始终保持为 source 中的符号。"""
+    r"""Read the concrete period while keeping the four physical parameters symbolic."""
 
     parser = argparse.ArgumentParser(
         description=(
@@ -274,7 +257,7 @@ def _parse_period(argv: Sequence[str] | None = None) -> Fraction:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """检查原始案例是否形成预期的 ``unknown`` 不可信候选类型。"""
+    r"""Return success only for the expected complete candidate with unresolved proofs."""
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
@@ -282,62 +265,82 @@ def main(argv: Sequence[str] | None = None) -> int:
     period = _parse_period(argv)
     source = _build_original_case_source(period)
 
-    # 公共接口从环境变量读取证明器位置与产物策略。这里只选择本案例的可写
-    # 工作目录，不接触内部 KeYmaeraXConfig 类型。
+    # Use the public API's environment configuration with a writable case-specific directory.
     os.environ["KEYMAERAX_HOME"] = str(_KEYMAERAX_HOME)
     os.environ["KEYMAERAX_KEEP_ARTIFACTS"] = "true"
     os.environ["KEYMAERAX_ARTIFACTS"] = str(_KEYMAERAX_ARTIFACTS)
 
+    print(f"Original paper case study: d={period}; physical parameters remain symbolic.")
+    print("Expected outcome: a complete, unverified candidate with unresolved proofs.")
+
     try:
         construct_hcsp_type(
             source,
-            source_name=f"case_study/case.py (--d={period})",
+            source_name=f"examples/case_study_original.py (--d={period})",
             output=OUTPUT_MODE,
             keymaerax_timeout_seconds=180.0,
         )
     except HCSPInputError as error:
-        # 接口已经打印源码诊断；这里只给出案例脚本的最终分类。
+
         print(
-            "案例终止：输入无效 "
-            f"[{error.kind}]，位置 {error.source_name}:{error.line}:{error.column}。"
+            'Case stopped: invalid input '
+            f"[{error.kind}], at {error.source_name}:{error.line}:{error.column}."
         )
         return 1
     except HCSPUntrustedTypeConstructionError as error:
         if error.kind is not TypeConstructionErrorKind.PROOF_UNKNOWN:
-            print("案例终止：收到不符合异常契约的不可信类型错误。")
+            print('Case stopped: the untrusted-type error violates the exception contract.')
             return 1
         unresolved = sum(
             detail.category == "proof-unknown" for detail in error.details
         )
         print()
-        print("=== 原始 case study 结论 ===")
+        print('=== Original case study outcome ===')
         print(
-            "已复现预期结果：unknown 义务没有中断类型构造；"
-            "接口形成了完整但尚未验证的候选 Type AST。"
+            'Expected result reproduced: unknown obligations did not stop construction; a complete, unverified candidate Type AST was produced.'
         )
         print(
-            f"结构化类别：{error.kind.value}；未决证明明细：{unresolved} 条；"
-            f"首要规则：{error.rule or '-'}；位置：{error.location or '-'}。"
+            (
+                'Error kind: '
+                f'{error.kind.value}'
+                '; unresolved proof details: '
+                f'{unresolved}'
+                '; primary rule: '
+                f"{error.rule or '-'}"
+                '; location: '
+                f"{error.location or '-'}"
+                '.'
+            )
         )
-        print("不可信候选 Type 已按上方的规范 Type 源码显示。")
-        print("把 OUTPUT_MODE 改为 'full' 可查看每条 dL 公式和完整推导轨迹。")
+        print('The untrusted candidate is shown above in canonical Type source syntax.')
+        print("Set OUTPUT_MODE to 'full' to inspect dL formulas and the derivation trace.")
         return 0
     except HCSPTypeConstructionError as error:
         print()
-        print("=== 原始 case study 结论 ===")
+        print('=== Original case study outcome ===')
         print(
-            f"未复现预期结果：构造失败类别为 {error.kind.value!r}，"
-            "但没有形成原案例预期的完整不可信候选类型。"
+            (
+                'Unexpected result: construction failed with kind '
+                f'{error.kind.value!r}'
+                ' without producing the expected complete, untrusted candidate.'
+            )
         )
         print(
-            f"失败阶段：{error.phase}；规则：{error.rule or '-'}；"
-            f"位置：{error.location or '-'}。"
+            (
+                'Failure phase: '
+                f'{error.phase}'
+                '; rule: '
+                f"{error.rule or '-'}"
+                '; location: '
+                f"{error.location or '-'}"
+                '.'
+            )
         )
         return 1
 
     print()
-    print("=== 原始 case study 结论 ===")
-    print("未复现预期结果：本次运行意外生成了可信 Type AST。")
+    print('=== Original case study outcome ===')
+    print('Unexpected result: construction returned a trusted Type AST.')
     return 1
 
 

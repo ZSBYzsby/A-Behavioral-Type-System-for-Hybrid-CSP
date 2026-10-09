@@ -1,4 +1,4 @@
-"""TypeConstructor 与 TypeChecker 共用的规则、证明和执行证据。"""
+r"""Shared Table 2 rules, proof infrastructure, and derivation evidence."""
 
 from .model import (
     DLCheckResult,

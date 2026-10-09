@@ -1,7 +1,7 @@
 """Check a source checkout before sharing it through GitHub.
 
-The script is intentionally independent of wheel/sdist tooling.  It scans
-repository text for developer-home paths, reports the active Python/Z3 and
+The script is intentionally independent of wheel/sdist tooling. It scans
+submission text for Chinese characters and developer-home paths, reports Python/Z3 and
 optional KeYmaera X environment, then runs the maintained test suite.
 
 Run it from any working directory with::
@@ -26,6 +26,10 @@ TEXT_SUFFIXES = {
     ".txt",
     ".yml",
     ".yaml",
+    ".json",
+    ".rst",
+    ".sh",
+    ".ps1",
     ".gitignore",
     ".gitattributes",
 }
@@ -50,13 +54,38 @@ def _source_files() -> Iterable[Path]:
     """Yield shareable repository text while excluding generated local data."""
 
     for path in PROJECT_ROOT.rglob("*"):
-        if not path.is_file() or any(part in IGNORED_PARTS for part in path.parts):
+        if not path.is_file() or any(
+            part in IGNORED_PARTS or part.endswith(".egg-info") for part in path.parts
+        ):
             continue
         if path.suffix.lower() in TEXT_SUFFIXES or path.name in {
             ".gitignore",
             ".gitattributes",
         }:
             yield path
+
+
+def find_non_english_text() -> tuple[str, ...]:
+    """Find Chinese characters or obsolete language copies in submission files."""
+
+    chinese = re.compile(
+        r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+        r"\U00020000-\U0002ffff\U00030000-\U000323af]"
+    )
+    matches: list[str] = []
+    for path in _source_files():
+        relative = path.relative_to(PROJECT_ROOT)
+        if chinese.search(str(relative)) or path.name.endswith(".zh-CN.md"):
+            matches.append(f"{relative}: filename is not part of the English submission")
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError) as exc:
+            matches.append(f"{relative}: unreadable: {exc}")
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if chinese.search(line):
+                matches.append(f"{relative}:{line_number}: Chinese characters found")
+    return tuple(matches)
 
 
 def find_private_paths() -> tuple[str, ...]:
@@ -83,7 +112,7 @@ def find_private_paths() -> tuple[str, ...]:
 
 
 def run_command(arguments: Sequence[str], description: str) -> bool:
-    """不经过 shell 运行一个仓库检查，并打印该阶段的标题。"""
+    r"""Run a repository check without a shell and display its stage."""
 
     print(f"\n=== {description} ===", flush=True)
     completed = subprocess.run(
@@ -99,7 +128,16 @@ def run_command(arguments: Sequence[str], description: str) -> bool:
 
 
 def main() -> int:
-    """运行全部源码共享检查，并返回适合作为进程退出码的状态。"""
+    r"""Run all source-sharing checks and return a process exit status."""
+
+    language_issues = find_non_english_text()
+    print("=== Submission language scan ===")
+    if language_issues:
+        print("Submission files must use English:")
+        for issue in language_issues:
+            print(f"  {issue}")
+        return 1
+    print("No Chinese characters or Chinese-language document copies found.")
 
     private_paths = find_private_paths()
     print("=== Repository privacy scan ===")

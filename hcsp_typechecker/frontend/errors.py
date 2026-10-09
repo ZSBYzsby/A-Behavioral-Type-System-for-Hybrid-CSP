@@ -1,9 +1,4 @@
-"""所有用户输入前端共用的源码位置和诊断异常。
-
-带批注 HCSP、运行上下文和用户 Type 的词法器、语法分析器及 lowering 都通过
-:class:`HCSPInputError` 报告失败。该异常独立于 TypeConstructor 和 TypeChecker，
-两个业务入口只负责使用各自标题渲染它，不复制前端诊断实现。
-"""
+r"""Shared source positions and located frontend diagnostics."""
 
 from __future__ import annotations
 
@@ -17,7 +12,7 @@ InputPhase = Literal["lexical", "syntax", "validation"]
 
 
 def _character_display_width(character: str) -> int:
-    """近似计算一个 Unicode 字符在等宽终端中的显示列数。"""
+    r"""Approximate a Unicode character's width in a monospaced terminal."""
 
     if unicodedata.combining(character):
         return 0
@@ -25,7 +20,7 @@ def _character_display_width(character: str) -> int:
 
 
 def _diagnostic_line(line: str, caret_index: int) -> tuple[str, int]:
-    """展开制表符并返回源码显示文本及原字符索引对应的显示列。"""
+    r"""Expand tabs and map source character indices to display columns."""
 
     rendered: list[str] = []
     display_column = 0
@@ -47,7 +42,7 @@ def _diagnostic_line(line: str, caret_index: int) -> tuple[str, int]:
 
 @dataclass(frozen=True)
 class SourcePosition:
-    """源文本中的零基偏移和一基行列位置。"""
+    r"""A zero-based source offset with one-based line and column."""
 
     offset: int
     line: int
@@ -55,14 +50,7 @@ class SourcePosition:
 
 
 class HCSPInputError(ValueError):
-    """带源码位置和机器可读阶段的统一用户输入错误。
-
-    ``phase`` 为 ``lexical``、``syntax`` 或 ``validation``，``kind`` 分别为
-    ``input-lexical``、``input-syntax``、``input-validation``。``line`` 和
-    ``column`` 从 1 开始，``offset`` 从 0 开始；``found`` 保存实际 token，
-    ``expected`` 保存可能的期望 token。调用者可用这些字段生成自己的 UI，也可
-    直接调用 :meth:`format_diagnostic` 获得带源码行和插入符的文本。
-    """
+    r"""An input error with source location and machine-readable phase."""
 
     def __init__(
         self,
@@ -75,7 +63,7 @@ class HCSPInputError(ValueError):
         found: str | None = None,
         expected: tuple[str, ...] = (),
     ) -> None:
-        """保存结构化字段，同时初始化普通 ``ValueError`` 文本。"""
+        r"""Store structured diagnostic fields and initialize ValueError text."""
 
         self.message = message
         self.phase = phase
@@ -90,14 +78,13 @@ class HCSPInputError(ValueError):
         super().__init__(self.format_diagnostic())
 
     def format_diagnostic(self) -> str:
-        """生成包含源行和插入符的可读诊断。"""
+        r"""Render a source line and aligned diagnostic caret."""
 
         header = (
             f"{self.source_name}:{self.line}:{self.column}: "
             f"{self.phase} error: {self.message}"
         )
-        # re.split 会保留末尾换行之后的空字符串，因此 EOF 位于空行时不会把
-        # 插入符错误画到上一行。
+        # Retain the final empty source line so an EOF caret stays on the correct line.
         lines = re.split(r"\r\n|\r|\n", self.source)
         if not lines:
             return header
@@ -108,7 +95,7 @@ class HCSPInputError(ValueError):
         return "\n".join((header, rendered_line, " " * rendered_caret + "^"))
 
     def __str__(self) -> str:
-        """返回稳定的用户可读诊断。"""
+        r"""Return a stable human-readable input diagnostic."""
 
         return self.format_diagnostic()
 

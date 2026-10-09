@@ -1,29 +1,4 @@
-"""面向普通使用者的 HCSP TypeConstructor、TypeChecker、状态图与锁分析门面。
-
-普通调用者只需把一份完整用户 source 交给 :func:`construct_hcsp_type`。接口会在
-内部依次完成“源码解析 -> Process AST/环境构造 -> Table 2 类型构造与前提证明”，
-成功时直接返回正式 Type AST。中间 Process AST、Gamma、Theta、参数环境和低层
-构造请求不会作为公共返回值暴露，因而调用者也无法把不同 source 的内部对象误配。
-若 source 末尾还包含用户 ``type`` 分节，则 :func:`check_hcsp_type` 以该 Type
-为规则结论逐层检查；它不先构造另一个完整类型。
-
-源码或路径条件无法解析时，接口立即抛出 :class:`HCSPInputError`，不会启动类型
-构造。结构/静态类型错误使构造器无法形成完整类型，或必要证明义务被判定为
-``false`` 时，接口抛出 :class:`HCSPTypeConstructionError`。若规则推导已经形成
-完整 Type AST，但某条必要证明义务仍为 ``unknown``，接口则抛出
-:class:`HCSPUntrustedTypeConstructionError`：异常的 ``untrusted_type`` 保留完整
-候选类型，同时明确标记它尚未验证、不可信，绝不将它作为普通返回值。
-
-``OutputMode`` 只控制文本展示，不参与解析、推导或证明。``result`` 输出最终结论
-以及失败时的部分进度，``full`` 进一步输出原始 source、环境摘要、规则轨迹和
-FOL/dL 证明证据；``none`` 供只消费返回值/异常的程序静默调用。
-
-已有的正式 Type AST 可交给 :func:`build_type_transition_graph`。第三个接口依次验证
-Type 根和规模选项，把 Type 降低为规范 AST 与双模拟最小循环项图，再穷尽 Table 3
-关键-deadline状态空间。成功返回不含后端项图编号的 ``TypeTransitionGraph``；失败
-统一抛出 :class:`HCSPTypeTransitionGraphError`，并通过 ``kind``/``phase`` 区分
-失败阶段。和另外两个接口一样，它支持 ``none``、``result`` 与 ``full`` 三档输出。
-"""
+r"""Public facade connecting text parsing, Table 2 proofs, Table 3 graphs, and lock analysis."""
 
 from __future__ import annotations
 
@@ -86,17 +61,12 @@ from .data_structures.runtime_context import (
 )
 
 
-# 用户只需知道接口返回“某个正式 Type AST”；具体节点种类由推导结果决定。
+# The public API exposes TypeAST without promising specific node constructors.
 TypeAST: TypeAlias = ConfigurationType
 
 
 class OutputMode(str, Enum):
-    """控制四个公共接口的文本输出详细程度。
-
-    ``NONE`` 不写任何文本，适合把返回值和异常交给上层程序自行处理；``RESULT``
-    只写最终结论、正式 Type 或首要错误；``FULL`` 还写输入、规则推导、证明义务，
-    或状态图的全部状态与边。输出模式从不改变解析、证明、返回值和异常类型。
-    """
+    r"""Select text verbosity without changing results, proofs, or exception types."""
 
     NONE = "none"
     RESULT = "result"
@@ -104,7 +74,7 @@ class OutputMode(str, Enum):
 
 
 class TypeTransitionGraphErrorKind(str, Enum):
-    """第三个接口可由调用者稳定区分的输入、规范化和规模失败类别。"""
+    r"""Stable categories for invalid types, normalization failures, and graph limits."""
 
     INVALID_TYPE = "invalid-type"
     INVALID_LIMIT = "invalid-limit"
@@ -113,7 +83,7 @@ class TypeTransitionGraphErrorKind(str, Enum):
 
 
 class TypeLockAnalysisErrorKind(str, Enum):
-    """第四个接口可稳定区分的图对象与可达闭包错误类别。"""
+    r"""Stable categories for invalid graphs and incomplete reachable closures."""
 
     INVALID_GRAPH = "invalid-graph"
     INCOMPLETE_GRAPH = "incomplete-graph"
@@ -121,13 +91,7 @@ class TypeLockAnalysisErrorKind(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class HCSPErrorDetail:
-    """一条可由程序读取、也可直接展示给用户的错误证据。
-
-    ``category`` 和 ``verdict`` 用于稳定分类；``message`` 是人类可读原因；
-    ``rule``/``location`` 指向失败的推导规则和内部判断位置。证明相关错误还会在
-    ``proof_kind``、``formula``、``backend_detail`` 中保存 FOL/dL 类别、实际待证
-    公式和证明器说明。非证明错误的后三个字段为空字符串。
-    """
+    r"""Structured diagnostic evidence including rule, location, formula, and prover detail."""
 
     category: str
     verdict: str
@@ -140,7 +104,7 @@ class HCSPErrorDetail:
 
 
 def _normalize_output_mode(value: OutputMode | str) -> OutputMode:
-    """把字符串便捷写法规范成唯一的 :class:`OutputMode`。"""
+    r"""Normalize the string shorthand to an OutputMode."""
 
     if isinstance(value, OutputMode):
         return value
@@ -155,14 +119,14 @@ def _normalize_output_mode(value: OutputMode | str) -> OutputMode:
 
 
 def _write_output(text: str, stream: TextIO | None) -> None:
-    """把已经渲染完成的一段接口结果一次性写到目标文本流。"""
+    r"""Write one rendered result to the selected text stream."""
 
     destination = sys.stdout if stream is None else stream
     print(text, file=destination)
 
 
 def _format_environment(environment: Mapping[str, Any]) -> str:
-    """用稳定、紧凑且保留声明顺序的形式显示一个内部环境。"""
+    r"""Display an environment compactly in declaration order."""
 
     if not environment:
         return "{}"
@@ -174,18 +138,14 @@ def _format_environment(environment: Mapping[str, Any]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _ProgramContext:
-    """只在一次门面调用内部流转的完整解析上下文。
-
-    本对象故意使用私有名称且不进入根包导出：它负责把同一份 source 产生的参数、
-    Gamma、Theta 和 Process AST 绑定到一次类型构造中，而不是供用户分两阶段操作。
-    """
+    r"""Keep environments and Process ASTs from one parse bound to one API call."""
 
     source_text: str = field(repr=False)
     source_name: str
     parsed: ParsedHCSPSource = field(repr=False)
 
     def __post_init__(self) -> None:
-        """防御性检查上下文确实来自一次完整 source 解析。"""
+        r"""Validate that the context contains a complete parsed program."""
 
         if not isinstance(self.source_text, str):
             raise TypeError("HCSP source must be a string")
@@ -196,59 +156,59 @@ class _ProgramContext:
 
     @property
     def process_ast(self) -> HCSP:
-        """返回本次内部类型构造使用的完整 Process/Parallel AST。"""
+        r"""Return the internal Process or Parallel AST for this call."""
 
         return self.parsed.process
 
     @property
     def gamma(self) -> Mapping[str, GammaType]:
-        """返回本次内部类型构造使用的只读 Gamma。"""
+        r"""Return the call's read-only Gamma."""
 
         return self.parsed.gamma
 
     @property
     def theta(self) -> Mapping[str, ChannelType]:
-        """返回本次内部类型构造使用的只读 Theta。"""
+        r"""Return the call's read-only Theta."""
 
         return self.parsed.theta
 
     @property
     def parameters(self) -> ParameterEnvironment:
-        """返回本次内部类型构造使用的共享参数环境与约束。"""
+        r"""Return shared parameters and their constraint."""
 
         return self.parsed.parameters
 
     @property
     def process_components(self) -> tuple[Process, ...]:
-        """按源码顺序返回顶层并行系统的 Process 叶子。"""
+        r"""Return top-level process leaves in source order."""
 
         return self.parsed.process_components
 
     def format_full(self) -> str:
-        """显示完整 source 和内部环境摘要，但不导出 Process AST 对象。"""
+        r"""Display source and environment summaries without exporting Process AST objects."""
 
         return "\n".join(
             (
-                "=== HCSP 类型构造完整日志 ===",
-                f"来源 : {self.source_name}",
+                '=== HCSP type construction full log ===',
+                f"Source : {self.source_name}",
                 "",
-                "--- 原始用户输入 ---",
+                '--- Original user input ---',
                 self.source_text,
                 "",
-                "--- 输入解析与内部模型构造 ---",
-                "状态       : 成功",
+                '--- Input parsing and internal model construction ---',
+                'Status       : success',
                 f"Parameters : {_format_environment(self.parameters.declarations)}",
-                f"约束 H     : {self.parameters.constraint}",
+                f"Constraint H : {self.parameters.constraint}",
                 f"Gamma      : {_format_environment(self.gamma)}",
                 f"Theta      : {_format_environment(self.theta)}",
-                f"Process 数 : {len(self.process_components)}",
-                "Process AST : 已在内部构造，不作为公共对象暴露",
+                f"Process count : {len(self.process_components)}",
+                'Process AST : constructed internally; not exposed by the public API',
             )
         )
 
 
 def _parse_program(source: str, source_name: str) -> _ProgramContext:
-    """解析完整 source，并把内部模型绑定成一次调用专用的上下文。"""
+    r"""Parse complete input into a call-local program context."""
 
     parsed = parse_hcsp_source(source, source_name=source_name)
     return _ProgramContext(
@@ -259,10 +219,9 @@ def _parse_program(source: str, source_name: str) -> _ProgramContext:
 
 
 def _first_report_reason(report: TypeConstructionReport) -> str:
-    """从诊断或第一条未通过义务中提取简洁失败原因。"""
+    r"""Select a concise failure reason consistent with the final verdict."""
 
-    # 同一次推导可能先记录 UNKNOWN，随后又遇到明确 FALSE。首要原因应与最终
-    # verdict 同级，否则用户会在“已否证”结果中误看到较早的未决提示。
+    # Match the primary reason to the final verdict: a later FALSE outranks earlier UNKNOWN.
     for diagnostic in report.diagnostics:
         if diagnostic.verdict is report.verdict:
             return diagnostic.message
@@ -278,8 +237,8 @@ def _first_report_reason(report: TypeConstructionReport) -> str:
         if obligation.verdict is not Verdict.TRUE:
             return obligation.detail or obligation.description
     if report.verdict is Verdict.UNKNOWN:
-        return "存在尚未证明的前提"
-    return "TypeConstructor 没有生成可信的正式 Type AST"
+        return 'Some premises remain unproved'
+    return 'TypeConstructor did not produce a trusted Type AST'
 
 
 _ENVIRONMENT_RULES = frozenset({"environment", "parameters"})
@@ -291,7 +250,7 @@ def _report_error_details(
     mismatch: str = "",
     rule_category: str = "derivation",
 ) -> tuple[HCSPErrorDetail, ...]:
-    """把诊断和未通过证明义务转换为稳定的公共错误明细。"""
+    r"""Convert diagnostics and failed obligations into stable public error details."""
 
     details: list[HCSPErrorDetail] = []
     for diagnostic in report.diagnostics:
@@ -343,7 +302,7 @@ def _primary_error_detail(
     category: str,
     fallback: str,
 ) -> HCSPErrorDetail:
-    """选择与总体失败类别一致的首要证据，避免摘要和 verdict 错位。"""
+    r"""Choose primary evidence consistent with the overall failure category."""
 
     for detail in details:
         if detail.category == category:
@@ -354,7 +313,7 @@ def _primary_error_detail(
 
 
 def _error_phase(category: str) -> str:
-    """把细分类别归并成用户可读的处理阶段。"""
+    r"""Group error categories by processing phase."""
 
     if category == "environment":
         return "environment"
@@ -366,35 +325,35 @@ def _error_phase(category: str) -> str:
 
 
 def _error_category_explanation(category: str) -> str:
-    """返回每个稳定错误类别对应的简明中文含义。"""
+    r"""Explain each stable error category in English."""
 
     return {
-        "environment": "Gamma、Theta、共享参数或路径条件不满足良构要求",
-        "derivation": "Table 2 规则无法为当前 Process 形成完整类型结论",
-        "type-mismatch": "用户给定 Type 的当前结构与规则结论不一致",
-        "rule-application": "当前 Process 或运行上下文不满足规则的静态前提",
-        "proof-failed": "必要证明公式已被证明器否证或发现反例",
-        "proof-unknown": "必要证明公式尚未被可信证明器判定",
-    }.get(category, "处理过程未能得到可信结论")
+        "environment": 'Gamma, Theta, shared parameters, or the path condition are not well-formed',
+        "derivation": 'Table 2 rules cannot derive a complete type for the current Process',
+        "type-mismatch": 'The supplied Type structure does not match the rule conclusion',
+        "rule-application": 'The current Process or runtime context violates a static rule premise',
+        "proof-failed": 'A required proof formula was disproved or a counterexample was found',
+        "proof-unknown": 'A required proof formula remains unresolved by a trusted prover',
+    }.get(category, 'No trusted conclusion was obtained')
 
 
 def _render_primary_detail(detail: HCSPErrorDetail) -> tuple[str, ...]:
-    """渲染 result 日志中的规则、位置和证明器说明。"""
+    r"""Render the primary rule, location, and prover evidence for result output."""
 
-    lines = [f"原因     : {detail.message}"]
+    lines = [f"Reason     : {detail.message}"]
     if detail.rule:
-        lines.append(f"相关规则 : {detail.rule}")
+        lines.append(f"Related rule : {detail.rule}")
     if detail.location:
-        lines.append(f"判断位置 : {detail.location}")
+        lines.append(f"Judgment location : {detail.location}")
     if detail.proof_kind:
-        lines.append(f"证明类别 : {detail.proof_kind.upper()}")
+        lines.append(f"Proof kind : {detail.proof_kind.upper()}")
     if detail.backend_detail:
-        lines.append(f"证明器说明: {detail.backend_detail}")
+        lines.append(f"Prover detail: {detail.backend_detail}")
     return tuple(lines)
 
 
 def _detail_reason(detail: HCSPErrorDetail) -> str:
-    """返回兼容旧 ``reason`` 字段且同时保留证明器解释的单行原因。"""
+    r"""Include prover evidence in the legacy-compatible reason field."""
 
     if detail.backend_detail:
         return f"{detail.message}: {detail.backend_detail}"
@@ -402,7 +361,7 @@ def _detail_reason(detail: HCSPErrorDetail) -> str:
 
 
 def _format_partial_types(report: TypeConstructionReport) -> str:
-    """把停止前已经正式形成的分量类型显示为一行。"""
+    r"""Display component types completed before derivation stopped."""
 
     if not report.constructed_component_types:
         return "(none)"
@@ -423,7 +382,7 @@ def _format_partial_types(report: TypeConstructionReport) -> str:
 def _format_partial_progress(
     report: TypeConstructionReport,
 ) -> tuple[str, ...]:
-    """生成失败摘要中的部分推导进度和停止位置。"""
+    r"""Summarize partial progress and the stopping point."""
 
     proved = sum(
         item.verdict is Verdict.TRUE for item in report.obligations
@@ -435,15 +394,15 @@ def _format_partial_progress(
         item.verdict is Verdict.UNKNOWN for item in report.obligations
     )
     lines = [
-        f"部分类型 : {_format_partial_types(report)}",
-        f"推导步骤 : 已执行 {len(report.steps)} 步",
-        "证明义务 : "
+        f"Partial types : {_format_partial_types(report)}",
+        f"Derivation steps : {len(report.steps)} steps executed",
+        'Proof obligations : '
         f"true={proved}, false={failed}, unknown={unknown}",
     ]
     if report.steps:
         last_step = max(report.steps, key=lambda item: item.number)
         lines.append(
-            "停止位置 : "
+            'Stop location : '
             f"{last_step.rule} @ {last_step.location or '-'}"
         )
     return tuple(lines)
@@ -455,7 +414,7 @@ def _format_type_result(
     failure_kind: TypeConstructionErrorKind | None = None,
     primary_detail: HCSPErrorDetail | None = None,
 ) -> str:
-    """把内部类型构造报告渲染成稳定的单入口结果摘要。"""
+    r"""Render construction, proof, and trust status from an internal report."""
 
     constructed_type = report.constructed_type
     proof_counts = {
@@ -476,62 +435,61 @@ def _format_type_result(
     is_untrusted = (
         report.verdict is Verdict.UNKNOWN and constructed_type is not None
     )
-    construction_status = "已完成" if constructed_type is not None else "未完成"
+    construction_status = 'complete' if constructed_type is not None else 'incomplete'
     if is_trusted:
-        proof_status = "全部通过"
-        trust_status = "可信（已验证）"
+        proof_status = 'all passed'
+        trust_status = 'trusted (verified)'
     elif is_untrusted:
-        proof_status = "存在未验证义务"
-        trust_status = "不可信（未验证）"
+        proof_status = 'unverified obligations remain'
+        trust_status = 'untrusted (unverified)'
     elif constructed_type is not None:
-        proof_status = "存在未通过义务"
-        trust_status = "不可信（已发现未通过义务）"
+        proof_status = 'failed obligations remain'
+        trust_status = 'untrusted (failed obligations)'
     else:
         proof_status = (
-            "未通过"
+            'failed'
             if report.verdict is Verdict.FALSE
-            else "存在未决前提"
+            else 'unresolved premises remain'
         )
-        trust_status = "不适用（未形成完整类型）"
+        trust_status = 'not applicable (no complete type)'
     lines = [
-        "=== HCSP 类型构造结果 ===",
+        '=== HCSP type construction result ===',
         f"Verdict : {report.verdict.value}",
-        f"类型构造 : {construction_status}",
-        "Type AST 生成 : " + ("成功" if constructed_type is not None else "失败"),
-        f"证明状态 : {proof_status}",
-        f"类型可信性 : {trust_status}",
+        f"Type construction : {construction_status}",
+        'Type AST generation : ' + ('success' if constructed_type is not None else 'failed'),
+        f"Proof status : {proof_status}",
+        f"Type trust : {trust_status}",
     ]
     if failure_kind is not None:
         lines.extend(
             (
-                f"错误类别 : {failure_kind.value}",
-                f"错误阶段 : {_error_phase(failure_kind.value)}",
-                "类别说明 : "
+                f"Error kind : {failure_kind.value}",
+                f"Error phase : {_error_phase(failure_kind.value)}",
+                'Kind explanation : '
                 + _error_category_explanation(failure_kind.value),
             )
         )
     if is_untrusted:
         lines.extend(
             (
-                "完整候选 Type 源码 : "
+                'Complete candidate Type source : '
                 + format_type_source(constructed_type),
-                "处理结果 : 候选类型仅通过异常的 untrusted_type 属性提供，"
-                "未作为可信 Type AST 返回",
-                f"证明义务 : {proof_summary}",
+                'Outcome : the candidate is available only as error.untrusted_type; it is not returned as a trusted Type AST',
+                f"Proof obligations : {proof_summary}",
             )
         )
     elif constructed_type is not None and report.verdict is Verdict.TRUE:
-        lines.append("Type 源码 : " + format_type_source(constructed_type))
+        lines.append('Type source : ' + format_type_source(constructed_type))
     elif constructed_type is not None:
         lines.extend(
             (
-                "完整候选 Type 源码 : "
+                'Complete candidate Type source : '
                 + format_type_source(constructed_type),
-                "处理结果 : 候选类型没有作为可信 Type AST 返回",
+                'Outcome : the candidate is not returned as a trusted Type AST',
             )
         )
     else:
-        lines.append("Type 源码 : (none)")
+        lines.append('Type source : (none)')
         lines.extend(_format_partial_progress(report))
     if primary_detail is not None:
         lines.extend(_render_primary_detail(primary_detail))
@@ -543,18 +501,18 @@ def _format_input_error_result(
     *,
     operation: str,
 ) -> str:
-    """把解析错误显示成带业务名称和机器可读分类的紧凑结果。"""
+    r"""Render a compact input error with the operation and machine-readable category."""
 
     return "\n".join(
         (
-            f"=== HCSP {operation}输入错误 ===",
+            f"=== HCSP {operation} input error ===",
             "Verdict : input-error",
-            "结果     : 失败",
-            f"错误类别 : input-{error.phase}",
-            "错误阶段 : input",
-            f"原因     : {error.message}",
-            f"位置     : {error.source_name}:{error.line}:{error.column}",
-            f"{operation}进度 : 未启动（输入解析阶段已终止）",
+            'Result     : failed',
+            f"Error kind : input-{error.phase}",
+            'Error phase : input',
+            f"Reason     : {error.message}",
+            f"Location   : {error.source_name}:{error.line}:{error.column}",
+            f"{operation} progress : not started (input parsing stopped)",
         )
     )
 
@@ -566,48 +524,37 @@ def _format_input_error_full(
     *,
     operation: str,
 ) -> str:
-    """显示原始输入、精确定位和后端未启动的完整解析失败日志。"""
+    r"""Show the input location and explain that backend processing never started."""
 
     return "\n".join(
         (
-            f"=== HCSP {operation}完整错误日志 ===",
-            f"来源 : {source_name}",
+            f"=== HCSP {operation} full error log ===",
+            f"Source : {source_name}",
             "Verdict : input-error",
-            f"错误类别 : input-{error.phase}",
-            "错误阶段 : input",
+            f"Error kind : input-{error.phase}",
+            'Error phase : input',
             "",
-            "--- 原始用户输入 ---",
+            '--- Original user input ---',
             source if isinstance(source, str) else repr(source),
             "",
-            "--- 输入解析失败 ---",
+            '--- Input parsing failed ---',
             error.format_diagnostic(),
             "",
             f"--- {operation} ---",
-            "未启动：输入尚未形成合法的内部 AST 与环境。",
+            'Not started: input did not form valid internal ASTs and environments.',
         )
     )
 
 
 class HCSPTypeConstructionError(RuntimeError):
-    """TypeConstructor 未能得到可信 Type AST 时抛出的公共异常。
-
-    ``verdict`` 是 ``false`` 或 ``unknown``；``reason`` 给出首要失败原因；
-    ``kind/phase/rule/location`` 给出机器可读分类与首要位置；``details`` 保存
-    全部有效错误证据；``partial_types`` 保留各配置已经形成的分量类型。
-    ``format_full()`` 可用于在捕获异常后再次读取全部规则、FOL/dL 公式和证明器
-    证据。内部 Process AST 与内部构造报告没有公共属性。
-
-    ``kind`` 的稳定取值为 ``environment``、``derivation``、``proof-failed`` 和
-    ``proof-unknown``。需要读取完整未验证候选时，应先单独捕获子类
-    :class:`HCSPUntrustedTypeConstructionError`，再访问 ``untrusted_type``。
-    """
+    r"""Construction failed to produce a trusted Type AST."""
 
     def __init__(
         self,
         context: _ProgramContext,
         report: TypeConstructionReport,
     ) -> None:
-        """冻结公共失败摘要，并私下保留渲染完整日志所需的证据。"""
+        r"""Store structured failure fields and private evidence for full output."""
 
         self.source_name = context.source_name
         self.verdict = report.verdict.value
@@ -628,7 +575,7 @@ class HCSPTypeConstructionError(RuntimeError):
         super().__init__(self.format_result())
 
     def format_result(self) -> str:
-        """返回失败原因、部分类型和停止进度的紧凑文本。"""
+        r"""Summarize failure, partial types, and derivation progress."""
 
         return _format_type_result(
             self._report,
@@ -637,34 +584,28 @@ class HCSPTypeConstructionError(RuntimeError):
         )
 
     def format_full(self) -> str:
-        """返回原始输入及停止点以前的完整类型构造审计日志。"""
+        r"""Display the input and construction evidence up to the stopping point."""
 
         result_lines = self.format_result().splitlines()
         return "\n\n".join(
             (
                 self._context.format_full(),
                 self._report.format_detailed(),
-                "=== 类型构造失败摘要 ===\n"
+                '=== Type construction failure summary ===\n'
                 + "\n".join(result_lines[1:]),
             )
         )
 
 
 class HCSPUntrustedTypeConstructionError(HCSPTypeConstructionError):
-    """类型构造完成、但必要证明义务仍未验证时抛出的公共异常。
-
-    ``untrusted_type`` 是规则推导得到的完整 Type AST。它便于用户审计
-    推导结构或在外部补充证明，但不表示构造正确性已经得到证明。该异常是
-    :class:`HCSPTypeConstructionError` 的子类，因此调用者可以统一捕获所有
-    TypeConstructor 失败，也可以单独读取尚未验证的完整候选类型。
-    """
+    r"""Construction produced a complete candidate with unresolved proof obligations."""
 
     def __init__(
         self,
         context: _ProgramContext,
         report: TypeConstructionReport,
     ) -> None:
-        """保留完整但未验证的候选类型及其全部审计证据。"""
+        r"""Keep the complete unverified candidate and its audit evidence."""
 
         if report.verdict is not Verdict.UNKNOWN:
             raise ValueError(
@@ -680,18 +621,7 @@ class HCSPUntrustedTypeConstructionError(HCSPTypeConstructionError):
 
 
 class HCSPTypeCheckingError(RuntimeError):
-    """用户给定 Type 未被 Table 2 规则验证时抛出的结构化公共异常。
-
-    ``kind`` 和 ``phase`` 可供程序区分环境错误、Type 结构不匹配、规则应用
-    错误、证明反例与证明未决；对应稳定值为 ``environment``、
-    ``type-mismatch``、``rule-application``、``proof-failed`` 与
-    ``proof-unknown``。``details`` 保留所有参与最终结论的错误证据。
-
-    ``expected_type`` 保存用户给定的正式 Type AST；
-    ``type_mismatch_detected`` 表示是否明确发现结构不匹配；三值字段
-    ``type_structure_matched`` 为 ``True`` 时结构已完整消费，为 ``False`` 时已经
-    明确不匹配，为 ``None`` 时环境或规则前提使结构检查没有走完。
-    """
+    r"""Table 2 rules or proofs failed to validate the supplied Type."""
 
     def __init__(
         self,
@@ -699,7 +629,7 @@ class HCSPTypeCheckingError(RuntimeError):
         report: object,
         source_text: str = "",
     ) -> None:
-        """保存最小的机器可读检查结论与内部审计报告。"""
+        r"""Store structured checking status and the internal audit report."""
 
         self.source_name = source_name
         self._source_text = source_text
@@ -734,41 +664,41 @@ class HCSPTypeCheckingError(RuntimeError):
         super().__init__(self.format_result())
 
     def format_result(self) -> str:
-        """渲染给定 Type、检查结论及其首要失败原因。"""
+        r"""Display the supplied Type and its primary checking failure."""
 
         if self.kind is TypeCheckingErrorKind.ENVIRONMENT:
-            structure_status = "未启动（环境无效）"
+            structure_status = 'not started (invalid environment)'
         elif self.kind is TypeCheckingErrorKind.TYPE_MISMATCH:
-            structure_status = "不匹配"
+            structure_status = 'mismatch'
         else:
-            structure_status = "已按规则检查，最终结论未通过"
+            structure_status = 'checked against the rules; final result failed'
         lines = [
-            "=== HCSP 类型检查结果 ===",
+            '=== HCSP type checking result ===',
             f"Verdict : {self.verdict}",
-            "检查结论 : 失败",
-            f"错误类别 : {self.kind.value}",
-            f"错误阶段 : {self.phase}",
-            "类别说明 : " + _error_category_explanation(self.kind.value),
-            f"Type 结构 : {structure_status}",
-            "给定 Type 源码 : " + format_type_source(self.expected_type),
+            'Check result : failed',
+            f"Error kind : {self.kind.value}",
+            f"Error phase : {self.phase}",
+            'Kind explanation : ' + _error_category_explanation(self.kind.value),
+            f"Type structure : {structure_status}",
+            'Supplied Type source : ' + format_type_source(self.expected_type),
         ]
         lines.extend(_render_primary_detail(self.primary_detail))
         return "\n".join(lines)
 
     def format_full(self) -> str:
-        """渲染用户 Type 与 Table 2 规则、证明义务的完整审计记录。"""
+        r"""Display rule matching and proof obligations for the supplied Type."""
 
         sections = [
-            "=== HCSP 类型检查完整日志 ===\n"
-            f"来源 : {self.source_name}",
+            '=== HCSP type checking full log ===\n'
+            f"Source : {self.source_name}",
         ]
         if self._source_text:
-            sections.append("--- 原始用户输入 ---\n" + self._source_text)
+            sections.append('--- Original user input ---\n' + self._source_text)
         result_lines = self.format_result().splitlines()
         sections.extend(
             (
                 self._report.format_detailed(),
-                "=== Type 检查失败摘要 ===\n"
+                '=== Type checking failure summary ===\n'
                 + "\n".join(result_lines[1:]),
             )
         )
@@ -776,14 +706,7 @@ class HCSPTypeCheckingError(RuntimeError):
 
 
 class HCSPTypeTransitionGraphError(RuntimeError):
-    """Type AST 未能生成完整关键-deadline状态图时抛出的公共异常。
-
-    ``kind`` 与 ``phase`` 区分非法 Type 根、非法规模选项、Type 规范化失败和图规模
-    越界；``details`` 提供与另外两个业务接口一致的结构化错误证据。达到规模上限
-    时 ``limit_name``/``limit`` 保存具体限制；非法选项使用
-    ``option_name``/``option_value`` 原样保存调用值。异常保存可读的输入 Type 文本，
-    但绝不携带或返回部分状态图。
-    """
+    r"""A complete graph could not be built from the Type AST."""
 
     def __init__(
         self,
@@ -796,7 +719,7 @@ class HCSPTypeTransitionGraphError(RuntimeError):
         option_name: str = "",
         option_value: object = None,
     ) -> None:
-        """冻结机器可读错误字段和完整日志所需的输入 Type 文本。"""
+        r"""Store structured error fields and the input Type text."""
 
         if not isinstance(kind, TypeTransitionGraphErrorKind):
             raise TypeError("graph error kind must be TypeTransitionGraphErrorKind")
@@ -841,77 +764,76 @@ class HCSPTypeTransitionGraphError(RuntimeError):
         super().__init__(self.format_result())
 
     def format_result(self) -> str:
-        """返回失败类别、阶段、原因和可选规模上限的紧凑结果。"""
+        r"""Summarize the category, phase, reason, and optional graph limit."""
 
         explanations = {
             TypeTransitionGraphErrorKind.INVALID_TYPE: (
-                "输入对象不是项目支持的正式 Type AST 配置根"
+                'The input is not a supported Type AST configuration root'
             ),
             TypeTransitionGraphErrorKind.INVALID_LIMIT: (
-                "状态或转移数量上限不是严格正整数或 None"
+                'State and transition limits must be strictly positive integers or None'
             ),
             TypeTransitionGraphErrorKind.NORMALIZATION: (
-                "Type AST 无法转换为闭合的等递归规范状态"
+                'The Type AST cannot be converted to a closed equi-recursive normalized state'
             ),
             TypeTransitionGraphErrorKind.SIZE_LIMIT: (
-                "完整可达图超出调用者允许的构造规模"
+                'The complete reachable graph exceeds the requested size limit'
             ),
         }
         lines = [
-            "=== HCSP Type 状态图构造结果 ===",
+            '=== HCSP Type transition graph result ===',
             "Verdict : error",
-            "图构造 : 失败",
-            f"错误类别 : {self.kind.value}",
-            f"错误阶段 : {self.phase}",
-            f"类别说明 : {explanations[self.kind]}",
-            f"原因     : {self.reason}",
+            'Graph construction : failed',
+            f"Error kind : {self.kind.value}",
+            f"Error phase : {self.phase}",
+            f"Kind explanation : {explanations[self.kind]}",
+            f"Reason     : {self.reason}",
         ]
         if self.limit_name:
-            lines.append(f"规模上限 : {self.limit_name}={self.limit}")
+            lines.append(f"Size limit : {self.limit_name}={self.limit}")
         if self.option_name:
             lines.append(
-                f"非法选项 : {self.option_name}={self.option_value!r}"
+                f"Invalid option : {self.option_name}={self.option_value!r}"
             )
-        lines.append("返回结果 : 无（不会返回部分状态图）")
+        lines.append('Return value : none (no partial transition graph is returned)')
         return "\n".join(lines)
 
     def format_full(self) -> str:
-        """返回输入 Type、各处理阶段和最终失败摘要的完整日志。"""
+        r"""Display the input Type, processing phases, and failure summary."""
 
         if self.kind is TypeTransitionGraphErrorKind.INVALID_TYPE:
             stages = (
-                "Type 根验证 : 失败",
-                "Type 规范化 : 未启动",
-                "状态图遍历 : 未启动",
+                'Type root validation : failed',
+                'Type normalization : not started',
+                'Graph traversal : not started',
             )
         elif self.kind is TypeTransitionGraphErrorKind.INVALID_LIMIT:
             stages = (
-                "Type 根验证 : 成功",
-                "选项验证   : 失败",
-                "Type 规范化 : 未启动",
-                "状态图遍历 : 未启动",
+                'Type root validation : success',
+                'Option validation : failed',
+                'Type normalization : not started',
+                'Graph traversal : not started',
             )
         elif self.kind is TypeTransitionGraphErrorKind.NORMALIZATION:
             stages = (
-                "Type 根验证 : 成功",
-                "选项验证   : 成功",
-                "Type 规范化 : 失败",
-                "状态图遍历 : 未启动",
+                'Type root validation : success',
+                'Option validation : success',
+                'Type normalization : failed',
+                'Graph traversal : not started',
             )
         else:
             stages = (
-                "Type 根验证 : 成功",
-                "选项验证   : 成功",
-                "Type 规范化 : 成功",
-                "状态图遍历 : 失败（达到规模上限）",
+                'Type root validation : success',
+                'Option validation : success',
+                'Type normalization : success',
+                'Graph traversal : failed (size limit reached)',
             )
         result_lines = self.format_result().splitlines()
         return "\n\n".join(
             (
-                "=== HCSP Type 状态图构造完整错误日志 ===\n"
-                "\n".join(stages),
-                "--- 输入 Type ---\n" + self._input_type,
-                "=== 状态图构造失败摘要 ===\n"
+                '=== HCSP Type transition graph full error log ===\n\n'.join(stages),
+                '--- Input Type ---\n' + self._input_type,
+                '=== Graph construction failure summary ===\n'
                 + "\n".join(result_lines[1:]),
             )
         )
@@ -922,7 +844,7 @@ def _write_graph_error(
     mode: OutputMode,
     stream: TextIO | None,
 ) -> None:
-    """按照第三个接口的输出模式至多打印一次结构化错误。"""
+    r"""Write a graph error once according to the selected output mode."""
 
     if mode is OutputMode.NONE:
         return
@@ -935,13 +857,7 @@ def _write_graph_error(
 
 
 class HCSPTypeLockAnalysisError(RuntimeError):
-    """第四接口无法在一张完整 Type 图上执行性质分析时抛出的异常。
-
-    性质为假不是异常：可达死锁、活锁或 Bottom 错误终止由
-    :class:`LockFreedomReport` 中的反例正常返回。本异常只表示调用对象不是
-    第三接口的图，或图含有不可达孤立状态，
-    因而不能被当作一张完整的可达闭包进行全局性质判断。
-    """
+    r"""Property analysis requires a valid, complete reachable Type graph."""
 
     def __init__(
         self,
@@ -949,7 +865,7 @@ class HCSPTypeLockAnalysisError(RuntimeError):
         reason: str,
         graph: object,
     ) -> None:
-        """冻结机器可读类别、阶段、原因和图规模摘要。"""
+        r"""Store error classification and graph size information."""
 
         if not isinstance(kind, TypeLockAnalysisErrorKind):
             raise TypeError("lock-analysis error kind must be TypeLockAnalysisErrorKind")
@@ -978,43 +894,43 @@ class HCSPTypeLockAnalysisError(RuntimeError):
         super().__init__(self.format_result())
 
     def format_result(self) -> str:
-        """返回失败类别、阶段和不返回部分结论的紧凑说明。"""
+        r"""Explain the failure without returning partial property conclusions."""
 
         lines = [
-            "=== Type 行为正确性分析结果 ===",
+            '=== Type behavioral correctness result ===',
             "Verdict : error",
-            "性质分析 : 失败",
-            f"错误类别 : {self.kind.value}",
-            f"错误阶段 : {self.phase}",
-            f"原因     : {self.reason}",
+            'Property analysis : failed',
+            f"Error kind : {self.kind.value}",
+            f"Error phase : {self.phase}",
+            f"Reason     : {self.reason}",
         ]
         if self.state_count is not None:
             lines.extend(
                 (
-                    f"图状态数 : {self.state_count}",
-                    f"图迁移数 : {self.transition_count}",
+                    f"Graph state count : {self.state_count}",
+                    f"Graph transition count : {self.transition_count}",
                 )
             )
-        lines.append("返回结果 : 无（不会返回部分性质结论）")
+        lines.append('Return value : none (no partial property result is returned)')
         return "\n".join(lines)
 
     def format_full(self) -> str:
-        """返回各验证阶段和失败摘要，不重复输出整张可能很大的图。"""
+        r"""Display validation phases and failure evidence without repeating the graph."""
 
         reachability = (
-            "未启动"
+            'not started'
             if self.kind is TypeLockAnalysisErrorKind.INVALID_GRAPH
-            else "失败"
+            else 'failed'
         )
         return "\n\n".join(
             (
-                "=== Type 行为正确性分析完整错误日志 ===\n"
-                f"图对象验证 : {'失败' if self.kind is TypeLockAnalysisErrorKind.INVALID_GRAPH else '成功'}\n"
-                f"可达闭包验证 : {reachability}\n"
-                "死锁搜索 : 未启动\n"
-                "活锁搜索 : 未启动\n"
-                "Bottom 错误搜索 : 未启动",
-                "=== 行为正确性分析失败摘要 ===\n"
+                '=== Type behavioral correctness full error log ===\n'
+                f"Graph object validation : {'failed' if self.kind is TypeLockAnalysisErrorKind.INVALID_GRAPH else 'success'}\n"
+                f"Reachable closure validation : {reachability}\n"
+                'Deadlock search : not started\n'
+                'Livelock search : not started\n'
+                'Bottom error search : not started',
+                '=== Behavioral correctness failure summary ===\n'
                 + "\n".join(self.format_result().splitlines()[1:]),
             )
         )
@@ -1025,7 +941,7 @@ def _write_lock_analysis_error(
     mode: OutputMode,
     stream: TextIO | None,
 ) -> None:
-    """按照第四接口的输出模式至多写出一次结构化错误。"""
+    r"""Write a lock-analysis error once according to the output mode."""
 
     if mode is OutputMode.NONE:
         return
@@ -1039,7 +955,7 @@ def _normalize_initial_states(
     value: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None,
     component_count: int,
 ) -> tuple[Mapping[str, Any], ...]:
-    """把单进程或并行分量初态转换成与 Process 叶子一一对应的元组。"""
+    r"""Match partial initial states to top-level process components in source order."""
 
     if value is None:
         return tuple({} for _ in range(component_count))
@@ -1066,7 +982,7 @@ def _normalize_initial_states(
 
 
 def _normalize_path_condition(value: str | bool, source_name: str) -> Any:
-    """把用户级 Bool/字符串路径条件转换成 TypeConstructor 使用的表达式。"""
+    r"""Parse a bool or expression string as the initial path condition."""
 
     if isinstance(value, str):
         return parse_expression(
@@ -1084,7 +1000,7 @@ def _build_configurations(
     | Sequence[Mapping[str, Any]]
     | None,
 ) -> tuple[Configuration, ...]:
-    """为每个顶层 Process 分量建立一一对应的内部配置。"""
+    r"""Create one configuration for each top-level process component."""
 
     states = _normalize_initial_states(
         initial_states,
@@ -1112,56 +1028,28 @@ def construct_hcsp_type(
     z3_timeout_ms: int = 5_000,
     keymaerax_timeout_seconds: float | None = None,
 ) -> TypeAST:
-    """解析一份完整 HCSP 输入，构造并证明其行为 Type AST。
+    r"""Construct and prove a behavioral Type AST from complete HCSP input.
 
-    输入文本必须按 ``gamma [parameters] theta process`` 的顺序包含全部分节，且
-    不能包含用户 ``type`` 分节。接口在内部完成词法/语法分析、运行上下文和
-    Process AST 构造、Table 2 规则推导，以及各条 FOL/dL 前提的证明。中间
-    Process AST 不作为公共结果暴露。
+    Args:
+        source: Ordered gamma, optional parameters, theta, and process sections.
+        source_name: Label used in source diagnostics.
+        initial_states: Partial Gamma assignments; for parallel processes, pass
+            one mapping per component in source order.
+        path_condition: Initial path predicate as a bool or expression string.
+        output: Presentation mode: none, result, or full.
+        stream: Destination for output; None selects standard output.
+        z3_timeout_ms: Timeout in milliseconds for each Z3 query.
+        keymaerax_timeout_seconds: External proof timeout override in seconds.
 
-    Parameters
-    ----------
-    source:
-        完整用户输入字符串。
-    source_name:
-        出现在输入诊断和完整日志中的来源名称；不参与数学语义。
-    initial_states:
-        可选部分初态。单个顶层 Process 传一个 ``变量 -> Python 值`` mapping；
-        并行系统按源码顶层分量顺序传等长的 mapping 序列；``None`` 为每个分量
-        建立空初态。状态键必须是 Gamma 中的标量变量，不能是参数或连续向量标签。
-    path_condition:
-        全局初始路径条件。可传 Python ``bool``，或使用严格表达式语法的字符串。
-    output:
-        ``none``、``result``、``full`` 或相应 :class:`OutputMode`。
-    stream:
-        接收输出文本的文件式对象；``None`` 表示 ``sys.stdout``。
-    z3_timeout_ms:
-        每次 Z3 查询的毫秒超时。
-    keymaerax_timeout_seconds:
-        本次调用覆盖的 KeYmaera X 单次证明秒数；``None`` 使用环境配置。
+    Returns:
+        The constructed Type AST, only after all required proofs are verified.
 
-    Returns
-    -------
-    TypeAST
-        规则推导完整、且全部必要证明义务均为 ``true`` 的可信配置类型。
-
-    Raises
-    ------
-    HCSPInputError
-        ``source`` 或字符串路径条件存在词法、语法或前端良构错误；类型构造不会启动。
-    HCSPUntrustedTypeConstructionError
-        已形成完整候选 Type，但至少一条必要义务为 ``unknown``。候选只保存在
-        ``error.untrusted_type``，不会伪装成可信返回值。
-    HCSPTypeConstructionError
-        环境无效、规则无法应用、未形成完整类型，或必要公式被证明为 ``false``。
-    TypeError, ValueError
-        Python 调用参数本身不符合接口形状，例如并行初态数量错误或输出模式非法。
-
-    Notes
-    -----
-    证明器返回 ``unknown`` 时，Constructor 会保留证据并继续推导，以尽量形成
-    完整候选；只有 ``false`` 或无法应用规则才会立即阻止该推导继续。输出模式仅
-    影响展示，不影响这一逻辑。
+    Raises:
+        HCSPInputError: Invalid source or path-condition syntax.
+        HCSPUntrustedTypeConstructionError: A complete candidate exists but
+            proofs remain unknown; inspect the exception's untrusted_type.
+        HCSPTypeConstructionError: Invalid context or failed derivation/proof.
+        TypeError, ValueError: Invalid Python argument shapes or output mode.
     """
 
     mode = _normalize_output_mode(output)
@@ -1174,12 +1062,12 @@ def construct_hcsp_type(
                     source,
                     source_name,
                     error,
-                    operation="类型构造",
+                    operation='type construction',
                 )
                 if mode is OutputMode.FULL
                 else _format_input_error_result(
                     error,
-                    operation="类型构造",
+                    operation='type construction',
                 )
             )
             _write_output(rendered, stream)
@@ -1198,13 +1086,13 @@ def construct_hcsp_type(
                         context.format_full(),
                         "\n".join(
                             (
-                                "=== 路径条件解析失败 ===",
+                                '=== Path condition parsing failed ===',
                                 "Verdict : input-error",
-                                f"错误类别 : {error.kind}",
-                                "错误阶段 : input",
+                                f"Error kind : {error.kind}",
+                                'Error phase : input',
                                 error.format_diagnostic(),
                                 "",
-                                "类型构造未启动。",
+                                'Type construction did not start.',
                             )
                         ),
                     )
@@ -1212,7 +1100,7 @@ def construct_hcsp_type(
                 if mode is OutputMode.FULL
                 else _format_input_error_result(
                     error,
-                    operation="类型构造",
+                    operation='type construction',
                 )
             )
             _write_output(rendered, stream)
@@ -1290,52 +1178,21 @@ def check_hcsp_type(
     z3_timeout_ms: int = 5_000,
     keymaerax_timeout_seconds: float | None = None,
 ) -> TypeAST:
-    """验证用户给出的 Type 是否对应同一输入中的 HCSP Process。
+    r"""Validate a supplied Type against the HCSP Process in the same input.
 
-    输入文本必须按 ``gamma [parameters] theta process type`` 的顺序书写。接口会
-    把 Process 与 Type 分别解析为内部 AST，再把用户 Type 当作每个 Table 2 判断
-    的给定结论逐层消费；它不会先调用 TypeConstructor 构造另一棵 Type 后做整树
-    比较。内部选择和外部中断均按用户语法保留的当前层分组、元数和书写顺序检查。
+    source must include a final type section. The checker follows its branch
+    grouping and order as rule conclusions rather than comparing against a
+    separately constructed Type. Other arguments have the same meaning as in
+    construct_hcsp_type.
 
-    Parameters
-    ----------
-    source:
-        含用户 ``type`` 分节的完整输入字符串。
-    source_name:
-        只用于输入诊断与日志的来源名称。
-    initial_states:
-        可选部分初态；单进程传一个 mapping，并行系统传与顶层分量等长的序列。
-    path_condition:
-        Python ``bool`` 或严格表达式语法字符串形式的全局初始路径条件。
-    output, stream:
-        文本详细程度和目标文本流；语义与 :func:`construct_hcsp_type` 相同。
-    z3_timeout_ms:
-        每次 Z3 查询的毫秒超时。
-    keymaerax_timeout_seconds:
-        本次调用覆盖的 KeYmaera X 单次证明秒数；``None`` 使用环境配置。
+    Returns:
+        The supplied Type AST after all structural checks and proofs succeed.
 
-    Returns
-    -------
-    TypeAST
-        输入 ``type`` 分节解析出的同一个正式 Type AST。正常返回表示 Type 结构被
-        全部规则完整消费，并且所有必要证明义务均为 ``true``。
-
-    Raises
-    ------
-    HCSPInputError
-        Process、上下文、Type 或字符串路径条件存在前端输入错误。
-    HCSPTypeCheckingError
-        环境无效、Type 结构不匹配、规则不适用、证明为 ``false`` 或证明为
-        ``unknown``。可用 ``kind``、``phase``、``rule``、``location`` 和
-        ``details`` 区分原因。
-    TypeError, ValueError
-        Python 调用参数不符合接口形状。
-
-    Notes
-    -----
-    ``unknown`` 时 Checker 会继续核对剩余 Type 结构以产生更完整的审计证据，但
-    最终仍抛出 ``HCSPTypeCheckingError(kind="proof-unknown")``；它不会返回一个
-    “暂时接受”的 Type。
+    Raises:
+        HCSPInputError: Invalid source or path-condition syntax.
+        HCSPTypeCheckingError: Invalid context, Type mismatch, or failed or
+            unknown proof. Unknown proofs never count as successful checking.
+        TypeError, ValueError: Invalid Python argument shapes or output mode.
     """
 
     mode = _normalize_output_mode(output)
@@ -1349,12 +1206,12 @@ def check_hcsp_type(
                         source,
                         source_name,
                         error,
-                        operation="类型检查",
+                        operation='type checking',
                     )
                     if mode is OutputMode.FULL
                     else _format_input_error_result(
                         error,
-                        operation="类型检查",
+                        operation='type checking',
                     )
                 ),
                 stream,
@@ -1371,12 +1228,12 @@ def check_hcsp_type(
                         source,
                         source_name,
                         error,
-                        operation="类型检查",
+                        operation='type checking',
                     )
                     if mode is OutputMode.FULL
                     else _format_input_error_result(
                         error,
-                        operation="类型检查",
+                        operation='type checking',
                     )
                 ),
                 stream,
@@ -1410,11 +1267,11 @@ def check_hcsp_type(
         if mode is not OutputMode.NONE:
             result_text = "\n".join(
                 (
-                    "=== HCSP 类型检查结果 ===",
+                    '=== HCSP type checking result ===',
                     "Verdict : true",
-                    "Type 结构 : 与全部规则结论匹配",
-                    "证明状态 : 全部前提已验证",
-                    "Type 源码 : "
+                    'Type structure : matches all rule conclusions',
+                    'Proof status : all premises verified',
+                    'Type source : '
                     + format_type_source(parsed.expected_type),
                 )
             )
@@ -1422,9 +1279,9 @@ def check_hcsp_type(
                 (
                     "\n\n".join(
                         (
-                            "=== HCSP 类型检查完整日志 ===\n"
-                            f"来源 : {source_name}\n\n"
-                            "--- 原始用户输入 ---\n"
+                            '=== HCSP type checking full log ===\n'
+                            f"Source : {source_name}\n\n"
+                            '--- Original user input ---\n'
                             f"{source}",
                             report.format_detailed(),
                         )
@@ -1452,50 +1309,32 @@ def build_type_transition_graph(
     output: OutputMode | str = OutputMode.NONE,
     stream: TextIO | None = None,
 ) -> TypeTransitionGraph:
-    """从正式 Type AST 构造 Table 3 关键-deadline完整可达图。
+    r"""Build the complete Table 3 graph using critical-deadline time reduction.
 
-    接口先验证配置类型根，单向转换为规范化 Type AST，再建立等递归循环项图并按
-    双模拟状态取商，最后穷尽 Table 3 的 ``tau``、通信、timeout、内部选择和共同
-    时间转移。时间边只走到下一个关键 deadline，而不是枚举任意更短时间片。
+    States use equi-recursive regular-tree identity. Edges preserve distinct
+    rule derivations even when they share source, label, and target.
 
-    Parameters
-    ----------
-    type_ast:
-        正式配置 ``TypeAST``，通常来自 :func:`construct_hcsp_type`，或已经由
-        :func:`check_hcsp_type` 验证。本接口不接收 Type 文本或规范化 Type AST。
-    max_states, max_transitions:
-        可选严格正整数上限。任一上限被触及时整个调用失败，不返回部分图；
-        ``None`` 表示不限制该计数。
-    output:
-        ``none`` 静默；``result`` 打印图规模和初始规范 Type；``full`` 打印全部
-        状态、边标签以及 Table 3 推导证据。
-    stream:
-        输出目标；``None`` 表示 ``sys.stdout``。
+    Args:
+        type_ast: A formal TypeAST returned by construction or checking.
+        max_states: Positive state-count limit, or None for no limit.
+        max_transitions: Positive transition-count limit, or None for no limit.
+        output: Presentation mode: none, result, or full.
+        stream: Destination for output; None selects standard output.
 
-    Returns
-    -------
-    TypeTransitionGraph
-        从 ``initial_state`` 可达的完整状态闭包。``states`` 按连续编号保存规范
-        Type 展示代表；``transitions`` 保存标签和全部合并后的规则推导证据。
+    Returns:
+        The complete reachable graph; a size limit never returns a partial graph.
 
-    Raises
-    ------
-    HCSPTypeTransitionGraphError
-        输入根非法、规模选项非法、Type 无法规范化，或状态/边数量超过上限。异常
-        不携带部分图，可按 ``kind`` 和 ``phase`` 稳定区分阶段。
-
-    Notes
-    -----
-    图状态身份来自等递归循环项图，而不是展示 AST 的 Python 结构相等性。因此
-    ``mu t.T`` 与其有限次展开不会产生重复状态。本接口只构造图；死锁和活锁性质
-    由 :func:`analyze_type_lock_freedom` 在完整返回图上独立分析。
+    Raises:
+        HCSPTypeTransitionGraphError: Invalid type/limit, normalization failure,
+            or a graph exceeding the requested limits.
+        ValueError: Invalid output mode.
     """
 
     mode = _normalize_output_mode(output)
     if not isinstance(type_ast, ConfigurationType):
         error = HCSPTypeTransitionGraphError(
             TypeTransitionGraphErrorKind.INVALID_TYPE,
-            "type_ast 必须是 TypeAST/ConfigurationType",
+            'type_ast must be a TypeAST/ConfigurationType',
             type_ast,
         )
         _write_graph_error(error, mode, stream)
@@ -1515,7 +1354,7 @@ def build_type_transition_graph(
         ):
             error = HCSPTypeTransitionGraphError(
                 TypeTransitionGraphErrorKind.INVALID_LIMIT,
-                f"{limit_name} 必须是严格正整数或 None",
+                f"{limit_name} must be a strictly positive integer or None",
                 type_ast,
                 option_name=limit_name,
                 option_value=limit,
@@ -1540,7 +1379,7 @@ def build_type_transition_graph(
     except TypeTransitionGraphSizeError as cause:
         error = HCSPTypeTransitionGraphError(
             TypeTransitionGraphErrorKind.SIZE_LIMIT,
-            "完整状态图超过允许的规模上限",
+            'The complete transition graph exceeds the allowed size limit',
             type_ast,
             limit_name=cause.limit_name,
             limit=cause.limit,
@@ -1549,13 +1388,13 @@ def build_type_transition_graph(
         raise error from cause
     if mode is OutputMode.RESULT:
         lines = [
-            "Table 3 状态迁移图结果",
-            f"初始状态 : S{graph.initial_state}",
-            f"状态数量 : {len(graph.states)}",
-            f"转移数量 : {len(graph.transitions)}",
+            'Table 3 transition graph result',
+            f"Initial state : S{graph.initial_state}",
+            f"State count : {len(graph.states)}",
+            f"Transition count : {len(graph.transitions)}",
         ]
         initial = graph.states[graph.initial_state].type_ast
-        lines.append("初始规范 Type :")
+        lines.append('Initial normalized Type :')
         lines.extend(
             "    " + line
             for line in _format_normalized_type_ast(initial).splitlines()
@@ -1572,54 +1411,30 @@ def analyze_type_lock_freedom(
     output: OutputMode | str = OutputMode.NONE,
     stream: TextIO | None = None,
 ) -> LockFreedomReport:
-    """判断完整 Type 图的锁自由、Bottom 错误自由与整体行为正确性。
+    r"""Analyze lock freedom, reachable Bottom errors, and behavioral correctness.
 
-    该接口严格作用于第三接口返回的显式完整图。它先用 BFS 验证并遍历从
-    ``initial_state`` 出发的可达闭包，同时寻找满足 Definition 4.5 的
-    ``time(infinity, R)`` 且 ``R`` 非空的死锁边；随后在静默迁移诱导子图上用
-    显式栈 DFS 搜索有向环。静默环等价于 Definition 4.6 的无限静默推导。
-    同一次 BFS 还定位首个含 ``BottomType`` 并行根的可达错误终止状态。
+    graph must be a complete reachable graph from build_type_transition_graph.
+    Deadlock requires an infinite-time edge with a nonempty ready set; livelock
+    requires a reachable silent cycle. Reachable Bottom termination is checked
+    separately. behavior_correct is the conjunction of lock_free and error_free.
+    The analysis runs in O(V + E) time.
 
-    Parameters
-    ----------
-    graph:
-        :func:`build_type_transition_graph` 返回的完整 ``TypeTransitionGraph``。
-        本接口不接受 Type AST，也不在内部重新生成图。
-    output:
-        ``none`` 静默；``result`` 输出锁、错误与综合结论及紧凑反例；``full`` 还输出
-        可达前缀、死锁无限时间边、活锁静默环或 Bottom 错误状态，以及相关
-        规范 Type 与 Table 3 规则证据。
-    stream:
-        输出目标；``None`` 表示 ``sys.stdout``。
+    output selects none, result, or full; stream defaults to standard output.
 
-    Returns
-    -------
-    LockFreedomReport
-        图规模、死锁/活锁/锁自由、Bottom 错误自由与整体行为正确结论，以及
-        性质不成立时可由程序读取的最短可达前缀和有限反例环。发现反例是正常分析结果，
-        不抛异常。
+    Returns:
+        A LockFreedomReport with counterexample witnesses for failed properties.
+        A failed property is a normal result, not an exception.
 
-    Raises
-    ------
-    HCSPTypeLockAnalysisError
-        输入不是 TypeTransitionGraph，或图含有从初态不可达的孤立状态，无法作为
-        第三接口承诺的完整可达闭包使用。失败时不返回部分分析结果。
-
-    Notes
-    -----
-    算法的时间复杂度为 ``O(|V|+|E|)``，辅助空间为 ``O(|V|+|E|)``。BFS、
-    静默环 DFS 和反例重建都不使用 Python 递归，因此不会受 Python 递归深度限制。
-    ``EmptyType`` 或 ``BottomType`` 的无出边状态本身不按论文定义判为死锁；
-    但可达 Bottom 根会使 ``error_free`` 和 ``behavior_correct`` 为假。
-    ``time(infinity, empty-ready)`` 也不是死锁。只要存在可达纯静默环，即使环上
-    另有退出边，仍存在一种无限静默执行，因此判为活锁。
+    Raises:
+        HCSPTypeLockAnalysisError: Invalid graph or incomplete reachable closure.
+        ValueError: Invalid output mode.
     """
 
     mode = _normalize_output_mode(output)
     if not isinstance(graph, TypeTransitionGraph):
         error = HCSPTypeLockAnalysisError(
             TypeLockAnalysisErrorKind.INVALID_GRAPH,
-            "graph 必须是 build_type_transition_graph 返回的 TypeTransitionGraph",
+            'graph must be a TypeTransitionGraph returned by build_type_transition_graph',
             graph,
         )
         _write_lock_analysis_error(error, mode, stream)

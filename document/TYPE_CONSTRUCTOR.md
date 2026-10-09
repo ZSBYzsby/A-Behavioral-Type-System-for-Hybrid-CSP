@@ -1,103 +1,98 @@
-# TypeConstructor：Process AST 到 Type AST 的实际构造过程
+# TypeConstructor: constructing a Type AST from a Process AST
 
-本文只描述当前代码真正执行的构造算法和数学操作，不判断这些操作是否与某一版
-论文完全一致。人工比对时，应以本文给出的“代码实际行为”为准，再逐条与论文规则
-比较。
+This reference describes the algorithms and mathematical operations performed
+by the current code. During review, compare these explicit implementation
+behaviors with the relevant paper rules.
 
-若需要把前端 lowering、Gamma/Theta/参数、Constructor、Checker 和 Table 3 放在
-同一条数据流中核对，请先阅读
-[当前代码的实现语义与论文规则落地方式](IMPLEMENTATION_SEMANTICS.md)。本文在此
-基础上继续深入 Constructor 的逐规则证据和示例，不把“Table 2 一致”当作实现说明。
+For the complete flow through lowering, contexts, construction, checking, and
+Table 3, start with [Implementation semantics](IMPLEMENTATION_SEMANTICS.md).
+This page adds rule-level construction evidence and examples.
 
-本文描述的功能称为 **TypeConstructor**：输入是带批注的 HCSP、Gamma、Theta、
-参数以及可选初态/路径条件，Type AST 由程序自行构造。用户给定 Type 的
-**TypeChecker** 已作为独立功能实现，详见 [TYPE_CHECKER.md](TYPE_CHECKER.md)；
-本文仍只描述 Constructor。
+**TypeConstructor** takes annotated HCSP, Gamma, Theta, parameters, and optional
+states/paths, and constructs its Type AST. **TypeChecker** is implemented
+separately for supplied Types; see [TYPE_CHECKER.md](TYPE_CHECKER.md).
 
-相关实现主要位于：
+Main implementation locations:
 
-- `hcsp_typechecker/data_structures/process_ast/ast.py`：Process、Event、System AST；
-- `hcsp_typechecker/backend/type_constructor/constructor.py`：TypeConstructor 业务入口；
-- `hcsp_typechecker/backend/common/environment.py`：Constructor/Checker 共用的规范环境结果；
-- `hcsp_typechecker/backend/common/rule_engine.py`：judgment、premise 与 Table 2 规则展开；
-- `hcsp_typechecker/backend/common/logic.py`：表达式到 Z3 项的翻译及 FOL/state 判定；
-- `hcsp_typechecker/backend/common/dl.py`：ODE 证明义务到 dL 公式的翻译；
-- `hcsp_typechecker/data_structures/type_ast/ast.py`：最终 Type AST 及规范化构造；
-- `hcsp_typechecker/data_structures/runtime_context/model.py`：Gamma、Theta、全局参数与 Configuration；
-- `hcsp_typechecker/backend/type_constructor/model.py`：TypeConstructor 的构造请求和报告名称；
-- `hcsp_typechecker/backend/common/model.py`：Constructor/Checker 共用的证明义务、诊断与规则证据。
+- `hcsp_typechecker/data_structures/process_ast/ast.py`: Process, Event, and System ASTs.
+- `hcsp_typechecker/backend/type_constructor/constructor.py`: construction entry point.
+- `hcsp_typechecker/backend/common/environment.py`: shared normalized environments.
+- `hcsp_typechecker/backend/common/rule_engine.py`: judgments, premises, and Table 2 expansion.
+- `hcsp_typechecker/backend/common/logic.py`: Z3 translation and FOL/state decisions.
+- `hcsp_typechecker/backend/common/dl.py`: ODE-to-dL translation.
+- `hcsp_typechecker/data_structures/type_ast/ast.py`: final Type ASTs and canonical construction.
+- `hcsp_typechecker/data_structures/runtime_context/model.py`: contexts and configurations.
+- `hcsp_typechecker/backend/type_constructor/model.py`: construction requests/reports.
+- `hcsp_typechecker/backend/common/model.py`: shared proof obligations, diagnostics, and evidence.
 
 ---
 
-## 1. 构造的输入和输出
+## 1. Construction inputs and outputs
 
-一次 `TypeConstructionRequest` 可以抽象写成：
+A `TypeConstructionRequest` can be abstracted as:
 
 \[
 (\Gamma,\Pi,\Theta,\Phi,K),
 \]
 
-其中：
+Here:
 
-- \(\Gamma\) 是变量声明环境；
-- \(\Pi=(\Delta,H)\) 是共享只读参数声明及其合法预赋值约束；
-- \(\Theta\) 是通道 refinement 环境；
-- \(\Phi\) 是当前路径条件；
-- \(K\) 是一个或多个 `Configuration(state, process)`；
-- 每个 configuration 的 `process` 可以是顺序 `Process`，或者受限的无状态
-  `Parallel` 便捷结构。
+- \(\Gamma\) declares variables.
+- \(\Pi=(\Delta,H)\) declares shared read-only parameters and legal prevaluations.
+- \(\Theta\) gives channel refinements.
+- \(\Phi\) is the current path condition.
+- \(K\) contains one or more `Configuration(state, process)` objects.
+- Each configuration Process is sequential or a restricted stateless Parallel convenience form.
 
-内部构造结果不是单独一个 Type AST，而是 `TypeConstructionReport`：
+The internal result is a `TypeConstructionReport`:
 
-- `constructed_type`：全部分量均完成规则结构推导时得到的 `ConfigurationType`；它在
-  verdict 为 `unknown` 时是完整但未验证的候选类型；
-- `constructed_component_types`：各 configuration 的分量结果；失败或尚未访问的位置为
-  `None`；
-- `obligations`：已经实际判定过的 state、FOL、dL 公式；
-- `diagnostics`：结构错误、静态类型错误和未决选择原因；
-- `steps`：按执行顺序保存的规则入口环境和结果；
-- `verdict`：有效证明义务与诊断的 `true / false / unknown` 合并值。
+- `constructed_type`: a ConfigurationType when all structural derivation completes;
+  unknown verdicts make it a complete unverified candidate.
+- `constructed_component_types`: component results, with None at failed/unvisited positions.
+- `obligations`: state, FOL, and dL goals actually attempted.
+- `diagnostics`: structural/static errors and unresolved candidate-selection reasons.
+- `steps`: entry environments and results in execution order.
+- `verdict`: combined true/false/unknown from active obligations and diagnostics.
 
-`None` 只表示没有形成完整类型结构。非空类型是否可信必须同时查看 verdict：
-`true` 表示可信，`unknown` 表示仍有必要义务未验证。两种情况都与用户 Type AST
-中表示不可达行为的 `BottomType()` 完全不同。Constructor 会在 `T-\unrhd` 的
-正式结论中输出 BottomType，但绝不把它当成推导失败或错误恢复值。
+None means no complete structure exists. A nonempty Type still requires its
+verdict: true is trusted, unknown has unresolved required proofs. Neither is
+BottomType, which represents unreachable formal behavior. Construction produces
+Bottom in T-unrhd conclusions but never uses it for failed derivations or recovery.
 
 ---
 
-## 2. Process AST 构造阶段已经做掉的工作
+## 2. Checks already performed during Process AST construction
 
-TypeConstructor 接收的不是任意 Python 对象，而是已经构造好的项目 Process AST。
-进入 `backend/type_constructor/constructor.py` 之前，`data_structures/process_ast/ast.py` 已经执行以下操作：
+TypeConstructor accepts project Process ASTs, not arbitrary Python objects.
+Before backend construction, `data_structures/process_ast/ast.py` has performed:
 
-1. 字符串表达式被解析成项目自己的 `Expr` 节点；
-2. 赋值左端、输入目标和通道名称被检查为合法标识符；
-3. 输入/输出的单参数简写被规范成一槽元组；
-4. `If`、`Sequence`、`InternalChoice`、`EventChoice`、`ODE`、`Mu` 等节点检查
-   子节点所属的语法范畴；
-5. 复合节点在构造时检查 Assumption 2.1；
-6. `Mu` 在构造时检查 Assumption 2.2 的通信保护条件；
-7. `ODEAnnotation` 把有限 delay 规范成精确 `Fraction`，并拒绝负数、符号时延、
-   NaN 和负无穷；
-8. 每个 `ODE` 自动建立局部时钟 `t`，其初值固定为 0、导数固定为 1；
+1. Parse expression strings into project Expr nodes.
+2. Validate assignment targets, input targets, and channel identifiers.
+3. Normalize scalar communication shorthand to one-slot tuples.
+4. Check child syntactic categories in If, Sequence, choices, ODE, and Mu.
+5. Check Assumption 2.1 at composite construction.
+6. Check Assumption 2.2 communication guarding for Mu.
+7. Normalize finite annotation delay to exact Fraction and reject negatives,
+   symbolic values, NaN, and negative infinity.
+8. Create the ODE-local t clock with initial value 0 and derivative 1.
 
-因此，某些程序会在“Process AST 构造”阶段失败，根本不会进入 Process 到 Type
-的类型构造。例如当前实现认为 `ch!x; ch?x` 同时自由使用并绑定 `x`，会直接因
-`fv(P) ∩ bv(P) != empty` 抛出 `ValueError`。
+Some inputs therefore fail before Type derivation. For example, `ch!x;ch?x`
+freely uses and binds x, so `fv(P) ∩ bv(P) != empty`. This violates Assumption 2.1
+and raises ValueError at the internal AST boundary.
 
 ---
 
-## 3. Gamma、共享参数、Theta 和符号状态
+## 3. Gamma, parameters, Theta, and symbolic state
 
 ### 3.1 Gamma
 
-当前 Gamma 项有两类：
+Gamma has two entry categories:
 
 ```python
 GammaType = BasicType | ContinuousType
 ```
 
-普通变量使用：
+Ordinary variables use:
 
 ```python
 BasicType.BOOL
@@ -107,19 +102,19 @@ BasicType.RATIONAL
 BasicType.REAL
 ```
 
-ODE 左端变量本身仍是普通 Real 值变量：
+ODE left-hand-side variables remain ordinary Real values:
 
-```python
+```text
 "p": BasicType.REAL
 "v": BasicType.REAL
 "a": BasicType.REAL
 ```
 
-另用一个独立命名的连续项登记 process 中允许出现的 ODE 演化向量，语义退化为
-\(\mathbb R_{\ge0}\rightharpoonup\mathbb R^n\)，不再携带轨迹性质 \(\phi\)。
-连续演化期间必须恒成立的 \(\phi\) 统一写在对应 ODE 的 safety 批注中。
+A separately named continuous entry registers a permitted ODE evolution vector,
+with domain shape \(\mathbb R_{\ge0}\rightharpoonup\mathbb R^n\), without trajectory
+property \(\phi\). Invariant evolution properties belong in the ODE safety annotation.
 
-若一个演化向量由多个标量组成，例如 \(\{p,v,a\}\)，显式记录它的成员集合：
+For a multi-scalar vector such as \(\{p,v,a\}\), record its complete member set:
 
 ```python
 trajectory = ContinuousType(
@@ -133,313 +128,316 @@ trajectory = ContinuousType(
 }
 ```
 
-环境规范化要求向量声明的所有成员都作为 `BasicType.REAL` 标量存在。T-ODE
-要求用户写出的 ODE 左侧变量集合与 Gamma 中某个 `variables` 集合精确相等；
-成员顺序不同仍是同一个集合，只有真子集或真超集会在建立 dL 义务前静态失败。
+Normalization requires all members to be BasicType.REAL scalars. T-ODE requires
+the user left-hand-side set to equal a registered variables set. Order is irrelevant;
+strict subsets/supersets fail before dL goals are created.
 
-`ContinuousType` 所在的键没有当前值，不能出现在表达式、state、赋值目标或
-通信输入目标中。它只承担两项信息：
+A ContinuousType label has no current value and cannot occur in expressions,
+state, assignments, or input targets. It records:
 
-- process 中允许出现相应的 ODE 演化向量；
-- `variables` 标识这个向量的完整成员集合。
+- Permission for an ODE vector to occur in the Process.
+- Its complete variables set.
 
-ODE 的左端分量、导数右端参数、演化域和 safety 中的 Real 量都统一使用
-`BasicType.REAL`。未参与任何 ODE 的 Real 无需额外的连续声明。
+Real values in left-hand sides, derivative parameters, domains, and safety use
+BasicType.REAL. Reals outside ODEs need no continuous declaration.
 
-### 3.2 共享只读参数环境
+### 3.2 Shared read-only parameter environment
 
-`ParameterEnvironment(declarations, constraint)` 构成独立于 Gamma 的参数
-环境 \(\Pi=(\Delta,H)\)：
+`ParameterEnvironment(declarations,constraint)` gives a Gamma-independent
+\(\Pi=(\Delta,H)\):
 
-- \(\Delta\) 只能声明 `BasicType`参数；
-- \(H\) 只能引用 \(\Delta\) 中声明的名称；
-- 共享环境准备阶段先验证 \(H\land TypeDomain(\Delta)\) 可满足，防止矛盾假设
-  造成真空证明；
-- 参数在所有并行 configuration 中使用同一组 Z3 符号；它们不属于 Gamma，
-  也不计入可变状态所有权或分量间状态重叠检查；
-- 参数可在路径、表达式、通道 refinement、递归不变式和 ODE
-  公式中读取，但不能出现在 state 赋值、赋值左端、输入目标或
-  ODE 左端。
+The prepared condition includes definedness and intrinsic parameter type domains:
 
-Gamma 和 \(\Delta\) 的名称域必须不相交。参数由用户在 HCSP 执行前一次性
-选定，类型构造结果覆盖所有满足 \(H\) 的选择，不保存某组具体参数值。
+\[
+\widehat H=Def(H)\land H\land TypeDomain(\Delta).
+\]
+
+- \(\Delta\) declares only BasicType parameters.
+- H refers only to names in Delta.
+- Preparation checks \(\widehat H\) is satisfiable, preventing vacuous proofs.
+- Every parallel configuration uses the same parameter symbols; these are outside
+  Gamma and mutable-state overlap/ownership checks.
+- Parameters may be read in paths, expressions, refinements, recursion invariants,
+  and ODE formulas, but cannot be state keys or assignment/input/ODE targets.
+
+Gamma and Delta names must be disjoint. Users choose parameter values once before
+execution; construction covers every valuation satisfying \(\widehat H\) rather
+than storing an instance.
 
 ### 3.3 Theta
 
-对通道 `ch`，`ChannelType` 保存：
+For channel ch, ChannelType stores:
 
 \[
 \Theta(ch)=((B_1,\ldots,B_n),(\eta_1,\ldots,\eta_n),R),
 \]
 
-其中：
+Here:
 
-- \(B_i\) 是每个独立标量槽的 `BasicType`；
-- \(\eta_i\) 是 refinement 中引用该槽值的 binder；
-- \(R\) 是联合 refinement 公式。
+- \(B_i\) is an individual scalar slot's BasicType.
+- \(\eta_i\) binds that slot's value in the refinement.
+- R is the joint refinement.
 
-通信元数和载荷类型只保存在 Theta 和证明义务中，不进入最终 `InputType` 或
-`OutputType`。因此两个具有相同通道名、但 Theta 签名不同的通信，在 Type AST
-层只显示相同的 `ch?` 或 `ch!` 前缀。
+Arity and payload types remain in Theta and obligations, outside InputType/OutputType.
+The same channel name with different Theta signatures still displays the same
+ch? or ch! prefix at the behavioral Type level.
 
-环境准备会在执行任何 Process 规则前遍历 **全部** Theta 项：为每个槽位建立
-临时符号，检查 refinement 只能引用本通道 binders、Gamma 标量和共享参数，并
-要求结果为 Bool。即使某个通道没有在当前 Process 中使用，非法 refinement 也会
-使环境准备失败；该阶段只检查公式良构性，不要求 refinement 恒真。
+Before any Process rule, preparation visits every Theta entry. Temporary slot
+symbols validate that refinements reference only local binders, Gamma scalars,
+and shared parameters, and have Bool type. Invalid unused channels also fail.
+Preparation checks well-formedness, not universal truth of refinements.
 
-### 3.4 每条控制流路径上的 Context
+### 3.4 Context for each control-flow path
 
-TypeConstructor 内部为每条控制流路径维护：
+Each path maintains:
 
 \[
 C=(\Gamma,\Delta,H,\Theta,\Phi,\rho,\mathcal R,location,valid),
 \]
 
-其中：
+Here:
 
-- `gamma` 是当前控制流分支持有的完整 Gamma 副本；各顶层 configuration
-  从同一份完整 Gamma 开始，输入动作只能在自己的后继分支中增加新目标；
-  `parameters`、`parameter_condition` 分别是共享的 \(\Delta\) 和 \(H\)，
-  `theta` 是共享通道环境；
-- `path` 是 Z3 布尔公式 \(\Phi\)；
-- `symbols` 是符号状态 \(\rho\)，把变量名映射到当前 Z3 项；
-- `rec_env` 是递归进程变量到类型变量、不变量的绑定；
-- `location` 用于报告分支位置；
-- `static_valid` 表示初始环境和路径是否成功建立。
+- gamma is a branch-local copy of full Gamma; each configuration begins with the
+  same declarations, and input adds targets only to its continuation branch.
+  parameters/parameter_condition are shared Delta/\(\widehat H\); theta is shared.
+- path is the Z3 formula \(\Phi\).
+- symbols is \(\rho\), mapping names to current Z3 terms.
+- rec_env binds Process variables to Type variables and invariants.
+- location identifies the branch in reports.
+- static_valid records successful initial environment/path preparation.
 
-建立整个判断时，参数先获得一组共享符号。建立各初始 Context 时，
-Gamma 中的 `BasicType` 值变量再获得带 configuration 前缀的新鲜符号。
-两者的 Z3 sort 均为：
+Parameters receive shared symbols first. Each configuration's BasicType Gamma
+variables then receive fresh prefixed symbols. Their Z3 sorts are:
 
-- `Bool` -> Z3 Bool；
-- `Nat`、`Int` -> Z3 Int；
-- `Rational`、`Real` -> Z3 Real。
+- `Bool` -> Z3 Bool;
+- `Nat`, `Int` -> Z3 Int;
+- `Rational`, `Real` -> Z3 Real.
 
-`ContinuousType` 声明不建立 Z3 符号。各配置的初始路径实际是
-\(H\land\Phi_i\)。
+Continuous declarations receive no Z3 symbols. For a configuration's supplied
+path \(\Phi_i\), the prepared local path and full initial path are:
 
-代码还把类型固有条件加入路径。目前只有 `Nat` 额外产生 \(x\ge 0\)。
+\[
+\widehat\Phi_i=Def(\Phi_i)\land\Phi_i\land TypeDomain(\Gamma,\rho_i),
+\qquad \Phi=\widehat H\land\widehat\Phi_i.
+\]
+
+Intrinsic type-domain constraints currently add \(x\ge0\) for Nat values.
 
 ---
 
-## 4. 表达式翻译的数学对象
+## 4. Mathematical expression translation
 
-对当前 Context 中的表达式 `e`，`ExpressionTranslator` 实际返回三元组：
+For e in the current context, ExpressionTranslator returns:
 
 \[
 \llbracket e\rrbracket_{\rho}=(u,B,D),
 \]
 
-其中：
+Here:
 
-- \(u\) 是 Z3 项；
-- \(B\) 是推断出的 `BasicType`；
-- \(D\) 是表达式求值有定义所需条件的列表。
+- u is a Z3 term.
+- B is the inferred BasicType.
+- D lists definedness conditions.
 
-例如：
+For example:
 
-- `x / y` 会生成除数 \(y\ne0\)；
-- `sqrt(x)` 会生成 \(x\ge0\)；
-- `%` 只接受 `Nat/Int`；
-- ODE 分量 `x:BasicType.REAL` 的读取结果类型是 `Real`；向量声明名不可读取。
+- `x / y` requires \(y\ne0\).
+- `sqrt(x)` requires \(x\ge0\).
+- `%` accepts only Nat/Int.
+- Reading `x:BasicType.REAL` gives Real; vector declaration labels cannot be read.
 
-数值子类型关系为：
+Numeric subtyping is:
 
 \[
 Nat <: Int <: Rational <: Real.
 \]
 
-表达式静态类型检查与有定义性证明是两件事：类型错误直接产生诊断；偏表达式的
-有定义条件通常会成为当前规则的公式 premise。
+Static typing and definedness proof are separate. Type errors produce diagnostics;
+partial-expression conditions typically become formula premises of the current rule.
 
 ---
 
-## 5. 统一推导器怎样工作
+## 5. Unified derivation evaluator
 
-### 5.1 四种内部 judgment
+### 5.1 Four internal judgments
 
-代码没有让每条规则自行递归，而是显式建立四种子 judgment：
+Rules create four explicit judgment categories rather than recursing themselves:
 
-1. `_ConfigurationJudgment(state, system, context)`；
-2. `_SystemJudgment(system, context)`；
-3. `_ProcessJudgment(nodes, context, terminal)`；
-4. `_EventJudgment(reaction, tail, context, terminal)`。
+1. `_ConfigurationJudgment(state, system, context)`;
+2. `_SystemJudgment(system, context)`;
+3. `_ProcessJudgment(nodes, context, terminal)`;
+4. `_EventJudgment(reaction, tail, context, terminal)`.
 
-每条 `rule_t_*` 只展开当前一层，返回：
+Each rule expands one level and returns:
 
 ```text
 RuleExpansion(rule, premises, conclude)
 ```
 
-premise 只有两类：
+There are two premise categories:
 
-- `FormulaPremise`：state、FOL 或 dL 公式；
-- `ChildJudgmentPremise`：需要递归求解的子 judgment。
+- FormulaPremise: state, FOL, or dL formulas.
+- ChildJudgmentPremise: child judgments evaluated by the explicit work stack.
 
-`conclude` 只负责使用已经求得的子类型构造父 Type AST。
+conclude combines already derived child Types into the parent AST.
 
-### 5.2 按序证明、`false` 短路与 `unknown` 保留
+### 5.2 Ordered proof, false short-circuiting, and unknown retention
 
-`_solve_rule_expansion` 按 premises 的保存顺序逐项处理：
+`_solve_rule_expansion` processes premises in stored order:
 
-1. 遇到公式 premise，立即交给对应证明器；
-2. verdict 为 `true` 时照常继续；
-3. verdict 为 `false` 表示该必要 premise 已被反例否证，立即停止当前规则；
-4. verdict 为 `unknown` 只表示当前证明器未能判定：义务及原因写入报告，然后继续
-   求解剩余 premise；
-5. 遇到子 judgment 时递归求解；子 judgment 真正无法形成类型后，后续兄弟
-   premise 不再访问；
-6. 全部所需子类型都已形成时调用 `conclude` 构造父类型；此前出现的 `unknown`
-   不阻止构造，但最终 verdict 会把该类型标为不可信。
+1. Dispatch formula premises immediately to the appropriate prover.
+2. Continue normally after true.
+3. Stop the current rule immediately after a false required premise.
+4. Record unknown goals and reasons, then continue remaining premises.
+5. Evaluate child judgments using the work stack. Failure to form a child Type
+   prevents visiting later siblings.
+6. Once all required child Types exist, execute conclude. Earlier unknown proofs
+   permit structure but make the final result untrusted.
 
-因此代码仍然是一边证明、一边推导，而不是先生成公式池再统一证明。差别在于
-`unknown` 不再被误当成否定：检查器会尽量推导到根节点并保留完整候选 Type AST；
-`false` 和结构/静态失败仍只留下实际停止点以前的证明义务、步骤与部分类型。
+Proof and derivation are interleaved, without a formula pool. Unknown is not
+refutation: construction attempts to reach the root with a complete candidate.
+False or structural/static failure retains only evidence and partial Types up to
+the actual stopping point.
 
-### 5.3 Sequence 没有对应的 Type AST 节点
+### 5.3 Sequence has no corresponding Type AST node
 
-二元 `Sequence(P,Q)` 在进入过程判断时由 `_as_nodes` 递归展开成：
+`_as_nodes` iteratively expands binary Sequence(P,Q) into:
 
 ```text
-[P 的顺序节点..., Q 的顺序节点...]
+[Sequential nodes of P..., Sequential nodes of Q...]
 ```
 
-TypeConstructor 每次处理列表头，并把剩余列表作为 continuation 子 judgment。因此代码
-没有通用的 `SequenceType`，也没有“先得到 P 的类型，再把 Q 的类型接到所有
-终点”的后处理算法。后继是在推导 P 时就沿控制流传下去的。
+Construction processes the head and passes the remainder as continuation.
+There is no SequenceType or postprocessing that first types P and appends Q's
+Type to every endpoint. Continuations propagate during derivation.
 
-`If`、`InternalChoice` 和 `ODE` 是 Table 2 规范形：源码公共后继直接保存在
-节点自己的 `continuation` 字段中，它们不会作为外置 `Sequence` 的前项。
-`nodes[1:]` 只在规则递归时保存上层临时附加的推导尾部。
+If, InternalChoice, and ODE own their continuations and cannot be external
+Sequence prefixes. `nodes[1:]` holds only temporarily added outer derivation tails.
 
 ---
 
-## 6. 顶层 configuration 和并行系统
+## 6. Top-level configurations and parallel systems
 
-### 6.1 环境规范化
+### 6.1 Environment normalization
 
-`TypeConstructor.construct` 首先统一规范化 Gamma、共享参数和 Theta。非法变量类型、
-非法参数约束、Gamma/参数名称重叠、非法通道名和非法通道签名都会在
-进入 Process 规则以前得到失败诊断。不可满足的参数约束也会直接被拒绝。
+Construction normalizes Gamma, parameters, and Theta first. Invalid variable
+types, parameter constraints, overlapping names, channels, or signatures fail
+before Process rules. Unsatisfiable parameter constraints are rejected.
 
-### 6.2 顶层多个 Configuration
+### 6.2 Multiple configurations
 
-即使只有一个 configuration，代码也统一经过 `rule_t_parallel`。
+Even one configuration passes through rule_t_parallel.
 
-Gamma 是整个判断统一使用的类型声明环境。每个 configuration 子判断都直接读取
-同一份完整 Gamma，不再构造或接收局部 Gamma。Gamma 可以是各分量实际使用声明
-的超集；没有被当前分量引用的项只是可见但未使用，不影响推导。
+Every child configuration receives full Gamma, a possible superset of its used
+declarations. Visible unused declarations do not affect derivation; no local
+Gamma partition is constructed or accepted.
 
-共享 Gamma 不表示共享可变状态。Process AST 的 Assumption 2.1 已检查并行进程
-变量集合不交；低层多个 Configuration 入口还会把 `process.get_vars()` 与
-`dom(state)` 合并为各分量的状态所有权集合，并拒绝集合重叠。输入绑定目标可以
-不预先出现在 Gamma；除此之外，实际使用却未声明的变量仍会报错。
+Shared declarations do not imply shared mutable state. Assumption 2.1 separates
+parallel variable sets; the low-level multiple-Configuration interface combines
+process.get_vars() with state keys and rejects ownership overlap. Input may bind
+new undeclared targets; other undeclared used names fail.
 
-每个分量同样读取完整共享参数环境 \(\Delta,H\)，参数始终只读，不属于可变
-状态所有权集合。
+Every component also receives shared Delta/H, outside mutable ownership.
 
-局部路径条件要么所有 configuration 都提供，要么都不提供。若使用局部路径，
-外层路径必须是默认 `true`。
+Either every configuration supplies a local path or none does. With local paths,
+the outer path must be default true.
 
-各 configuration 按输入顺序形成子 judgment。某一分量因 `false` 或结构/静态
-错误而无法形成类型后，后续分量不再推导；已经完成的前缀仍保留在
-`constructed_component_types` 中，失败和未访问位置为 `None`。某个公式仅为
-`unknown` 时，该分量仍继续构造，并可在 `constructed_component_types` 中保留
-不可信的完整候选类型。
+Children follow input order. False or structural/static failure stops later
+components; completed prefix results remain in constructed_component_types,
+with None at failed/unvisited positions. Formula unknown permits continuing
+construction and retaining an untrusted complete component candidate.
 
-若全部成功：
+When all component structures complete:
 
-- 一个分量直接返回该分量类型；
-- 多个分量构造 `ParallelType((T1,...,Tn))`。
+- One component returns its Type directly.
+- Multiple components produce ParallelType((T1,...,Tn)).
 
-`ParallelType` 会压平嵌套并行，但保留分量次序。
+ParallelType flattens nested parallel composition while retaining component order.
 
-### 6.3 T-sigma 的实际状态检查
+### 6.3 T-sigma state checks
 
-对 configuration \((\sigma,P)\)，代码先要求：
+For configuration \((\sigma,P)\), first require:
 
 \[
 dom(\sigma)\subseteq dom(\Gamma_{value}),
 \]
 
-其中 \(\Gamma_{value}\) 只包含 `BasicType` 项，不包含独立的 ODE 向量声明。
-参数不属于 \(\Gamma_{value}\)，因此 \(dom(\sigma)\cap dom(\Delta)\) 必须为空。
+\(\Gamma_{value}\) contains BasicType entries only, excluding vector declarations.
+Parameters are outside it, so \(dom(\sigma)\cap dom(\Delta)\) must be empty.
 
-state 可以只是 Gamma 值变量的子集。随后代码把 state 中的具体值代入路径公式：
+State may cover only a subset of Gamma values. Substitute supplied values into the path:
 
 \[
-H\Rightarrow\Phi[\sigma].
+\widehat H\Rightarrow\widehat\Phi_i[\sigma].
 \]
 
-若还有未赋值的 Gamma 值变量，它们保留为自由 Z3 常量；参数符号也保留
-在含件公式中。证明器通过有效性检查，对所有满足 \(H\) 的参数预赋值和所有
-未指定状态值作全称检查，而不是任选一组值使公式成立。
+Unassigned Gamma values and parameters remain symbolic. Validity universally
+checks all parameter valuations satisfying \(\widehat H\) and unspecified state values,
+rather than choosing an instance that satisfies the formula.
 
-state 通过后，才进入 system/process 子 judgment。
+Only after state validation does the System/Process child judgment run.
 
-### 6.4 `Parallel` AST 便捷入口
+### 6.4 Parallel AST convenience form
 
-`Configuration({}, Parallel(...))` 只允许在空 Gamma、空 state、完整路径为 true
-时使用。代码递归推导左右系统并构造 `ParallelType`。
+`Configuration({},Parallel(...))` requires empty Gamma/state and a true full path.
+The evaluator derives the left/right systems and combines their ParallelType.
 
-有状态并行或带非平凡参数约束的并行不能通过这一入口处理，必须拆成
-多个显式 `Configuration`，使 T-|| 分别建立状态和路径前提；这些叶子仍共享
-同一份 Gamma、Theta 和参数环境。
+Stateful parallelism or a nontrivial parameter constraint requires explicit
+Configuration leaves, with T-|| establishing each state/path premise. Leaves
+still share full Gamma, Theta, and parameters.
 
 ---
 
-## 7. 每一种离散 Process 节点的类型构造
+## 7. Discrete Process node construction
 
-### 7.1 终端 `Skip` 和隐式终端
+### 7.1 Terminal Skip and implicit termination
 
-当顺序节点列表为空，或者当前只有最后一个显式 `Skip()` 时：
+For an empty node list or the last explicit Skip:
 
 \[
 skip \longmapsto terminal.
 \]
 
-普通顶层的 `terminal` 是 `EmptyType()`，所以得到空通信行为 `0`。
+The usual top-level terminal is EmptyType, producing normal empty communication behavior 0.
 
-规则没有 premise，也不修改 Context。
+There are no premises or Context changes.
 
-### 7.2 中间 `Skip; P`
+### 7.2 Intermediate Skip; P
 
-中间 `Skip` 只递归推导剩余节点：
+Intermediate Skip simply derives the remaining nodes:
 
 \[
 type(skip;P,C)=type(P,C).
 \]
 
-Gamma、路径条件和符号状态全部保持不变，不生成 Type AST 前缀。
+Gamma, path, and symbolic state stay unchanged; no Type prefix is generated.
 
 ### 7.3 `Assert(B); P`
 
-先翻译条件：
+Translate the condition first:
 
 \[
 \llbracket B\rrbracket_\rho=(b,Bool,D_B).
 \]
 
-代码生成并立即证明：
+Immediately prove:
 
 \[
 \Phi\Rightarrow(D_B\land b).
 \]
 
-证明成功后，在原 Context 下继续推导 `P`。`Assert` 是验证操作，不是 Assume，
-因此后继路径仍是 \(\Phi\)，不会变成 \(\Phi\land B\)。最终类型就是 `P` 的类型，
-没有 `AssertType` 节点。
+Then derive P under the original Context. Assert verifies rather than assumes,
+so the path remains \(\Phi\), not \(\Phi\land B\). The result is P's Type, without AssertType.
 
 ### 7.4 `Assign(x,e); P`
 
-代码执行以下操作：
+The assignment rule performs:
 
-1. 要求 `x` 不是共享参数，并且已在 Gamma 声明；
-2. 在赋值前符号状态 \(\rho\) 中求值
-   \(\llbracket e\rrbracket_\rho=(u,B_e,D_e)\)；
-3. 检查 \(B_e <: base(\Gamma(x))\)；
-4. 若 \(D_e\) 非平凡，证明 \(\Phi\Rightarrow D_e\)；
-5. 建立新符号映射：
+1. Require x to be declared in Gamma and outside shared parameters.
+2. Evaluate \(\llbracket e\rrbracket_\rho=(u,B_e,D_e)\) in the pre-state.
+3. Check \(B_e <: base(\Gamma(x))\).
+4. Prove \(\Phi\Rightarrow D_e\) when definedness is nontrivial.
+5. Create the updated symbol map:
 
 \[
 \rho'(x)=u,
@@ -447,84 +445,81 @@ Gamma、路径条件和符号状态全部保持不变，不生成 Type AST 前�
 \rho'(y)=\rho(y)\quad(y\ne x).
 \]
 
-路径公式对象本身仍保存为赋值前的 \(\Phi\)。旧 `x` 符号可能继续出现在该公式
-中，作为历史逻辑参数；后继表达式中对 `x` 的读取则从 \(\rho'\) 得到 \(u\)。
-代码不显式构造存在量词形式的最强后置公式。
+The path remains pre-assignment Phi, possibly referring to historical x symbols.
+Later expression reads obtain u through rho'. No explicit existential strongest
+postcondition formula is constructed.
 
-当前实现还登记一条 `T-Assign-post` 义务。其实际公式是：
+T-Assign-post additionally records this actual formula:
 
 \[
 \Phi\Rightarrow\Phi,
 \]
 
-因为 `_LazyAssignmentPostState.pre_path` 就是原路径。它记录“后状态已经由符号
-映射确定”这一事实，不搜索未知谓词 \(\Phi'\)。
+_LazyAssignmentPostState.pre_path is the original path. This records that the
+symbol map already determines the post-state, without searching an unknown Phi'.
 
-赋值成功后用 \((\Phi,\rho')\) 推导 `P`，最终类型仍是 `P` 的类型，没有
-`AssignType` 节点。赋值目标必须是 `BasicType` 值变量；独立的
-`ContinuousType` 声明没有当前值，不能被赋值；共享参数即使具有值类型，
-也因为在 HCSP 执行前已预赋值而禁止作为赋值目标。
+Derive P under \((\Phi,\rho')\); its Type is the result, without AssignType.
+Targets must be BasicType variables, excluding ContinuousType labels and
+prevalued read-only parameters.
 
 ### 7.5 `ch?(x1,...,xn); P`
 
-代码先从 Theta 取得通道槽位类型和 refinement：
+Obtain the channel slots and refinement from Theta:
 
 \[
 ((B_1,\ldots,B_n),(\eta_1,\ldots,\eta_n),R).
 \]
 
-实际步骤为：
+The input rule performs:
 
-1. 检查通道存在且输入元数等于 Theta 元数，并拒绝把共享参数作为输入目标；
-2. 对已存在的目标变量，代码按“输入值写入变量”的安全方向要求
+1. Require the channel and matching arity; forbid parameter targets.
+2. Existing targets require the safe received-value-to-variable subtype direction:
 
 \[
 B_i <: existing_i.
 \]
 
-   因而 `Int` 通道值可以写入声明为 `Real` 的变量，但 `Real` 通道值不能写入
-   声明为 `Int` 的变量；
-3. 新目标加入当前分支的后继 Gamma，类型取对应的 \(B_i\)；
-4. 已存在目标保留原 `BasicType` 项；独立 ODE 向量声明不受通信更新影响；
-5. 为每个槽建立新鲜接收符号 \(r_i\)，并更新
+   Thus Int channel values may enter Real variables, but Real values cannot enter Int.
+3. Add new targets to continuation Gamma with corresponding slot types.
+4. Preserve existing targets' BasicType declarations; vector labels are not updated.
+5. Create fresh received symbols \(r_i\) and update:
 
 \[
 \rho'(x_i)=r_i;
 \]
 
-6. 把输入 refinement 作为后继假设加入路径：
+6. Add the instantiated input refinement as a continuation assumption:
 
 \[
 \Phi'=\Phi\land Def(R[r/\eta])\land R[r/\eta]
        \land TypeDomain(r_1)\land\cdots\land TypeDomain(r_n).
 \]
 
-`Nat` 接收值的 `TypeDomain` 是 \(r_i\ge0\)，其他当前为空。
+Nat reception adds TypeDomain \(r_i\ge0\); other types currently add none.
 
-若安全的子类型关系成立但两种类型不同，Gamma 仍保留目标变量原有的较宽声明，
-新鲜接收符号按实际通道槽类型建立。后续表达式因此把接收值作为该变量声明类型
-允许的一个具体子类型值使用，不会反向接受可能超出变量声明范围的通道值。
+For different safe subtypes, Gamma retains the wider target declaration while
+the fresh symbol uses the actual slot type. Later reads treat the received value
+as an admissible subtype, without accepting values outside the declared target range.
 
-输入 refinement 不产生需要证明的 FOL premise；环境给出的输入值被假设满足
-该 refinement。后继推导成功后生成：
+Input assumes its refinement rather than generating a FOL obligation to prove it.
+After deriving the continuation, construct:
 
 ```python
 InfiniteDelayType(InputType(channel, continuation_type))
 ```
 
-`InputType` 是中断/外部选择类型 \(A\) 的分支；T-In 再以无穷时延包装它，
-使整个通信行为成为过程类型 \(T\)。载荷数量、槽位类型、变量名和 refinement
-均不存入 Type AST。
+InputType is an Angelic A branch; T-In wraps it in infinite delay to form Process
+Type T. Payload count, slot types, names, and refinement are not stored in the Type AST.
 
 ### 7.6 `ch!(e1,...,en); P`
 
-代码执行：
+The output rule performs:
 
-1. 检查通道存在、元数一致；
-2. 翻译每个 \(e_i\) 得到 \((u_i,B_i',D_i)\)；
-3. 单向检查 \(B_i' <: B_i\)；
-4. 实例化联合 refinement \(R[u_1/\eta_1,\ldots,u_n/\eta_n]\)；
-5. 证明：
+1. Require the channel and matching arity.
+2. Translate each \(e_i\) to \((u_i,B_i',D_i)\).
+3. Require \(B_i' <: B_i\).
+4. Instantiate \(R[u_1/\eta_1,\ldots,u_n/\eta_n]\).
+5. Prove:
 
 \[
 \Phi\Rightarrow
@@ -533,7 +528,7 @@ InfiniteDelayType(InputType(channel, continuation_type))
 \land R[u/\eta].
 \]
 
-输出不会改变 Gamma、路径或符号状态。后继推导成功后生成：
+Output preserves Gamma, path, and symbols. After continuation success, construct:
 
 ```python
 InfiniteDelayType(OutputType(channel, continuation_type))
@@ -541,13 +536,13 @@ InfiniteDelayType(OutputType(channel, continuation_type))
 
 ### 7.7 `If(B,P1,P2, continuation=Q)`
 
-代码先要求 `B` 为 Bool。若 `B` 是偏表达式，还单独证明：
+Require a Bool guard; separately prove partial-guard definedness:
 
 \[
 \Phi\Rightarrow Def(B).
 \]
 
-然后克隆两个 Context：
+Then clone two contexts:
 
 \[
 C_{then}.path=\Phi\land B,
@@ -555,7 +550,7 @@ C_{then}.path=\Phi\land B,
 C_{else}.path=\Phi\land\neg B.
 \]
 
-节点自持的公共后继 `Q` 被附加到两个分支：
+Append the node-owned common Q to each branch:
 
 \[
 T_1=type(P_1;Q,C_{then}),
@@ -563,71 +558,69 @@ T_1=type(P_1;Q,C_{then}),
 T_2=type(P_2;Q,C_{else}).
 \]
 
-两个子 judgment 都成功后生成：
+After both child judgments succeed, construct:
 
 ```python
 InternalChoiceType((T1, T2))
 ```
 
-内部选择构造器保留嵌套 `InternalChoiceType`，使规范 Type 文本能够用每个分支的
-圆括号直接表达本层 T-If 的两个子 judgment。由于求解器严格顺序执行，then 分支
-因 `false` 或结构/静态错误而无法形成类型时，else 分支不会继续检查；then 分支
-只有未决公式时仍会形成候选子类型，else 分支会继续推导。
+Nested InternalChoiceTypes preserve rule grouping, expressed by parenthesized
+branches in canonical Type text. Ordered evaluation stops before else if then
+cannot form a Type due to false/static/structural failure. Unknown formulas still
+permit a candidate then Type and continued else derivation.
 
-### 7.8 多元 `InternalChoice(P1,...,Pn, continuation=Q)`
+### 7.8 N-ary InternalChoice(P1,...,Pn, continuation=Q)
 
-该节点表示全部选择分支共享同一个后继。代码分别推导：
+All branches share Q; derive separately:
 
 \[
 T_i=type(P_i;Q;tail,C_i)\qquad(i=1,\ldots,n).
 \]
 
-每个 `C_i` 都是原 Context 的独立克隆，防止一个分支中的赋值或输入污染其他
-分支。所有分支成功后生成 `InternalChoiceType((T1,...,Tn))`。
+Each C_i independently clones the original context, isolating assignments and
+inputs. Successful children combine as InternalChoiceType((T1,...,Tn)).
 
-若构造时省略 `Q`，AST 中实际保存 `Skip()`。外层再写
-`Sequence(InternalChoice(...),Q)` 的非规范形状会在 Process AST 阶段被拒绝；
-`If` 和 `ODE` 采用相同约束。
-这个缺省 `Skip()` 只用于保持 AST 字段完整，不产生通信或状态动作；如果某个
-分支以递归调用 `X` 结束，规则引擎会在尾位置判断中忽略该 `skip`，因此不会把
-内部的 `X;skip` 错误判成非尾递归。
+Omitted Q stores Skip. External Sequence(InternalChoice(...),Q) is invalid, as
+for If and ODE. Default Skip completes the fields without observable behavior;
+tail checking ignores it after X, so an internal X;skip remains tail-recursive.
 
 ---
 
-## 8. EventReaction 到 angelic type
+## 8. EventReaction to Angelic Type
 
-EventReaction 只在 ODE 的 interrupts 字段中出现。
+EventReaction occurs only in ODE interrupts.
 
 ### 8.1 `EmptyEvent`
 
-空事件反应构造为 `NoInterruptType()`。它表示 ODE 没有通信中断；这和
-`EmptyType()` 表示的过程空通信行为不同。
+EmptyEvent produces NoInterruptType, meaning no communication interrupts,
+distinct from EmptyType's normal empty Process behavior.
 
 ### 8.2 `EventChoice((communication_1,P_1),...,(communication_n,P_n))`
 
-对每个事件分支，代码构造完整顺序行为：
+Each event branch derives the full sequential behavior:
 
 ```text
-communication; P; ODE 外层 tail
+communication; P; ODE outer tail
 ```
 
-因为 `communication` 必须是输入或输出，成功结果必须是 `InputType` 或
-`OutputType`。其余事件 `E` 递归构造。
+Each guard is input/output, so a successful child Type has an InfiniteDelayType
+communication prefix. The rule extracts its InputType/OutputType to build the
+angelic Type. The explicit work stack evaluates branches in source order.
 
-分支合并使用 `make_external_choice`：
+make_external_choice combines branches:
 
-- 零分支 -> `NoInterruptType()`；
-- 一个通信分支 -> 直接返回该 `InputType/OutputType`；
-- 两个及以上 -> `ExternalChoiceType((branch1,...,branchn))`。
+- Zero: NoInterruptType.
+- One: the InputType/OutputType directly.
+- Multiple: ExternalChoiceType((branch1,...,branchn)).
 
-外部选择保留源分支次序，也保留通道名相同的不同分支。代码不按通道去重、排序
-或应用交换律。
+Formal external choices retain source order and different same-channel branches,
+without channel-based deduplication, sorting, or commutative rewriting.
 
 ---
 
-## 9. ODE 的完整类型构造
+## 9. Complete ODE construction
 
-设 Process 节点包含：
+Let the Process node contain:
 
 \[
 \dot x_1=e_1,\ldots,\dot x_n=e_n,
@@ -637,38 +630,37 @@ communication; P; ODE 外层 tail
 \quad delay=d.
 \]
 
-每个 ODE 还自动拥有局部时钟 \(t\)，满足入口 \(t=0\) 和导数 \(\dot t=1\)。
+It also has local clock t with entry \(t=0\) and derivative \(\dot t=1\).
 
-### 9.1 静态检查
+### 9.1 Static checks
 
-代码首先检查：
+Check first:
 
-1. ODE 左端变量不得重复；
-2. 每个左端变量不得是共享只读参数，并且必须在 Gamma 中声明；
-3. 每个左端变量必须是 `BasicType.REAL`；
-4. 非空左侧变量集合必须由独立 `ContinuousType` 项精确登记；
-5. 每个导数表达式必须是数值类型；
-6. 演化域 `B` 必须是 Bool；
-7. ODE 自身的 safety `S` 必须是 Bool；
-8. 导数、`B` 和 `S` 的偏表达式有定义条件被收集。
+1. Left-hand sides are distinct.
+2. Targets are declared and are not shared parameters.
+3. Each target is BasicType.REAL.
+4. A nonempty target set exactly matches a ContinuousType declaration.
+5. Derivatives are numeric.
+6. Domain B is Bool.
+7. Safety S is Bool.
+8. Retain derivative/domain/safety definedness conditions.
 
-源表达式中的名字 `t` 在本 ODE 的导数右端、`B` 和 `S` 中被局部时钟遮蔽，
-不会读取同名 Gamma 项。该时钟只在 dL 动力系统构造阶段追加，不进入上述
-连续向量精确登记检查。
+Local t shadows a same-name Gamma entry in derivatives, B, and S. It is appended
+only during dL dynamics construction and is excluded from vector matching.
 
-任一静态检查失败时，不生成 dL 义务，也不生成任何时延 Type AST。
+Static failure generates neither dL goals nor delay Types.
 
-### 9.2 ODE 入口的 dL 符号快照
+### 9.2 dL symbolic entry snapshot
 
-离散赋值后，当前演化变量的 `symbols[x]` 可能是一个复合表达式，而 dL 方程左端
-必须是变量。因此 `_ode_dl_terms` 为每个演化变量创建新鲜入口变量 \(x_i^0\)，
-并加入等式：
+After assignment, symbols[x] may be a compound term, while dL left-hand sides
+must be variables. _ode_dl_terms allocates fresh entry variables \(x_i^0\)
+and equalities:
 
 \[
 x_i^0=\rho(x_i).
 \]
 
-再创建本 ODE 独占的新鲜时钟 \(\tau\)，加入：
+Allocate an ODE-specific fresh clock tau and add:
 
 \[
 \tau=0,
@@ -676,76 +668,74 @@ x_i^0=\rho(x_i).
 \dot\tau=1.
 \]
 
-于是 dL 前置条件是（其中当前路径 \(\Phi\) 已包含 \(H\)）：
+The dL precondition is then (Phi already includes H):
 
 \[
 Pre=\Phi\land\bigwedge_i(x_i^0=\rho(x_i))\land(\tau=0).
 \]
 
-基础动力系统是：
+The base dynamics are:
 
 \[
 F^*=\{\dot x_1^0=e_1,\ldots,\dot x_n^0=e_n,\dot\tau=1\}.
 \]
 
-令 ODE 用户方程左侧的变量集合为
+Let the user left-hand-side set be:
 
 \[
 V_{ODE}=\{x_1,\ldots,x_n\}.
 \]
 
-共享规则引擎要求 Gamma 中存在 `variables` 恰好等于 \(V_{ODE}\) 的独立
-`ContinuousType` 声明。没有精确匹配时 T-ODE 静态失败；匹配
-成功只表示这个 ODE 演化向量允许在 process 中出现，不会向 dL 公式添加性质。
-没有用户方程的空 flow ODE 使用空向量，不需要 Gamma 声明。dL 连续程序始终
-使用上面的无假设动力系统 \(F^*\)。
+The engine requires a ContinuousType variables set exactly equal to V_ODE.
+No match is a static T-ODE failure. Matching permits the vector but adds no
+property to dL. Empty flow requires no declaration. The continuous dL program
+uses the domain-free dynamics F* above.
 
-ODE 的 delay 批注不会自动添加到演化域；若要在给定时间边界自然结束，必须在
-用户演化域中显式写出相应的时钟条件。
+Delay is not automatically inserted into the evolution domain. Natural termination
+at a time boundary needs the corresponding explicit clock condition in the domain.
 
-### 9.3 safety dL 义务
+### 9.3 Safety dL obligation
 
-记 \(D_F,D_B,D_S\) 分别为导数、源演化域表达式和节点 safety 的有定义条件。
-节点 safety 是连续演化中恒成立性质的唯一来源。
+D_F, D_B, and D_S are definedness conditions for derivatives, source domain,
+and safety. The node safety is the sole source of evolution invariants.
 
-在没有走本地恒真捷径时，有限 delay 实际生成：
+Without the local true shortcut, finite delay generates:
 
 \[
 Pre\Rightarrow[F^*]
 (\tau\le d\Rightarrow(D_F\land D_B\land D_S\land S)).
 \]
 
-在没有走本地恒真捷径时，无限 delay 实际生成：
+Without the shortcut, infinite delay generates:
 
 \[
 Pre\Rightarrow[F^*](D_F\land D_B\land D_S\land S).
 \]
 
-注意待验证的源演化域 `B` 不会进入 dL 程序域；它只通过有定义性间接出现在
-safety 后置条件中。Gamma 只在静态阶段核对演化向量；参数约束 \(H\) 作为路径
-的一部分进入 dL 前件，参数本身不进入演化向量。
+Source domain B is not a dL program domain; its definedness enters the safety
+postcondition. Gamma checks vectors statically. H enters the antecedent through
+the path, while parameters stay outside the evolution vector.
 
-若规则层用于捷径判断的公式
-\(D_F\land D_S\land S\) 语法化简为 true，则该义务直接记为 true，不调用
-KeYmaera X；这一步的捷径判断没有包含 \(D_B\)。只有未走捷径、真正建立 dL
-公式时，后置条件才按上式包含 \(D_B\)。无法翻译为受支持 dL 子集时，保存
-`UntranslatedDLFormula`，通常由后端产生 unknown。
+If \(D_F\land D_S\land S\) simplifies syntactically to true, discharge locally
+without KeYmaera X. This shortcut excludes D_B; the actual non-shortcut dL
+formula includes it as above. Unsupported translation stores
+UntranslatedDLFormula, normally yielding unknown.
 
-### 9.4 纯通信规则的 domain 义务
+### 9.4 Communication-guaranteed domain obligation
 
-当 ``ODE(..., continuation=Skip())`` 的候选选择最终采用“只有通信中断、没有实际 timeout 后继”
-的 ODE 规则时，生成：
+When the ODE(...,continuation=Skip()) selection chooses the communication-only
+rule without natural timeout, generate:
 
 \[
 Pre\Rightarrow[F^*](D_F\land D_B\land B^*).
 \]
 
-`B*` 是这条公式要证明的不变量，不放入 dL 程序域。若域整体语法为 true，该义务
-直接判 true。
+B* is the invariant to prove, not a program domain. A syntactically true domain
+is discharged directly.
 
-### 9.5 自然 timeout 规则的 boundary 义务
+### 9.5 Natural-timeout boundary obligation
 
-有限 delay 且采用具有自然公共后继的规则时，代码生成：
+Finite delay with a natural continuation generates:
 
 \[
 Pre\Rightarrow[F^*]
@@ -756,18 +746,18 @@ Pre\Rightarrow[F^*]
 \right).
 \]
 
-同样，`F*` 不带演化域。公式要求在 `d` 之前保持域，而在 `d` 时域已经失效。
+F* is again domain-free. The goal maintains B before d and establishes its failure at d.
 
-### 9.6 ODE 离开后的符号 Context
+### 9.6 Symbolic post-ODE contexts
 
-ODE 的 dL 证明义务不直接计算解析解。离开 ODE 时，代码把每个演化变量替换为
-新鲜后状态符号：
+dL obligations do not compute analytic solutions. On exit, each evolved variable
+is replaced by a fresh post-state symbol:
 
 \[
 \rho_{post}(x_i)=x_i^{post}.
 \]
 
-然后仅按所选规则给后继建立以下路径条件。为准确表示源码，先记：
+The selected rule establishes the ODE-specific continuation conditions. First define:
 
 \[
 \widehat B=Def(B(post))\land B(post),
@@ -775,276 +765,276 @@ ODE 的 dL 证明义务不直接计算解析解。离开 ODE 时，代码把每�
 \widehat S=Def(S(post))\land S(post).
 \]
 
-这里把已经由同一条 dL 安全义务证明的节点 safety 在 ODE 结束/中断时刻的
-实例交给后继；它不是未经检查的路径假设。
+The post-state safety instance is justified by the same dL obligation, not
+introduced as an unchecked assumption.
 
-三种情况分别为：
-
-1. 纯通信规则的事件后继：
-
-\[
-\Phi_{event}=\widehat B\land\widehat S;
-\]
-
-2. 带自然 timeout 规则的通信事件后继：
+Every successor also retains the prepared parameter condition and scalar
+type-domain constraints, evaluated using the post-state symbol map:
 
 \[
-\Phi_{event}=\widehat S;
+E_{post}=Def(H)\land H\land TypeDomain(\Delta)
+         \land TypeDomain(\Gamma,\rho_{post}).
 \]
 
-3. 带自然 timeout 规则的自然后继：
+Here `TypeDomain` includes nonnegativity for Nat values; H is the shared parameter
+constraint. These environment facts are retained even though the entry path is replaced.
+
+The three cases are:
+
+1. Communication-guaranteed interrupt continuation:
 
 \[
-\Phi_{fallback}=Def(B(post))\land\neg B(post)\land\widehat S.
+\Phi_{event}=E_{post}\land\widehat B\land\widehat S;
 \]
 
-这些后继条件不再附加导数表达式的有定义性；导数相关条件只留在此前的 dL
-证明义务中。
-
-这些后继路径会替换原路径，而不是再与 ODE 入口路径 \(\Phi\) 合取；入口与连续
-演化正确性的联系由前面的 dL premise 承担。
-
-若 `B` 或 `S` 使用局部时钟，代码建立一个新鲜后状态时钟并将它投影掉：
+2. Natural-timeout rule's interrupt continuation:
 
 \[
-\exists\tau\ge0.\ condition(\tau).
+\Phi_{event}=E_{post}\land\widehat S;
 \]
 
-局部时钟不会进入事件 continuation 或外层顺序后继的 Gamma。
+3. Natural-timeout continuation:
 
-### 9.7 ODE 类型的组合与规范化
+\[
+\Phi_{fallback}=E_{post}\land Def(B(post))\land\neg B(post)\land\widehat S.
+\]
 
-事件反应得到 angelic type \(A\)，自然后继得到 process type \(T\)，随后调用：
+Derivative definedness is not appended to these paths; it remains in the earlier dL goals.
+
+Post-paths replace the entry Phi rather than conjoin with it. Earlier dL premises
+establish the connection between entry and continuous evolution.
+
+If B/S uses the clock, create a fresh post-clock and project it out of the
+ODE-specific condition while retaining the environment condition:
+
+\[
+E_{post}\land\exists\tau.\ (\tau\ge0\land condition(\tau)).
+\]
+
+Local clocks do not enter interrupt or external-continuation Gamma.
+
+### 9.7 ODE Type composition and normalization
+
+With Angelic A from interrupts and Process T from natural continuation, call:
 
 ```python
 make_delay_type(d, A, T)
 ```
 
-有限 \(d\) 的唯一规范形为：
+Finite d has this canonical representation:
 
-| `A` | `T` | 实际 Type AST |
+| A | T | Type AST |
 |---|---|---|
-| 任意 `A` | `BottomType()` | `FiniteDelayType(d,A,bottom)`，对应无 timeout 的 `T-\unrhd` |
-| `NoInterruptType()` | 非 bottom 的 `T` | `FiniteDelayType(d,A,T)`，打印为 `delay(d).T` |
-| 非空通信选择 | 非 bottom 的 `T` | `FiniteDelayType(d,A,T)`，打印为完整式 |
+| Any A | BottomType() | FiniteDelayType(d,A,bottom), communication-only T-unrhd |
+| NoInterruptType() | Non-bottom T | FiniteDelayType(d,A,T), displayed as delay(d).T |
+| Nonempty communication choice | Non-bottom T | FiniteDelayType(d,A,T), full display form |
 
-特别地，用户必须把“没有实际后继”的有限 ODE 写成 ``ode(...); skip``。
-当候选选择采用纯通信规则时，统一 AST 用 `BottomType` 表示 deadline 后继不可达：
+Write a finite ODE without substantive continuation as ode(...);skip. If selection
+uses communication-only, Bottom records the unreachable deadline continuation:
 
 ```python
 FiniteDelayType(d, A, BottomType())
 ```
 
-正无穷 delay 构造 `InfiniteDelayType(A)`；其自然到时后继固定为不可达的
-`BottomType()`，不作为普通字段存储。因此：
+Positive infinity uses InfiniteDelayType(A), with fixed unreachable Bottom
+timeout, not an ordinary stored field. Thus:
 
-- 有通信事件时，结果是 `InfiniteDelayType(InputType/OutputType/ExternalChoiceType)`；
-- 没有事件时，结果是 `InfiniteDelayType(NoInterruptType())`。
+- With events: InfiniteDelayType(InputType/OutputType/ExternalChoiceType).
+- Without events: InfiniteDelayType(NoInterruptType()).
 
-无限 ODE 即使具有外层 tail，自然 timeout 也不会进入 tail；但通信提前中断的
-每个事件分支仍会在自己的 continuation 后执行该 tail。
+An infinite ODE never naturally enters an outer tail, but an actual interrupt
+branch still executes that tail after its own continuation.
 
-### 9.8 源码 `skip` 与两种不同 Type 后继
+### 9.8 Source skip and two distinct Type continuations
 
-用户输入不允许以裸 `ode(...)` 结束语句块。没有实际后继时，也必须显式写成：
+User blocks cannot end with bare ode(...). Write this even without substantive continuation:
 
 ```text
 ode(..., delay(d)); skip
 ```
 
-这个形状有两种规则解释：
+Two rules interpret this shape:
 
-- `skip` 是“无实际后继”的占位：试用 `T-\unrhd`，证明 safety/domain，事件
-  后继不附加该占位语句，deadline continuation 构造为 `BottomType()`；
-- `skip` 是真实空后继：试用 `T-\unrhd'`，证明 safety/boundary，并检查
-  `skip :: EmptyType()`。
+- Placeholder skip: try T-unrhd, prove safety/domain, omit the placeholder from
+  interrupt continuations, and use Bottom as the deadline continuation.
+- Real empty skip: try T-unrhd', prove safety/boundary, and check skip :: EmptyType.
 
-Constructor 隔离执行两次试推，再依据证明结果选择唯一可行规则。两边的公式
-都会保留并标记候选来源，但只有选中候选参与最终 verdict。若证明器返回
-unknown，仍按项目统一策略形成不可信临时候选。有限 `ODE; Q` 且 `Q` 非 skip
-时没有重叠，只使用 `T-\unrhd'`。两个候选现在生成不同的 Type AST 后继，因此
-即使 Process 源码都写 `skip`，结果也不会再混淆。无穷时延没有自然
-到时迁移，仍使用上一节的 `InfiniteDelayType(A)` 规则。
+Construction isolates both attempts and selects from proof outcomes. Both retain
+candidate-tagged evidence, but only the selected candidate contributes to the
+verdict. Unknown permits a provisional untrusted candidate under the common
+policy. Finite non-skip Q uses only T-unrhd'. Distinct Bottom/Empty Type
+continuations disambiguate identical source skips. Infinite delay has no natural
+timeout and uses InfiniteDelayType(A).
 
 ---
 
-## 10. 递归 Process 的类型构造
+## 10. Recursive Process construction
 
 ### 10.1 `Mu(X,P,invariant=I)`
 
-当前实现只支持没有实际外层顺序 tail 的递归节点。仅由一个或多个 `skip` 组成的
-tail 不产生行为，会被尾位置判断忽略；若 `Mu(...); Q` 中仍存在任何非 `skip`
-进程，则该结构超出当前递归构造能力，产生 `unknown` 诊断且无法形成父类型。这里
-是缺少结构推导规则，不是“证明器对一条已生成公式返回 unknown”，因此没有可继续
-构造的递归类型。
+Mu supports no observable outer sequential tail. Trailing skips are ignored.
+Any remaining non-skip Q in Mu(...);Q is unsupported, gives an unknown structural
+diagnostic, and prevents the parent Type. This is a missing derivation rule,
+not an unresolved generated formula that permits continued Type construction.
 
-递归入口先证明：
+At recursion entry, prove:
 
 \[
 \Phi\Rightarrow Def(I)\land I.
 \]
 
-然后分配与源名字无关的新鲜类型变量，例如 `t1`，记录：
+Allocate a fresh Type variable independent of source names, such as t1, and record:
 
 ```text
 X -> (TypeVar("t1"), invariant I)
 ```
 
-递归体不是在当前具体符号状态下直接检查。代码为 Gamma 中所有值变量重新建立
-新鲜符号，并把递归体入口路径替换为：
+The body starts with fresh symbols for every Gamma scalar and this abstract path,
+instead of the current concrete state:
 
 \[
-H\land I\land Def(I)\land TypeDomain(\Gamma).
+\widehat H\land I\land Def(I)\land TypeDomain(\Gamma,\rho_{rec}).
 \]
 
-因此递归体表示“任意一次满足不变量的迭代入口”，不会继承进入 `Mu` 前变量的
-具体赋值项。
+Here \(\rho_{rec}\) is the fresh recursion-entry symbol map. The path models any
+iteration entry satisfying the invariant, without prior assignment history.
 
 ### 10.2 `Var(X)`
 
-遇到递归回边时，代码要求：
+At a back edge, require:
 
-1. `X` 已在 `rec_env` 绑定；
-2. `Var(X)` 后没有非 `skip` 的顺序 tail；显式 `X;skip` 和内部选择缺省后继
-   形成的 `X;skip` 都仍视为尾位置；
-3. 当前路径重新建立不变量：
+1. X is bound in rec_env.
+2. No non-skip tail follows Var(X); explicit/default X;skip remains tail position.
+3. Reestablish the invariant from the current path:
 
 \[
 \Phi_{body}\Rightarrow Def(I)\land I.
 \]
 
-证明成功后，`Var(X)` 构造为相应 `TypeVar("t1")`。
+After proof, Var(X) becomes the corresponding TypeVar("t1").
 
-### 10.3 是否保留 `MuType`
+### 10.3 Retaining MuType
 
-递归体类型求得后：
+After deriving the body Type:
 
-- 若类型体中实际出现 `t1`，代码复核所有出现都经过 `InputType` 或
-  `OutputType`，然后构造 `MuType("t1",body_type)`；
-- 若类型体没有引用 `t1`，说明该递归绑定在类型层无实际回边，直接返回
-  `body_type`，不保留空的 `MuType` 包装。
+- If t1 occurs, verify every occurrence is guarded by InputType/OutputType,
+  then construct MuType("t1",body_type).
+- Otherwise return body_type without a redundant Mu wrapper.
 
-Delay、内部选择和并行本身不算通信守卫；只有输入/输出类型前缀把
-`under_communication` 置为 true。
-
----
-
-## 11. Type AST 的规范化规则
-
-类型构造规则不会任意构造多个等价形状，而是通过 Type AST 构造器保持以下规范：
-
-1. 正常终止只有 `EmptyType()`；
-2. `BottomType()` 表示不可达行为；有限 `T-\unrhd` 和无限 delay 会使用它，
-   但推导失败仍以 `None`/失败结果表示；
-3. 外部选择：零分支为 `NoInterruptType`，单分支直接使用通信类型，多分支才使用
-   `ExternalChoiceType`；
-4. 嵌套 `InternalChoiceType` 保留分块和顺序，不压平、不排序；
-5. 所有有限 delay 均使用 `FiniteDelayType(d,A,T)`；三种论文缩写只影响显示；
-6. 正无穷 delay 由 `InfiniteDelayType(A)` 显式保存，普通后继固定为不可达 bottom；
-7. `ParallelType` 压平嵌套并行，但不排序；
-8. `MuType` 的绑定变量支持 alpha 改名。
-
-`types_equivalent` 实际只比较规范结构并忽略 `MuType` 绑定变量名称。它不实现：
-
-- 内部/外部选择交换律；
-- 并行交换律；
-- 子类型关系；
-- 行为双模拟；
-- 不同通道 refinement 的语义等价。
-
-有限 delay 使用精确 `Fraction` 比较，所以 `1`、`1.0`、`Fraction(1,1)` 在规范
-类型中具有同一个时延键。
+Delay, internal choice, and parallel composition are not communication guards;
+only input/output prefixes set under_communication to true.
 
 ---
 
-## 12. 证明义务的三种判定方式
+## 11. Formal Type AST normalization
+
+Constructors maintain these forms:
+
+1. Normal completion is EmptyType.
+2. Bottom is unreachable behavior in finite T-unrhd/infinite delay; failure remains None/failure evidence.
+3. Empty/single/multiple external choices use NoInterrupt, Input/Output, or ExternalChoice.
+4. Nested InternalChoice preserves grouping and order, without flattening/sorting.
+5. Finite delay always uses FiniteDelayType(d,A,T); paper abbreviations affect display only.
+6. InfiniteDelayType(A) has fixed unreachable Bottom continuation.
+7. ParallelType flattens but does not sort.
+8. Mu binders permit alpha renaming.
+
+types_equivalent compares canonical structure ignoring Mu binder names. It does not implement:
+
+- Choice commutativity.
+- Parallel commutativity.
+- Subtyping.
+- Behavioral bisimulation.
+- Semantic equivalence of channel refinements.
+
+Exact Fractions give 1, 1.0, and Fraction(1,1) the same normalized delay key.
+
+---
+
+## 12. Three proof-obligation categories
 
 ### 12.1 State premise
 
-对 T-sigma，将具体 state 代入局部路径，然后检查
-\(H\Rightarrow\Phi[\sigma]\) 的有效性。state 中未知的 Gamma 值变量、ODE 向量声明名或
-共享参数名都会被拒绝；Gamma 值变量中未出现在 state 的项保留，并与参数一起
-按全称有效性检查。
+T-sigma substitutes concrete state into the prepared local path and proves
+\(\widehat H\Rightarrow\widehat\Phi_i[\sigma]\). Undeclared names, vector labels, and parameter state
+keys fail. Omitted Gamma values remain universally quantified with parameters.
 
 ### 12.2 FOL premise
 
-Z3 通过检查公式否定是否不可满足来判定有效性：
+Z3 checks validity through negation:
 
 \[
 valid(F)\quad\text{iff}\quad unsat(\neg F).
 \]
 
-- `unsat` -> true；
-- `sat` -> false，并保存反例模型；
-- solver unknown/timeout -> unknown。
+- unsat: true.
+- sat: false, retaining a counterexample model.
+- unknown/timeout: unknown.
 
 ### 12.3 dL premise
 
-dL 公式交给配置的 KeYmaera X 后端或调用方注入的 `dl_checker`。语法恒真的
-safety/domain 可以本地直接判 true。后端缺失、翻译不支持、超时或未完成证明
-都保守成为 unknown。
+dL goes to configured KeYmaera X or an internally injected dl_checker.
+Syntactically true safety/domain can be discharged locally. Missing backends,
+unsupported translation, timeout, and incomplete proofs conservatively give unknown.
 
-`false` 会阻止当前规则构造类型；`unknown` 会作为待证明义务保留，但不会阻止
-规则继续构造候选类型。只有 `true` 结论对应的最终类型才是可信类型。
+False prevents Type construction for the rule. Unknown retains a required proof
+without preventing candidate structure; only all-true final Types are trusted.
 
 ---
 
-## 13. 最终 verdict 和部分结果
+## 13. Final verdict and partial results
 
-最终 verdict 合并：
+The final verdict combines:
 
-1. 所有按当前确定性规则生成的证明义务；
-2. 所有 diagnostics。
+1. Active proof obligations of the selected derivation.
+2. Diagnostics participating in its result.
 
-优先级为：
+Priority is:
 
 \[
 false > unknown > true.
 \]
 
-但是“总体 verdict 的合并”和“是否形成类型”是两件事：
+Verdict aggregation and existence of a complete Type are separate:
 
-- 某个必要 premise 为 `false` 时，推导短路，通常有 `constructed_type=None`；
-- 某个公式 premise 为 `unknown` 时继续推导；若所有结构步骤仍可完成，最终同时
-  得到 `verdict=unknown` 与非空 `constructed_type`，后者是完整但不可信的候选；
-- 结构规则本身无法展开时也可能得到 `unknown` 且 `constructed_type=None`；
-- 合法 Type 可以包含 `BottomType`，但仅表示规则中的不可达行为，绝不表示构造失败；
+- A false necessary premise short-circuits, usually leaving constructed_type=None.
+- Unknown formula premises continue; completed structure yields verdict=unknown
+  and a nonempty complete untrusted candidate.
+- Unsupported rule expansion can also give unknown with constructed_type=None.
+- Valid Types may contain Bottom as unreachable behavior, never construction failure.
 
-公共单入口不会把 `verdict=unknown` 的候选伪装成正常返回值。推导完整时它抛出
-`HCSPUntrustedTypeConstructionError`，并将候选放在 `error.untrusted_type`；未形成
-完整类型时抛出普通 `HCSPTypeConstructionError`。两者的详细日志均保留实际证明
-公式和三值结论。
+The public facade does not return unknown candidates normally. Complete candidates
+raise HCSPUntrustedTypeConstructionError with error.untrusted_type; incomplete
+results raise HCSPTypeConstructionError. Full reports retain actual formulas and verdicts.
 
-### 13.1 结构化错误信息
+### 13.1 Structured errors
 
-`HCSPTypeConstructionError` 不仅保存展示文本，还提供稳定字段：
+HCSPTypeConstructionError provides stable fields:
 
-- `kind`：`TypeConstructionErrorKind`，区分 `environment`、`derivation`、
-  `proof-failed` 和 `proof-unknown`；
-- `phase`：对应 `environment`、`rule-derivation` 或 `proof`；
-- `rule`、`location`：首要失败所属规则和判断位置；
-- `partial_types`：停止前已经形成的各配置分量类型；
-- `details`：全部参与最终结论的 `HCSPErrorDetail`。证明明细保存 FOL/dL 类别、
-  实际证明公式和证明后端说明。
+- kind: TypeConstructionErrorKind, with environment, derivation, proof-failed, or proof-unknown.
+- phase: environment, rule-derivation, or proof.
+- rule/location: primary failing judgment.
+- partial_types: component Types completed before stopping.
+- details: participating HCSPErrorDetail records, including FOL/dL kind,
+  submitted formula, and backend explanation for proof failures.
 
-完整候选已经形成但证明仍为 unknown 时，异常仍使用专门的
-`HCSPUntrustedTypeConstructionError`，且 `kind` 固定为 `proof-unknown`；候选只从
-`untrusted_type` 读取。输入词法、语法或 validation 错误不进入上述分类，而由
-带源码行列和插入符的 `HCSPInputError` 立即终止前端。
+A complete candidate with unknown proofs uses HCSPUntrustedTypeConstructionError
+with kind=proof-unknown and untrusted_type. Lexical/syntax/validation failures
+instead stop the frontend immediately with HCSPInputError and source location/caret.
 
 ---
 
-## 14. 几个完整的小例子
+## 14. Small complete examples
 
 ### 14.1 `ch?x; ch!x`
 
-初始 Gamma 为空，Theta 声明 `ch:Real`：
+With empty initial Gamma and a Real channel ch:
 
-1. T-In 建立新鲜值 \(r\)，得到 `Gamma={x:Real}`、`symbols[x]=r`；
-2. 输入 refinement 加入路径；
-3. T-Out 读取同一个 \(r\)，证明输出 refinement；
-4. 终端得到 `EmptyType()`；
-5. 逐层包装：
+1. T-In creates fresh r, Gamma={x:Real}, and symbols[x]=r.
+2. Add the input refinement to the path.
+3. T-Out reads r and proves the output refinement.
+4. Terminate with EmptyType.
+5. Wrap the result:
 
 ```python
 InfiniteDelayType(
@@ -1052,7 +1042,7 @@ InfiniteDelayType(
 )
 ```
 
-显示为：
+Displayed as:
 
 ```text
 type forever interrupt angelic {
@@ -1062,14 +1052,14 @@ type forever interrupt angelic {
 
 ### 14.2 `x := x + 1; ch!x`
 
-若 `symbols[x]=x0`，赋值后：
+For symbols[x]=x0, assignment gives:
 
 \[
 symbols[x]=x0+1.
 \]
 
-T-Out 对 `x` 的读取直接得到 `x0+1`，因此 refinement 证明使用更新后的值。
-赋值本身不产生行为前缀，最终类型只保留：
+T-Out reads x0+1 and proves refinement on the updated value. Assignment adds
+no behavioral prefix; the final Type retains only:
 
 ```text
 type forever interrupt angelic {ch! -> empty}
@@ -1077,7 +1067,7 @@ type forever interrupt angelic {ch! -> empty}
 
 ### 14.3 `if B then ch1!0 else ch2!0`
 
-两个分支分别在 \(\Phi\land B\) 和 \(\Phi\land\neg B\) 下推导，结果为：
+Derive branches under \(\Phi\land B\) and \(\Phi\land\neg B\), producing:
 
 ```python
 InternalChoiceType((
@@ -1086,16 +1076,15 @@ InternalChoiceType((
 ))
 ```
 
-### 14.4 有限、无事件、具有自然后继的 ODE
+### 14.4 Finite ODE without interrupts and with natural continuation
 
-若 ODE 的事件反应为空，外层 tail 推导为 `T`，并且自然 timeout 候选被唯一
-选中，则：
+For an empty event set, tail Type T, and uniquely selected timeout candidate:
 
 ```python
 make_delay_type(d, NoInterruptType(), T)
 ```
 
-规范结果是：
+The canonical result is:
 
 ```python
 FiniteDelayType(d, NoInterruptType(), T)
@@ -1103,26 +1092,22 @@ FiniteDelayType(d, NoInterruptType(), T)
 
 ---
 
-## 15. 人工审计时最值得单独核对的实现选择
+## 15. Implementation choices requiring particular review
 
-以下不是本文对正确性的判断，只是当前代码中真实存在、容易影响论文比对的
-具体选择：
+These are concrete choices affecting comparison with the paper:
 
-1. Sequence 通过传递剩余节点实现，不存在通用 Type 级顺序组合；
-2. T-Assign 不综合未知后置谓词，而用旧路径和更新后的符号映射表示后状态；
-3. 当前 `T-Assign-post` 的实际证明公式是 \(\Phi\Rightarrow\Phi\)；
-4. 输入已有变量要求“通道槽类型 <: 目标声明类型”，输出也按载荷类型到槽位类型
-   的单向子类型关系检查；
-5. 输入 refinement 被加入路径作为假设，输出 refinement 必须证明；
-6. If 和 InternalChoice 的兄弟子 judgment 按顺序求解；三个控制节点 If、
-   InternalChoice、ODE 都在 AST 中自持公共 continuation；第一个兄弟因 `false` 或结构
-   错误而无法形成类型时会阻止第二个，但公式 `unknown` 不会；
-7. ODE 后状态不计算解析解，而用新鲜变量和 `B/safety` 条件抽象；
-8. ODE 的三类后继分别使用 `B∧safety`、`safety`、`¬B∧safety`；
-9. safety/domain/boundary 的 dL 程序均使用不带演化域的动力系统；
-10. 用户源码中的裸末尾 ODE 非法；显式 `ODE; skip` 被 lowering 为
-    `ODE(..., continuation=Skip())`，并隔离试用 `T-\unrhd` 与
-    `T-\unrhd'`，非 skip 后继唯一使用 prime 规则；
-11. 正无穷 delay 由 `InfiniteDelayType` 保存；不可达的 bottom 后继不作为可改写字段；
-12. 递归体从仅满足不变量的新鲜抽象状态开始，不继承进入 `Mu` 前的具体符号项；
-13. Type 等价只忽略递归绑定变量改名，选择和并行的次序仍参与比较。
+1. Sequence passes remaining nodes; there is no generic type-level sequencing.
+2. Assignment uses the old path and updated symbols, without postpredicate synthesis.
+3. Actual T-Assign-post proves \(\Phi\Rightarrow\Phi\).
+4. Input requires slot type <: declared target type; output requires payload type <: slot type.
+5. Input assumes refinement; output proves it.
+6. If/choice siblings are ordered. If, InternalChoice, and ODE own continuations.
+   False/structural failure stops siblings; unknown formulas do not.
+7. ODE post-state uses fresh variables and B/safety abstraction, not analytic solutions.
+8. Three ODE continuations use B∧safety, safety, and ¬B∧safety.
+9. Safety/domain/boundary dL uses domain-free dynamics.
+10. Bare final ODE is invalid. ODE;skip lowers to the ODE field and isolates
+    T-unrhd/T-unrhd'; non-skip successors use only prime.
+11. InfiniteDelayType fixes unreachable Bottom outside ordinary mutable fields.
+12. Recursive bodies start from a fresh invariant-only abstract state.
+13. Formal Type equivalence ignores binder renaming but preserves choice/parallel order.

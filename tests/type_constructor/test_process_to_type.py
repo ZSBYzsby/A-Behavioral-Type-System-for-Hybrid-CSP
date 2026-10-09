@@ -1,30 +1,5 @@
-"""HCSP Process/System 到行为类型的场景化转换测试。
-
-正向案例覆盖全部 ``P`` 产生式、事件反应 ``E`` 在 ODE 中的转换以及系统并行
-``S || S'``。反向案例覆盖类型规则的关键拒绝条件。每个正向案例都比较行为
-类型 AST，而不只比较字符串或总体 true/false。
-
-测试内容
---------
-1. ``P01``-``P11``：全部十一种 P 节点及 ODE 事件反应的精确类型。
-2. ``S01``：并行系统到 ParallelType 的转换。
-3. ``C01``-``C09``：控制流组合、内部选择公共后继、有限时延节点、
-   显式有限 ODE 和自动局部时钟。
-4. ``N01``-``N13``：逻辑证明失败、静态类型失败、通道、refinement、ODE、
-   递归不变量、初始路径和缺少 dL 后端的 false/unknown 路径。
-5. 动态插桩所有 ``rule_t_*``，要求场景集实际进入每个规则入口。
-6. 结构推导失败使用 ``None``，并验证有限 ODE 会以正常终止收束。
-7. 检查推导入口的类型标注严格区分 process 类型 ``T`` 和 configuration 类型
-   ``mathcal T``。
-8. Gamma 只允许普通 BasicType 或 ContinuousType，Theta 的字符串键也必须
-   满足与 process/type AST 相同的通道标识符规则。
-
-论文对应
---------
-正向场景逐项对应 Section 2.1 的 E/P/S 文法和 Section 4.1 的行为类型；
-批注/证明义务对应 Section 4.2/4.3 与 Table 2 的类型规则。每个
-``ConversionScenario`` 明确保存输入进程、Gamma、Theta、状态、路径条件、
-期望 verdict、期望行为类型和应出现的证明证据。
+r"""Regression tests for process to type. Paper reference: Section 2.1, Section 4.1, Section
+4.2/4.3, Table 2.
 """
 
 from __future__ import annotations
@@ -79,13 +54,13 @@ from hcsp_typechecker._internal import (
 
 
 def _true_dl(_obligation: object) -> Verdict:
-    """模拟已成功验证的动态逻辑后端，以隔离行为类型构造。"""
+    r"""Approve dL goals with a mock backend to isolate construction."""
 
     return Verdict.TRUE
 
 
 def _select_natural_timeout(obligation: object) -> Verdict:
-    """用角色感知的 mock 否证 domain 候选，唯一选中 boundary 规则。"""
+    r"""Reject domain preservation and approve the boundary candidate."""
 
     formula = getattr(obligation, "formula", None)
     return (
@@ -96,7 +71,7 @@ def _select_natural_timeout(obligation: object) -> Verdict:
 
 
 def _select_communication_only(obligation: object) -> Verdict:
-    """用角色感知的 mock 否证 boundary，唯一选中 T-unrhd。"""
+    r"""Approve the domain candidate and reject the timeout candidate."""
 
     formula = getattr(obligation, "formula", None)
     return (
@@ -107,14 +82,14 @@ def _select_communication_only(obligation: object) -> Verdict:
 
 
 def _unknown_dl(_obligation: object) -> Verdict:
-    """模拟尚无结论的 dL 后端，锁定不可信候选的推导路径。"""
+    r"""Return UNKNOWN to exercise complete untrusted candidate construction."""
 
     return Verdict.UNKNOWN
 
 
 @dataclass(frozen=True)
 class ConversionScenario:
-    """一个进程到行为类型的可执行场景及其精确期望。"""
+    r"""An executable Process-to-Type scenario with exact expected results."""
 
     case_id: str
     description: str
@@ -131,7 +106,7 @@ class ConversionScenario:
     step_rules: tuple[str, ...] = ()
 
     def run(self) -> TypeConstructionReport:
-        """调用内部构造器入口并返回保留全部证明证据的构造报告。"""
+        r"""Call internal construction and retain the complete evidence report."""
 
         return construct_type(
             gamma=self.gamma,
@@ -143,7 +118,7 @@ class ConversionScenario:
 
 
 def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
-    """构造覆盖全部语法产生式和核心失败路径的稳定场景集。"""
+    r"""Define exact conversion scenarios for syntax and failure paths."""
 
     integer = ChannelType(BasicType.INT)
 
@@ -196,14 +171,14 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
     return (
         ConversionScenario(
             "P01_SKIP",
-            "skip 转换为终止类型 0",
+            'skip becomes termination type 0',
             Skip(),
             Verdict.TRUE,
             EmptyType(),
         ),
         ConversionScenario(
             "P02_ASSIGN",
-            "赋值更新符号状态但不增加可观察类型前缀",
+            'Assignment updates symbolic state without an observable type prefix',
             Assign("x", 1),
             Verdict.TRUE,
             EmptyType(),
@@ -212,7 +187,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P03_ASSERT",
-            "成功断言保持 continuation 类型",
+            'A proved assertion preserves the continuation type',
             Assert("x >= 0"),
             Verdict.TRUE,
             EmptyType(),
@@ -223,7 +198,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P04_INPUT",
-            "一槽 ch?(x) 转换为输入前缀类型",
+            'Scalar ch?(x) becomes an input prefix',
             InputChannel("in", "x"),
             Verdict.TRUE,
             InfiniteDelayType(InputType("in", EmptyType())),
@@ -231,7 +206,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P05_OUTPUT",
-            "一槽 ch!(e) 转换为输出前缀类型",
+            'Scalar ch!(e) becomes an output prefix',
             OutputChannel("out", 1),
             Verdict.TRUE,
             InfiniteDelayType(OutputType("out", EmptyType())),
@@ -240,7 +215,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P06_IF",
-            "二元 if 转换为两个 continuation 的内部选择",
+            'Binary if becomes an internal choice of two continuations',
             If(
                 "x >= 0",
                 OutputChannel("positive", 0),
@@ -259,7 +234,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P07_ODE_EVENT_REACTION",
-            "无限时延 ODE 显式保留不可达 bottom 后继的 delay 结构",
+            'An infinite-delay ODE retains an unreachable bottom continuation explicitly',
             Sequence.of(event_ode, Skip()),
             Verdict.TRUE,
             InfiniteDelayType(ExternalChoiceType(
@@ -274,7 +249,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P08_SEQUENCE",
-            "P; P' 把后继类型嵌入前缀 continuation",
+            "P; P' embeds the successor type into the prefix continuation",
             Sequence.of(
                 InputChannel("in", "x"),
                 OutputChannel("out", "x"),
@@ -291,7 +266,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P09_INTERNAL_CHOICE",
-            "多分支 P_1 |~| ... |~| P_n 转换为多元内部选择类型",
+            'P_1 |~| ... |~| P_n becomes an n-ary internal choice',
             InternalChoice(
                 OutputChannel("left", 0),
                 OutputChannel("right", 0),
@@ -310,7 +285,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P10_MU_AND_VAR",
-            "mu X.P 与 X 转换为通信保护的递归类型",
+            'mu X.P and X become a communication-guarded recursive type',
             Mu(
                 "X",
                 Sequence.of(InputChannel("tick", "u"), Var("X")),
@@ -325,7 +300,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "P11_TERMINATING_ODE_SEQUENCE",
-            "无通信 ODE 形成以外层顺序后继为 continuation 的纯等待",
+            'An ODE without communication becomes a wait with the sequential continuation',
             Sequence.of(terminating_ode, OutputChannel("done", 0)),
             Verdict.TRUE,
             FiniteDelayType(
@@ -340,7 +315,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "S01_PARALLEL",
-            "S || S' 转换为两个分量的并行行为类型",
+            "S || S' becomes a parallel type with two components",
             Parallel(
                 OutputChannel("left", 0),
                 InputChannel("right", "u"),
@@ -356,7 +331,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C01_ASSIGN_ASSERT_SEQUENCE",
-            "赋值后的符号状态可证明后继断言",
+            'Post-assignment symbolic state proves the following assertion',
             Sequence.of(Assign("x", "x + 1"), Assert("x >= 1")),
             Verdict.TRUE,
             EmptyType(),
@@ -367,7 +342,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C02_IF_WITH_COMMON_TAIL",
-            "if 两个分支都正确连接外层顺序 continuation",
+            'Both if branches connect to the outer sequential continuation',
             Sequence.of(
                 If(
                     "x >= 0",
@@ -399,7 +374,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C03_INPUT_BINDS_FRESH_CONTINUATION",
-            "先检查无关状态 y，再输入新鲜 x 并在后继中使用",
+            'Check unrelated state y, receive fresh x, and use it in the continuation',
             Sequence.of(
                 Assert("y >= 0"),
                 InputChannel("in", "x"),
@@ -420,7 +395,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C04_FINITE_COMMUNICATION_TIMEOUT",
-            "有限 d、非空 A、显式 skip 经候选选择形成有限时延节点",
+            'Finite d with nonempty A and terminal skip selects a finite-delay candidate',
             Sequence.of(timeout_ode, Skip()),
             Verdict.TRUE,
             FiniteDelayType(2, OutputType("tick", EmptyType()), BottomType()),
@@ -431,7 +406,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C05_TIMED_EXTERNAL_CHOICE_WITH_FALLBACK",
-            "有限 d、非空 A 和正常后继形成 FiniteDelayType",
+            'Finite d with nonempty A and a normal continuation produces FiniteDelayType',
             Sequence.of(fallback_ode, OutputChannel("done", 0)),
             Verdict.TRUE,
             FiniteDelayType(
@@ -451,7 +426,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C06_INFINITE_DELAY_DISCARDS_TIMEOUT_FALLBACK",
-            "无限 d 没有自然超时，通信中断后仍继续顺序 tail",
+            'Infinite d has no natural timeout; communication interrupts continue with the sequential tail',
             Sequence.of(infinite_fallback_ode, OutputChannel("done", 0)),
             Verdict.TRUE,
             InfiniteDelayType(OutputType(
@@ -465,7 +440,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "C09_INTERNAL_CHOICE_WITH_COMMON_TAIL",
-            "多元内部选择节点为每个分支保留同一顺序后继",
+            'Every n-ary internal-choice branch retains the same sequential continuation',
             InternalChoice(
                 OutputChannel("left", 0),
                 OutputChannel("right", 0),
@@ -494,7 +469,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N01_ASSERT_FALSE",
-            "不可证明的断言使构造结果为 false",
+            'An unprovable assertion gives a false construction verdict',
             Assert("x > 0"),
             Verdict.FALSE,
             None,
@@ -504,7 +479,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N02_ASSIGN_TYPE_MISMATCH",
-            "赋值右值与 Gamma 类型不匹配时不生成行为类型",
+            'An assignment incompatible with Gamma produces no behavioral type',
             Assign("x", True),
             Verdict.FALSE,
             None,
@@ -514,7 +489,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N03_INPUT_CHANNEL_MISSING",
-            "未在 Theta 声明的输入通道不能转换",
+            'An input channel missing from Theta cannot be translated',
             InputChannel("missing", "x"),
             Verdict.FALSE,
             None,
@@ -522,7 +497,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N04_OUTPUT_REFINEMENT_FALSE",
-            "输出表达式违反通道 refinement 时拒绝",
+            'An output payload violating the channel refinement is rejected',
             OutputChannel("bounded", -1),
             Verdict.FALSE,
             None,
@@ -536,7 +511,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N05_IF_GUARD_NOT_BOOL",
-            "if 守卫不是 Bool 时拒绝转换",
+            'A non-Bool if guard is rejected',
             If("x + 1", Skip(), Skip()),
             Verdict.FALSE,
             None,
@@ -546,7 +521,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N06_ODE_VARIABLE_NOT_REAL",
-            "用户 ODE 状态变量不是 Real 时拒绝；隐藏时钟不需要 Gamma 声明",
+            'Non-Real ODE state variables are rejected; the hidden clock needs no Gamma declaration',
             ordinary_ode_variable,
             Verdict.FALSE,
             None,
@@ -556,7 +531,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N07_ODE_WITHOUT_DL_BACKEND",
-            "非平凡 ODE 证明未决时仍生成完整但不可信的候选类型",
+            'An unresolved nontrivial ODE proof still produces a complete, untrusted candidate',
             Sequence.of(unknown_ode, Skip()),
             Verdict.UNKNOWN,
             FiniteDelayType(1, NoInterruptType(), EmptyType()),
@@ -572,7 +547,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N08_ODE_VARIABLE_MISSING_FROM_GAMMA",
-            "用户 ODE 状态变量缺少 Gamma 声明时拒绝；自动时钟不受此限制",
+            'ODE variables missing from Gamma are rejected; the automatic clock is exempt',
             ordinary_ode_variable,
             Verdict.FALSE,
             None,
@@ -580,7 +555,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N09_ASSERT_CONDITION_NOT_BOOL",
-            "assert 条件不是 Bool 时静态类型推导失败",
+            'A non-Bool assertion fails static typing',
             Assert("x + 1"),
             Verdict.FALSE,
             None,
@@ -590,7 +565,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N10_INPUT_TARGET_TYPE_MISMATCH",
-            "已有输入目标与通道槽位类型不兼容时不生成输入类型",
+            'An input target incompatible with the channel slot produces no input type',
             InputChannel("number", "flag"),
             Verdict.FALSE,
             None,
@@ -601,7 +576,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N11_ODE_DERIVATIVE_NOT_NUMERIC",
-            "ODE 导数不是数值表达式时不生成时延类型",
+            'A nonnumeric ODE derivative produces no delay type',
             Sequence.of(
                 ODE(
                     [("x", True)],
@@ -618,7 +593,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N12_RECURSION_INVARIANT_NOT_BOOL",
-            "递归不变量不是 Bool 时不构造 MuType",
+            'A non-Bool recursion invariant produces no MuType',
             Mu(
                 "X",
                 Sequence.of(InputChannel("tick", "u"), Var("X")),
@@ -633,7 +608,7 @@ def build_conversion_scenarios() -> tuple[ConversionScenario, ...]:
         ),
         ConversionScenario(
             "N13_INITIAL_PATH_NOT_BOOL",
-            "初始路径不是 Bool 时不进入 T-sigma 的系统类型推导",
+            'A non-Bool initial path condition prevents T-sigma system derivation',
             Skip(),
             Verdict.FALSE,
             None,
@@ -649,19 +624,15 @@ SCENARIOS = build_conversion_scenarios()
 
 
 class ProcessToTypeScenarioTests(unittest.TestCase):
-    """测试方法由下方场景目录动态生成，失败名直接包含案例 ID。"""
+    r"""Tests for Process To Type Scenario."""
 
 
 def _make_scenario_test(scenario: ConversionScenario):
-    """为单个转换场景创建验证 verdict、类型和证据的测试方法。"""
+    r"""Create a test checking the scenario verdict, type, and evidence."""
 
-    # 测试输入：scenario 中的 HCSP、Gamma、Theta、state、path 和 dL 后端。
-    # 预期行为：报告 verdict/type 分别等于 scenario 的显式期望字段。
-    # 检查内容：还逐项核对期望诊断片段、必须生成的证明义务来源，
-    #           以及必须出现的原始/算法化规则轨迹。
-    # 论文对应：每个场景的 case_id/description 指向相应 Table 2 规则。
+
     def test(self: ProcessToTypeScenarioTests) -> None:
-        """执行一个进程到行为类型场景并核对全部声明结果。"""
+        r"""Verify the scenario verdict, exact Type, and proof evidence."""
 
         report = scenario.run()
         self.assertEqual(
@@ -709,14 +680,11 @@ for _scenario in SCENARIOS:
 
 
 class ProcessToTypeCoverageTests(unittest.TestCase):
-    """验证场景集确实经过每个公开类型规则入口。"""
+    r"""Tests for Process To Type Coverage."""
 
-    # 测试输入：SCENARIOS 和 TypeConstructor 当前全部 rule_t_* 方法。
-    # 预期行为：每个已实现类型规则都至少被一个转换场景实际执行。
-    # 检查内容：包装规则入口并集中报告没有测试路径的规则名称。
-    # 论文对应：防止 Table 2 某条已实现类型规则没有任何自动化测试路径。
+
     def test_every_rule_entry_is_executed(self) -> None:
-        """插桩全部 ``rule_t_*``，运行场景集后断言没有遗漏。"""
+        r"""Verify every rule entry is executed."""
 
         rule_names = {
             name
@@ -727,12 +695,12 @@ class ProcessToTypeCoverageTests(unittest.TestCase):
         executed: set[str] = set()
 
         def wrapper(name: str):
-            """创建记录规则名并转发原调用的临时包装器。"""
+            r"""Record a rule invocation and delegate to its original implementation."""
 
             original = originals[name]
 
             def instrumented(self, *args, **kwargs):
-                """记录一次规则执行，然后保持原规则语义。"""
+                r"""Count a rule invocation without changing its semantics."""
 
                 executed.add(name)
                 return original(self, *args, **kwargs)
@@ -756,14 +724,11 @@ class ProcessToTypeCoverageTests(unittest.TestCase):
 
 
 class ConstructionFailureSeparationTests(unittest.TestCase):
-    """验证内部推导失败与有限 ODE 不可达 deadline 后继的边界。"""
+    r"""Tests for Construction Failure Separation."""
 
-    # 测试输入：合法 skip 与非法输入的并行报告，以及有限、无中断、无后继的 ODE。
-    # 预期行为：前者按位置报告 (EmptyType(), None)，后者由 domain 规则形成 bottom。
-    # 检查内容：失败使用 None；正式不可达 deadline 使用 BottomType，两者不混淆。
-    # 论文对应：T-unrhd 不建立自然后继 judgment，其 deadline 位置写作 bottom。
+
     def test_failure_is_none_and_terminal_ode_uses_bottom(self) -> None:
-        """同时确认构造失败和正式 BottomType 拥有不同表示。"""
+        r"""Verify failure is none and terminal ODE uses bottom."""
 
         report = construct_type(
             gamma={},
@@ -803,14 +768,11 @@ class ConstructionFailureSeparationTests(unittest.TestCase):
 
 
 class ConstructionLayerAnnotationTests(unittest.TestCase):
-    """锁定显式 process/system judgment 求解器的返回类型层次。"""
+    r"""Tests for Construction Layer Annotation."""
 
-    # 测试输入：统一推导引擎中 process 与 system judgment 求解器的运行时标注。
-    # 预期行为：前者返回 ProcessType|失败，后者返回 ConfigurationType|失败。
-    # 检查内容：两层共享同一个非行为类型失败分支，且类型层次不会互相流入。
-    # 论文对应：Section 4.1 的 T 与 Section 4.2 的 mathcal T 不得在推导入口混用。
+
     def test_process_and_system_construction_annotations_are_separated(self) -> None:
-        """验证子 judgment 求解结果与 ``P :: T``、``S :: mathcal T`` 一致。"""
+        r"""Verify process and system construction annotations are separated."""
 
         process_hints = get_type_hints(TypeConstructor._solve_process_judgment)
         system_hints = get_type_hints(TypeConstructor._solve_system_judgment)
@@ -828,14 +790,11 @@ class ConstructionLayerAnnotationTests(unittest.TestCase):
 
 
 class TypingEnvironmentBoundaryTests(unittest.TestCase):
-    """验证 Gamma/Theta 环境入口遵守基础类型和通道命名边界。"""
+    r"""Tests for Typing Environment Boundary."""
 
-    # 测试输入：统一 Gamma 使用 tuple 类型说明。
-    # 预期行为：返回 false、无候选类型，并报告 Gamma 项类型要求。
-    # 检查内容：确认环境失败产生推导失败，而不是退化为空 Gamma 后继续。
-    # 论文对应：Definition 4.1 的 Gamma 把每个状态变量映射到一个基础类型 B。
+
     def test_gamma_rejects_container_type_specs(self) -> None:
-        """统一 Gamma 不能使用 tuple/list 类型说明。"""
+        r"""Verify Gamma rejects container type specs."""
 
         global_report = construct_type(
             gamma={"state": (BasicType.INT, BasicType.REAL)},  # type: ignore[dict-item]
@@ -852,12 +811,9 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
             )
         )
 
-    # 测试输入：Theta 使用带首尾空格的字符串键，配置本身只含 Skip。
-    # 预期行为：内部构造入口返回 false，并报告 Invalid typing environment。
-    # 检查内容：确认非法通道名即使未出现在 process AST 中也会被统一拒绝。
-    # 论文对应：Theta 的定义域与 ch?.T/ch!.T 使用同一组通道标识符。
+
     def test_theta_rejects_non_identifier_channel_name(self) -> None:
-        """Theta 的字符串键必须通过统一的 Channel 标识符检查。"""
+        r"""Verify Theta rejects non identifier channel name."""
 
         report = construct_type(
             gamma={},
@@ -875,15 +831,12 @@ class TypingEnvironmentBoundaryTests(unittest.TestCase):
             )
         )
 
-    # 测试输入：Gamma 使用 Unicode 声明键。
-    # 预期行为：在任何规则执行前作为非法环境返回 false。
-    # 检查内容：确认环境入口不再把键经 str() 静默改名或接受 Python Unicode 名称。
-    # 论文对应：Definition 4.1 的 Gamma 定义域与 Process 状态变量使用同一 IDENT。
+
     def test_gamma_names_use_the_same_ascii_ident_rule(self) -> None:
-        """Gamma 的键必须是原生 ASCII IDENT 字符串。"""
+        r"""Verify Gamma names use the same ascii ident rule."""
 
         global_report = construct_type(
-            gamma={"变量": BasicType.INT},
+            gamma={"\u03b1\u03b2": BasicType.INT},
             theta={},
             configurations=[Configuration({}, Skip())],
         )

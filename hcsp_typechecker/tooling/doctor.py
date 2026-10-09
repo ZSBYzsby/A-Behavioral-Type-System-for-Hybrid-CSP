@@ -1,15 +1,4 @@
-"""HCSP 源码项目的跨平台运行环境诊断。
-
-核心 TypeConstructor/TypeChecker 只需要 Python 和 ``z3-solver``；只有证明生成的 dL 义务时才需要
-Java 和 KeYmaera X。本模块分别报告这两层能力，避免把可选证明器缺失误认为
-Python 项目本身无法运行。
-
-在仓库根目录运行::
-
-    python -m hcsp_typechecker.tooling.doctor
-
-若部署必须自动证明 ODE 目标，可增加 ``--require-keymaerax``。
-"""
+r"""Diagnose core Python/Z3 and optional Java/KeYmaera X capabilities."""
 
 from __future__ import annotations
 
@@ -26,7 +15,7 @@ from ..backend.common.keymaerax import KeYmaeraXConfig, resolve_java_executable
 
 @dataclass(frozen=True)
 class EnvironmentCheck:
-    """一项具名环境能力、可用状态和用户可读证据。"""
+    r"""A named environment capability with availability and evidence."""
 
     name: str
     available: bool
@@ -35,13 +24,13 @@ class EnvironmentCheck:
 
 
 def _java_executable(config: KeYmaeraXConfig) -> str | None:
-    """复用真实证明后端的 Java 定位策略。"""
+    r"""Reuse the proof backend's Java resolution policy."""
 
     return resolve_java_executable(config)
 
 
 def _java_version(executable: str) -> str:
-    """返回 Java 版本输出首行，并用超时防止环境诊断挂起。"""
+    r"""Read Java's first version line with a timeout."""
 
     try:
         completed = subprocess.run(
@@ -63,7 +52,7 @@ def collect_environment(
     require_keymaerax: bool = False,
     config: KeYmaeraXConfig | None = None,
 ) -> tuple[EnvironmentCheck, ...]:
-    """检查核心 Python/Z3 与可选 Java/KeYmaera X 能力。"""
+    r"""Inspect required Python/Z3 and optional Java/KeYmaera X."""
 
     active_config = config or KeYmaeraXConfig.from_environment()
     python_ok = sys.version_info >= (3, 10)
@@ -113,7 +102,7 @@ def collect_environment(
 
 
 def format_environment(checks: Sequence[EnvironmentCheck]) -> str:
-    """格式化诊断条目，并说明核心类型构造与完整 dL 证明能力的边界。"""
+    r"""Display core-engine and external dL prover readiness separately."""
 
     lines = ["HCSP behavioral type environment"]
     for check in checks:
@@ -136,7 +125,7 @@ def format_environment(checks: Sequence[EnvironmentCheck]) -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """运行诊断；仅在必需能力缺失时返回非零退出码。"""
+    r"""Return nonzero only when a required capability is unavailable."""
 
     parser = argparse.ArgumentParser(
         description="Inspect HCSP type engines and optional KeYmaera X setup.",

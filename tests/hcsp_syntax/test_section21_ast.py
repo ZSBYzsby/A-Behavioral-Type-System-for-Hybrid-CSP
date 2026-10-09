@@ -1,25 +1,4 @@
-r"""HCSP Section 2.1 抽象语法树逐产生式测试。
-
-本文件只检查语法，不调用类型构造器。
-
-测试内容
---------
-1. 节点种类必须恰好等于论文的 ``E / P / S`` 产生式，其中 If、内部选择和
-   ODE 使用与表面顺序组合等价的自持公共后继规范形；
-2. 每个节点的子项必须属于正确语法范畴；
-3. E、P、S 的继承关系和跨层拒绝边界；
-4. 便捷类方法只能展开成项目规范节点，不能引入新的 AST 种类；
-5. ODE/Mu 批注作为字段存在，但不改变 Section 2.1 节点库存。
-6. 通道名称必须满足与变量相同的标识符词法规则，非法名称在 AST 边界拒绝。
-7. ``HCSP``、``Process`` 和 ``EventReaction`` 抽象范畴不能被直接实例化。
-
-论文对应
---------
-逐项对应 Section 2.1 的事件反应 ``E``、顺序进程 ``P`` 和系统 ``S`` 文法；
-``If``、多元 ``InternalChoice`` 和 ``ODE`` 的 ``continuation=Q`` 是公共后继的
-唯一规范 AST；
-``ODEAnnotation`` 与 ``RecursionAnnotation`` 对应 Section 4.2/4.3 的批注扩展。
-"""
+r"""Regression tests for section21 AST. Paper reference: Section 2.1, Section 4.2/4.3."""
 
 from __future__ import annotations
 
@@ -75,7 +54,7 @@ EXPECTED_SYSTEM_ONLY_NODES = {"Parallel"}
 
 
 def assert_event_reaction(test: unittest.TestCase, event: EventReaction) -> None:
-    """递归检查一个对象是否只使用论文的事件反应产生式 ``E``。"""
+    r"""Validate the paper event-reaction grammar recursively."""
 
     test.assertIsInstance(event, EventReaction)
     test.assertNotIsInstance(event, HCSP)
@@ -89,7 +68,7 @@ def assert_event_reaction(test: unittest.TestCase, event: EventReaction) -> None
 
 
 def assert_process(test: unittest.TestCase, process: Process) -> None:
-    """递归检查一个对象是否只使用论文的顺序进程产生式 ``P``。"""
+    r"""Validate the paper sequential-process grammar recursively."""
 
     test.assertIsInstance(process, Process)
     test.assertIsInstance(process, HCSP)
@@ -158,7 +137,7 @@ def assert_process(test: unittest.TestCase, process: Process) -> None:
 
 
 def assert_system(test: unittest.TestCase, system: HCSP) -> None:
-    """递归检查一个对象是否符合 ``S ::= P | S || S'``。"""
+    r"""Validate S ::= P | S || S' recursively."""
 
     test.assertIsInstance(system, HCSP)
     if isinstance(system, Process):
@@ -170,48 +149,36 @@ def assert_system(test: unittest.TestCase, system: HCSP) -> None:
 
 
 class Section21NodeInventoryTests(unittest.TestCase):
-    """保证项目不会增加或遗漏 Section 2.1 的语法节点。"""
+    r"""Tests for Section21 Node Inventory."""
 
-    # 测试输入：分别直接调用 HCSP()、Process() 和 EventReaction()。
-    # 预期行为：三个抽象语法范畴都在构造边界抛出 TypeError。
-    # 检查内容：防止只有 get_vars 占位实现、却能生成无论文产生式的裸节点。
-    # 论文对应：Section 2.1 的 E/P/S 是语法范畴，只有列出的产生式才是节点。
+
     def test_abstract_process_categories_cannot_be_instantiated(self) -> None:
-        """E、P、S 的 Python 分类基类本身不构成合法 AST 节点。"""
+        r"""Verify abstract process categories cannot be instantiated."""
 
         for abstract_class in (HCSP, Process, EventReaction):
             with self.subTest(abstract_class=abstract_class.__name__):
                 with self.assertRaises(TypeError):
                     abstract_class()
 
-    # 测试输入：EventReaction 的直接子类集合。
-    # 预期行为：集合恰为 EmptyEvent 与 EventChoice，无多余事件节点。
-    # 检查内容：比较类名全集，不把文件路径等非语义实现细节当作测试目标。
-    # 论文对应：Section 2.1 的 ``E ::= empty | (...) \Box E``。
+
     def test_event_node_inventory_is_exact(self) -> None:
-        """事件节点集合必须恰好是 empty、输入选择和输出选择所需节点。"""
+        r"""Verify event node inventory is exact."""
 
         nodes = EventReaction.__subclasses__()
         actual = {node.__name__ for node in nodes}
         self.assertEqual(actual, EXPECTED_EVENT_NODES)
 
-    # 测试输入：Process 的全部直接子类集合。
-    # 预期行为：集合恰为论文列出的十一种 P 构造。
-    # 检查内容：锁定进程节点库存，不约束未来等价的内部文件组织调整。
-    # 论文对应：Section 2.1 的完整 ``P ::= ...`` 产生式列表。
+
     def test_process_node_inventory_is_exact(self) -> None:
-        """顺序进程节点集合必须恰好对应论文列出的十一种构造。"""
+        r"""Verify process node inventory is exact."""
 
         nodes = Process.__subclasses__()
         actual = {node.__name__ for node in nodes}
         self.assertEqual(actual, EXPECTED_PROCESS_NODES)
 
-    # 测试输入：HCSP 的直接子类中除 Process 外的节点。
-    # 预期行为：系统层独有节点只有 Parallel。
-    # 检查内容：确认没有把事件或其他构造提升为系统层 S。
-    # 论文对应：Section 2.1 的 ``S ::= P | S \parallel S'``。
+
     def test_system_only_node_inventory_is_exact(self) -> None:
-        """除 Process 外，系统层只能额外包含二元 Parallel。"""
+        r"""Verify system only node inventory is exact."""
 
         nodes = [node for node in HCSP.__subclasses__() if node is not Process]
         actual = {node.__name__ for node in nodes}
@@ -219,23 +186,17 @@ class Section21NodeInventoryTests(unittest.TestCase):
 
 
 class Section21EventGrammarTests(unittest.TestCase):
-    """逐项测试 ``E ::= empty | input-choice | output-choice``。"""
+    r"""Tests for Section21 Event Grammar."""
 
-    # 测试输入：无参数 EmptyEvent 节点。
-    # 预期行为：递归 E 验证器接受它，且它不属于 HCSP 系统。
-    # 检查内容：核对事件递归的唯一终止产生式。
-    # 论文对应：Section 2.1 的 ``E ::= empty``。
+
     def test_empty_event_production(self) -> None:
-        """``EmptyEvent`` 精确表示事件反应的 empty 产生式。"""
+        r"""Verify empty event production."""
 
         assert_event_reaction(self, EmptyEvent())
 
-    # 测试输入：输入事件分支后递归连接一个输出事件分支。
-    # 预期行为：整棵结构由 EventChoice 递归并以 EmptyEvent 结尾。
-    # 检查内容：递归检查通信前缀、P continuation 和 E alternative。
-    # 论文对应：Section 2.1 的两种 ``(ch★ -> P) \Box E`` 产生式。
+
     def test_recursive_input_and_output_choice_productions(self) -> None:
-        """输入与输出事件分支递归链接，并最终以 EmptyEvent 收尾。"""
+        r"""Verify recursive input and output choice productions."""
 
         reaction = EventChoice(
             (InputChannel("sense", "x"), Assign("x", "x + 1")),
@@ -243,12 +204,9 @@ class Section21EventGrammarTests(unittest.TestCase):
         )
         assert_event_reaction(self, reaction)
 
-    # 测试输入：EventChoice.of 的三个输入/输出事件分支。
-    # 预期行为：全部三个分支直接保存在一个 EventChoice 节点内。
-    # 检查内容：核对多元分支表并运行独立 E 语法验证器。
-    # 论文对应：Table 2 的 T-sqcap 直接处理多分支 E。
+
     def test_event_choice_class_method_builds_one_nary_event_node(self) -> None:
-        """EventChoice.of 将非空事件表保存在一个多元 EventChoice 中。"""
+        r"""Verify event choice class method builds one nary event node."""
 
         self.assertIsInstance(EventChoice.of(), EmptyEvent)
         reaction = EventChoice.of(
@@ -259,22 +217,16 @@ class Section21EventGrammarTests(unittest.TestCase):
         assert_event_reaction(self, reaction)
         self.assertEqual(len(reaction.branches), 3)
 
-    # 测试输入：把赋值 ``x := 1`` 放在事件分支箭头之前。
-    # 预期行为：EventChoice 构造器抛出 TypeError。
-    # 检查内容：证明事件守卫只允许 InputChannel/OutputChannel。
-    # 论文对应：扩展后的 E 前缀只能是多标量输入或输出通信。
+
     def test_event_choice_rejects_noncommunication_prefix(self) -> None:
-        """事件分支前缀不能是赋值、断言或其他非通信进程。"""
+        r"""Verify event choice rejects noncommunication prefix."""
 
         with self.assertRaises(TypeError):
             EventChoice((Assign("x", 1), Skip()))  # type: ignore[arg-type]
 
-    # 测试输入：分别把 EmptyEvent 和 Parallel 放在事件箭头后。
-    # 预期行为：两种非 P continuation 都被 TypeError 拒绝。
-    # 检查内容：覆盖 E/P 和 S/P 两个跨范畴错误。
-    # 论文对应：事件产生式箭头后必须严格为顺序进程 ``P``。
+
     def test_event_choice_rejects_nonprocess_continuation(self) -> None:
-        """事件箭头后的 continuation 必须属于 P，不能是 E 或 S||S'。"""
+        r"""Verify event choice rejects nonprocess continuation."""
 
         with self.assertRaises(TypeError):
             EventChoice((InputChannel("c", "x"), EmptyEvent()))  # type: ignore[arg-type]
@@ -283,26 +235,20 @@ class Section21EventGrammarTests(unittest.TestCase):
                 (InputChannel("c", "x"), Parallel(Skip(), Skip())),
             )  # type: ignore[arg-type]
 
-    # 测试输入：空事件分支表。
-    # 预期行为：多元 EventChoice 拒绝零分支；空 E 只能写 EmptyEvent。
-    # 检查内容：锁定 EmptyEvent 与非空事件表的唯一分工。
-    # 论文对应：空事件反应与至少一个通信分支是不同的规范形。
+
     def test_event_choice_rejects_empty_branch_table(self) -> None:
-        """空事件只能由 EmptyEvent 表示，不能构造空 EventChoice。"""
+        r"""Verify event choice rejects empty branch table."""
 
         with self.assertRaises(ValueError):
             EventChoice()
 
 
 class Section21ProcessGrammarTests(unittest.TestCase):
-    """逐项测试 Section 2.1 的所有顺序进程产生式。"""
+    r"""Tests for Section21 Process Grammar."""
 
-    # 测试输入：Skip 到 Mu 的十一种代表性 Process 实例。
-    # 预期行为：每个实例都由独立递归验证器判为合法 P。
-    # 检查内容：覆盖所有原子/复合节点及 ODE、递归批注字段类型。
-    # 论文对应：Section 2.1 的完整 P 文法和 Section 4.2/4.3 批注。
+
     def test_all_atomic_and_compound_process_productions(self) -> None:
-        """每种 P 产生式都能构造，并通过独立递归语法验证器。"""
+        r"""Verify all atomic and compound process productions."""
 
         processes = (
             Skip(),
@@ -326,12 +272,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
             with self.subTest(node=type(process).__name__):
                 assert_process(self, process)
 
-    # 测试输入：多槽、单槽简写、空参数表、重复输入目标和缺参通信调用。
-    # 预期行为：AST 始终保存标量元组；空表、重复目标和缺参均被拒绝。
-    # 检查内容：通信列表不生成 TupleExpr，每个分量仍是 Variable/Expr。
-    # 论文对应：按协作者确认扩展为 ``ch?(x1,...,xn)``/``ch!(e1,...,en)``，n >= 1。
+
     def test_communication_requires_explicit_target_and_payload(self) -> None:
-        """多标量通信必须具有非空且形状合法的参数序列。"""
+        r"""Verify communication requires explicit target and payload."""
 
         input_process = InputChannel("stop", ("u", "ready"))
         output_process = OutputChannel("stop", (0, "ready"))
@@ -360,12 +303,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             OutputChannel("stop")  # type: ignore[call-arg]
 
-    # 测试输入：合法 ASCII IDENT，以及 Unicode、空白、标点、数字开头等名称。
-    # 预期行为：合法名称原样保留；三个通道构造入口统一拒绝所有非法名称。
-    # 检查内容：锁定通道名与 Variable 相同的 ASCII 正则词法边界。
-    # 论文对应：Section 2.1 的 ch 是通道标识符，而不是任意非空字符串。
+
     def test_communication_enforces_identifier_channel_names(self) -> None:
-        """通道名必须满足与变量名相同的 ASCII IDENT 规则。"""
+        r"""Verify communication enforces identifier channel names."""
 
         for name in ("channel", "channel_1", "_private", "Channel2"):
             with self.subTest(valid=name):
@@ -385,7 +325,7 @@ class Section21ProcessGrammarTests(unittest.TestCase):
             "a.b",
             "a/b",
             "a\nb",
-            "通道_1",
+            "\u03b3\u03b4_1",
             "ｃｈ",
             "K",
         )
@@ -398,12 +338,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Invalid channel name"):
                     OutputChannel(name, 0)
 
-    # 测试输入：ASCII 左值/输入目标/进程变量及对应的 Unicode、全角混淆名称。
-    # 预期行为：ASCII 名称正常构造，所有非 ASCII 名称在 Process AST 边界失败。
-    # 检查内容：覆盖 ensure_variable 的赋值/输入路径和 Var 的独立名称检查。
-    # 论文对应：Section 2.1 的 x、X 与 ch 共享项目统一的 IDENT 词法形状。
+
     def test_process_value_and_recursion_names_use_ascii_ident(self) -> None:
-        """Process AST 的值变量和进程变量必须使用 ASCII IDENT。"""
+        r"""Verify process value and recursion names use ascii ident."""
 
         self.assertEqual(Assign("_x1", 0).target, Variable("_x1"))
         self.assertEqual(
@@ -412,7 +349,7 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         )
         self.assertEqual(Var("Loop_1").name, "Loop_1")
 
-        for name in ("变量", "ｘ", "K"):
+        for name in ("\u03b1\u03b2", "ｘ", "K"):
             with self.subTest(name=name):
                 with self.assertRaises((TypeError, ValueError)):
                     Assign(name, 0)
@@ -421,12 +358,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     Var(name)
 
-    # 测试输入：合法二元 If，以及缺失/多余参数、E 分支、Parallel 分支。
-    # 预期行为：合法节点保留两个 P；四种非法调用均被拒绝。
-    # 检查内容：同时覆盖参数个数和两个分支的语法范畴。
-    # 论文对应：``if B then P else P'`` 是严格二元进程产生式。
+
     def test_if_is_binary_and_requires_two_process_branches(self) -> None:
-        """条件语法只能是一个 B、一个 then P 和一个 else P'。"""
+        r"""Verify if is binary and requires two process branches."""
 
         node = If(True, Skip(), Assign("x", 1))
         self.assertIsInstance(node.then_branch, Process)
@@ -443,12 +377,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             If(True, Parallel(Skip(), Skip()), Skip())  # type: ignore[arg-type]
 
-    # 测试输入：空中断 ODE、缺失批注、P 中断、错误批注和非二元方程项。
-    # 预期行为：合法项补 EmptyEvent；其余分别抛 ValueError/TypeError。
-    # 检查内容：核对 E 范畴、ODEAnnotation 必填字段和方程向量的结构边界。
-    # 论文对应：Section 2.1 的 ODE/E 及 Section 4.3 的 safety/delay 批注。
+
     def test_ode_requires_event_reaction_interrupts(self) -> None:
-        """连续演化要求合法 E 和独立 ODEAnnotation。"""
+        r"""Verify ODE requires event reaction interrupts."""
 
         without_interrupt = ODE(
             [("x", 1)],
@@ -474,12 +405,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, r"equations must be an iterable"):
             ODE(None, True, annotation=ODEAnnotation(delay=1))  # type: ignore[arg-type]
 
-    # 测试输入：合法 Assign; Skip、缺失/多余参数，以及 E/Parallel 混入左右项。
-    # 预期行为：合法 Sequence 通过；错误元数和跨层组合均抛 TypeError。
-    # 检查内容：检查固定二元形状及左右项都必须属于 Process。
-    # 论文对应：Section 2.1 的二元顺序产生式 ``P; P'``。
+
     def test_sequence_is_binary_p_composition(self) -> None:
-        """Sequence 的左右项都必须是 P，不能接受 E 或并行系统。"""
+        r"""Verify sequence is binary p composition."""
 
         node = Sequence(Assign("x", 1), Skip())
         assert_process(self, node)
@@ -515,12 +443,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         self.assertIsInstance(normalized_ode, ODE)
         self.assertIsInstance(normalized_ode.continuation, Assert)
 
-    # 测试输入：显式多分支选择、缺省后继以及 E/Parallel 混入的非法情况。
-    # 预期行为：分支以 tuple 保存，公共后继独立字段；省略时自动补 Skip。
-    # 检查内容：确认全部 branches 与 continuation 都只能保存 P。
-    # 论文对应：Table 2 的 T-sqcup 可直接推广到多分支。
+
     def test_internal_choice_is_nary_p_composition(self) -> None:
-        """InternalChoice 保存至少两个分支和一个公共后继。"""
+        r"""Verify internal choice is nary p composition."""
 
         node = InternalChoice(Skip(), Assign("x", 1), continuation=Assert(True))
         assert_process(self, node)
@@ -543,12 +468,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             InternalChoice(Skip(), Skip(), EmptyEvent())  # type: ignore[arg-type]
 
-    # 测试输入：带不变量的合法 Mu，以及非法变量名、E/S body、错误批注。
-    # 预期行为：合法递归通过；四类构造错误在 AST 边界被拒绝。
-    # 检查内容：核对变量形状、P body 和 RecursionAnnotation 字段类型。
-    # 论文对应：Section 2.1 ``mu X.P`` 与 Section 4.3 的 X_phi 批注。
+
     def test_mu_binds_one_process_variable_and_one_process_body(self) -> None:
-        """Mu 只实现带边界批注的 ``mu X_phi.P``。"""
+        r"""Verify mu binds one process variable and one process body."""
 
         node = Mu(
             "X",
@@ -559,7 +481,7 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Mu("not a name", Skip())
         with self.assertRaises(ValueError):
-            Mu("循环", Skip())
+            Mu("\u03b1\u03b2", Skip())
         with self.assertRaises(TypeError):
             Mu("X", EmptyEvent())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
@@ -567,12 +489,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             Mu("X", Skip(), annotation=True)  # type: ignore[arg-type]
 
-    # 测试输入：Sequence.of 三项和带 continuation 的 InternalChoice.of。
-    # 预期行为：顺序仍右结合；多分支选择直接保存所有分支和公共后继。
-    # 检查内容：检查多元字段以及零项、单项和多项边界。
-    # 论文对应：多分支辅助构造仍只使用同一 InternalChoice 节点类。
+
     def test_nary_class_methods_expand_to_canonical_process_trees(self) -> None:
-        """多项顺序右结合，多分支选择使用多元规范节点。"""
+        r"""Verify nary class methods expand to canonical process trees."""
 
         self.assertIsInstance(Sequence.of(), Skip)
         only = Assign("only", 0)
@@ -596,12 +515,9 @@ class Section21ProcessGrammarTests(unittest.TestCase):
         assert_process(self, sequential)
         assert_process(self, choice)
 
-    # 测试输入：在方程右端、演化域和 safety 中直接读取 t，并尝试把 t 写在方程左端。
-    # 预期行为：前三处的 t 绑定自动时钟且不进入 get_vars；方程左端 t 被拒绝。
-    # 检查内容：核对固定名称/初值/导数、两个 ODE 时钟的新鲜性以及后继作用域边界。
-    # 论文对应：Table 2 在 ODE 证明前提中使用每个 ODE 独占的新鲜局部 t。
+
     def test_ode_binds_the_automatic_local_clock_name_t(self) -> None:
-        """ODE 公式可直接读取局部 t，但不能声明 t' 或把 t 泄漏到后继。"""
+        r"""Verify ODE binds the automatic local clock name t."""
 
         first = ODE(
             [("x", "t + 1")],
@@ -633,7 +549,7 @@ class Section21ProcessGrammarTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "Invalid ODE variable"):
             ODE(
-                [("位置", 1)],
+                [("\u03b1\u03b2", 1)],
                 True,
                 annotation=ODEAnnotation(delay=1),
             )
@@ -641,23 +557,17 @@ class Section21ProcessGrammarTests(unittest.TestCase):
 
 
 class Section21SystemGrammarTests(unittest.TestCase):
-    """验证 ``S ::= P | S || S'`` 及其跨层边界。"""
+    r"""Tests for Section21 System Grammar."""
 
-    # 测试输入：一个 Assign 顺序进程。
-    # 预期行为：系统验证器直接接受该 Process 作为 S。
-    # 检查内容：确认 Process 继承 HCSP，且无需额外包装节点。
-    # 论文对应：Section 2.1 的系统产生式 ``S ::= P``。
+
     def test_process_is_a_system(self) -> None:
-        """任意 P 都可以直接作为系统 S。"""
+        r"""Verify process is a system."""
 
         assert_system(self, Assign("x", 1))
 
-    # 测试输入：Assign 与嵌套 Parallel 构成的二层系统。
-    # 预期行为：递归系统验证器接受全部左右分量。
-    # 检查内容：验证 Parallel 操作数属于 S，因而允许继续嵌套 Parallel。
-    # 论文对应：Section 2.1 的递归 ``S ::= S \parallel S'``。
+
     def test_parallel_is_binary_and_recursively_accepts_systems(self) -> None:
-        """Parallel 左右项是 S，因此允许嵌套二元并行。"""
+        r"""Verify parallel is binary and recursively accepts systems."""
 
         system = Parallel(
             Assign("x", 1),
@@ -665,24 +575,18 @@ class Section21SystemGrammarTests(unittest.TestCase):
         )
         assert_system(self, system)
 
-    # 测试输入：分别把 EmptyEvent 放在 Parallel 左侧和右侧。
-    # 预期行为：两种调用均抛 TypeError。
-    # 检查内容：确认事件反应 E 不能冒充系统 S。
-    # 论文对应：Section 2.1 将 E 与 S 定义为不同语法范畴。
+
     def test_parallel_rejects_event_reaction(self) -> None:
-        """事件反应 E 不是系统 S，不能成为并行分量。"""
+        r"""Verify parallel rejects event reaction."""
 
         with self.assertRaises(TypeError):
             Parallel(EmptyEvent(), Skip())  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             Parallel(Skip(), EmptyEvent())  # type: ignore[arg-type]
 
-    # 测试输入：Skip、Assign、Output 三项 Parallel.of 便捷调用。
-    # 预期行为：展开为右结合的两层 Parallel。
-    # 检查内容：检查树形并递归验证每个叶子都属于系统 S。
-    # 论文对应：多项便捷写法只展开二元 ``S \parallel S'``。
+
     def test_parallel_class_method_builds_only_binary_system_tree(self) -> None:
-        """Parallel.of 展开成右结合二元 Parallel。"""
+        r"""Verify parallel class method builds only binary system tree."""
 
         with self.assertRaises(ValueError):
             Parallel.of(Skip())
@@ -691,24 +595,18 @@ class Section21SystemGrammarTests(unittest.TestCase):
         self.assertIsInstance(system.right, Parallel)
         assert_system(self, system)
 
-    # 测试输入：Parallel 的一元和三元直接构造调用。
-    # 预期行为：两种非二元调用都抛 TypeError。
-    # 检查内容：锁定核心 AST 节点恰有 left/right 两个系统字段。
-    # 论文对应：Section 2.1 的 Parallel 产生式是严格二元。
+
     def test_parallel_rejects_missing_or_extra_operands(self) -> None:
-        """Parallel 必须精确包含 Section 2.1 规定的两个系统操作数。"""
+        r"""Verify parallel rejects missing or extra operands."""
 
         with self.assertRaises(TypeError):
             Parallel(Skip())  # type: ignore[call-arg]
         with self.assertRaises(TypeError):
             Parallel(Skip(), Skip(), Skip())  # type: ignore[call-arg]
 
-    # 测试输入：由输入分支构造的 EventReaction。
-    # 预期行为：对象属于 E，但既不属于 Process 也不属于 HCSP。
-    # 检查内容：直接断言三种基类的继承隔离关系。
-    # 论文对应：Section 2.1 分离定义事件反应 E、进程 P 和系统 S。
+
     def test_event_reaction_is_neither_process_nor_system(self) -> None:
-        """E、P、S 的继承关系必须保持分离。"""
+        r"""Verify event reaction is neither process nor system."""
 
         event = EventChoice.of((InputChannel("c", "x"), Skip()))
         self.assertIsInstance(event, EventReaction)

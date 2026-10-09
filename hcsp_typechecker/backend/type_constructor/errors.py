@@ -1,8 +1,4 @@
-"""TypeConstructor 专属的失败分类规则。
-
-本模块只判断“构造为何没有交付可信 Type”：环境错误、规则推导错误、已否证
-证明或未决证明。展示文本和公共异常由最外层 API 负责，避免后端直接打印。
-"""
+r"""Failure classification for TypeConstructor."""
 
 from __future__ import annotations
 
@@ -13,7 +9,7 @@ from .model import TypeConstructionReport
 
 
 class TypeConstructionErrorKind(str, Enum):
-    """TypeConstructor 失败的稳定机器可读分类。"""
+    r"""Stable machine-readable construction error categories."""
 
     ENVIRONMENT = "environment"
     DERIVATION = "derivation"
@@ -24,7 +20,7 @@ class TypeConstructionErrorKind(str, Enum):
 def classify_construction_error(
     report: TypeConstructionReport,
 ) -> TypeConstructionErrorKind:
-    """根据最终报告判定 Constructor 的首要失败阶段。"""
+    r"""Choose the primary construction failure phase from the report."""
 
     if any(
         item.verdict is Verdict.FALSE

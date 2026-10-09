@@ -1,9 +1,4 @@
-"""把正式行为 Type AST 单向降低为 Table 3 规范化 Type AST。
-
-转换保留 ``Empty``、``Bottom``、delay 和通信的可观察区别，展平并规范化并行、
-内部选择和外部选择，同时把递归变量名替换为 De Bruijn index。输出仍是有限树；
-本模块不执行等递归双模拟、不计算 Table 3 后继，也不提供到原 Type AST 的逆转换。
-"""
+r"""Lower formal Type ASTs into Table 3 normalized Types."""
 
 from __future__ import annotations
 
@@ -43,22 +38,17 @@ from .ast import (
 
 
 class TypeNormalizationError(ValueError):
-    """闭合性等规范化前提失败时抛出的领域错误。"""
+    r"""A Type violates normalization prerequisites such as closure."""
 
 
 def normalize_type_ast(
     value: ConfigurationType,
 ) -> NormalizedConfigurationType:
-    """将闭合配置 Type AST 转成不可变、可哈希的规范化配置。
-
-    并行、内部选择和外部选择在此按项目采用的代数律规范化；递归只消除绑定名称，
-    有限展开等价留给循环项图处理。自由 ``TypeVar`` 会抛出
-    :class:`TypeNormalizationError`。
-    """
+    r"""Convert a closed configuration Type into an immutable normalized configuration."""
 
     if not isinstance(value, ConfigurationType):
         raise TypeError("Type normalization requires a ConfigurationType root")
-    # 先迭代展平顶层并行；过程/angelic 子树随后由统一后序工作栈转换。
+
     components: list[ProcessType] = []
     pending_configurations: list[ConfigurationType] = [value]
     while pending_configurations:
@@ -79,7 +69,7 @@ def _normalization_children(
     value: ProcessType | AngelicType,
     binders: tuple[str, ...],
 ) -> tuple[tuple[ProcessType | AngelicType, tuple[str, ...]], ...]:
-    """返回规范化后序遍历的子节点及其递归绑定环境。"""
+    r"""Return postorder children with their recursion environments."""
 
     if isinstance(value, (InputType, OutputType)):
         return ((value.continuation, binders),)
@@ -98,7 +88,7 @@ def _normalize_subtree(
     root: ProcessType,
     binders: tuple[str, ...],
 ) -> NormalizedProcessType:
-    """使用显式后序栈规范化一棵过程类型，避免深 continuation 递归。"""
+    r"""Normalize deep continuation trees using an explicit postorder stack."""
 
     TaskKey = tuple[int, tuple[str, ...]]
     results: dict[TaskKey, NormalizedProcessType | NormalizedAngelicType] = {}

@@ -1,9 +1,4 @@
-"""Table 3 行为 Type 操作语义与完整可达状态图生成后端。
-
-本子包依次完成规范 Type 到循环项图的编译与双模拟最小化、循环项图上的一步规则
-枚举，以及以等递归状态键为节点的 BFS 可达闭包。它只消费正式 Type AST，不读取
-Process AST、Gamma、Theta、参数环境或证明器，也不执行后续死锁/活锁分析。
-"""
+r"""Table 3 operational semantics and complete reachable graph construction."""
 
 from .graph_builder import (
     TypeTransitionGraphSizeError,

@@ -1,4 +1,4 @@
-"""Gamma、参数、Theta 片段到内部环境对象的前端转换入口。"""
+r"""Parse typing-context fragments into internal environments."""
 
 from __future__ import annotations
 
@@ -16,14 +16,14 @@ from ...data_structures.runtime_context import (
 
 @dataclass(frozen=True, slots=True)
 class ParsedTypingContext:
-    """用户给定 Gamma、Theta、全局参数经 lowering 后的只读环境快照。"""
+    r"""Read-only lowered Gamma, Theta, and parameter snapshots."""
 
     gamma: Mapping[str, GammaType]
     theta: Mapping[str, ChannelType]
     parameters: ParameterEnvironment
 
     def __post_init__(self) -> None:
-        """复制可变映射，避免调用者随后修改解析结果。"""
+        r"""Copy mutable mappings to protect parsed context snapshots."""
 
         object.__setattr__(self, "gamma", MappingProxyType(dict(self.gamma)))
         object.__setattr__(self, "theta", MappingProxyType(dict(self.theta)))
@@ -44,11 +44,7 @@ def parse_typing_context(
     *,
     source_name: str = "<typing-context>",
 ) -> ParsedTypingContext:
-    """解析 ``gamma [parameters] theta``，并要求片段随后结束。
-
-    这与完整 source 使用完全相同的声明检查，包括连续向量、参数与 Gamma 的
-    名称冲突、通道 binder 和 refinement 的结构检查。
-    """
+    r"""Parse gamma [parameters] theta followed by EOF."""
 
     parser = Parser(_checked_source(source, source_name), source_name)
     gamma = parser._parse_gamma_section()

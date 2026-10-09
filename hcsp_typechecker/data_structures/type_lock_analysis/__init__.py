@@ -1,4 +1,4 @@
-"""锁自由、Bottom 错误自由及综合行为正确性见证数据结构。"""
+r"""Data structures for lock freedom, Bottom errors, and correctness witnesses."""
 
 from .model import (
     BottomErrorWitness,

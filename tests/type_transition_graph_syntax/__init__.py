@@ -1,1 +1,1 @@
-"""Table 3 状态迁移图只读输出语法测试包。"""
+r"""Regression tests for type transition graph syntax. Paper reference: Table 3."""

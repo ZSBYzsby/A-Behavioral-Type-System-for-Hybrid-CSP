@@ -1,12 +1,4 @@
-"""HCSP 用户输入语法的无依赖词法器。
-
-词法器只接受 ``document/GAMMA_THETA_INPUT_SYNTAX.md`` 及
-``document/HCSP_INPUT_SYNTAX.md`` 声明的 ASCII 标识符、十进制数值、关键字和运算符。
-完整 source 与 Process/Expr 片段共享这一份保留字表和 token 流，因此各个
-顶层分节之间的注释、行列位置和错误指示不会因文本切分而丢失。词法器执行
-最长记号匹配，不借用 Python tokenizer，因而不会静默接受 Unicode 名称、
-十六进制数值等额外语法。
-"""
+r"""Dependency-free lexical analysis of HCSP input."""
 
 from __future__ import annotations
 
@@ -44,8 +36,7 @@ KEYWORDS = frozenset(
         "inf",
         "not",
         "and",
-        # 完整 source 的顶层分节、环境类型构造字及规范基础类型名。
-        # 即使调用低层 parse_hcsp，这些词也不能退化成 Process IDENT。
+        # Reserve environment keywords even when parsing low-level Process fragments.
         "gamma",
         "parameters",
         "theta",
@@ -72,14 +63,11 @@ KEYWORDS = frozenset(
     }
 )
 
-# ``None`` 不属于本项目的 Expr。把它作为“保留但非法”的源码词，而不是让它
-# 落入普通 IDENT，可避免用户误以为项目支持空值。大小写不同的 ``none`` 仍只是
-# 普通、区分大小写的标识符。
+# Reserve invalid None to reject null values explicitly; lowercase none remains an identifier.
 _UNSUPPORTED_RESERVED_WORDS = frozenset({"None"})
 
-# 这些界限不改变数值文法，只阻止异常大的字面量在 ``int``/``Fraction`` 转换时
-# 消耗失控的内存。4096 位有效数字和绝对值 10000 的十进制指数已远超 HCSP
-# 模型中的通常常量规模，同时保证错误能稳定地通过 HCSPInputError 报告。
+# Limit extreme literals before int/Fraction conversion; report excessive size as
+# HCSPInputError.
 _MAX_SIGNIFICAND_DIGITS = 4096
 _MAX_ABSOLUTE_DECIMAL_EXPONENT = 10_000
 
@@ -107,7 +95,7 @@ _NUMBER_PATTERN = re.compile(
 
 @dataclass(frozen=True)
 class Token:
-    """一个已分类、带起始源码位置的词法记号。"""
+    r"""A classified token with its starting source position."""
 
     kind: str
     text: str
@@ -115,16 +103,16 @@ class Token:
 
     @property
     def display(self) -> str:
-        """返回适合错误信息的记号文本。"""
+        r"""Return token text suitable for diagnostics."""
 
         return "end of input" if self.kind == "EOF" else repr(self.text)
 
 
 class Lexer:
-    """把一个 HCSP 源字符串扫描为不可变 token 序列。"""
+    r"""Scan HCSP source into an immutable token sequence."""
 
     def __init__(self, source: str, source_name: str) -> None:
-        """验证入口类型并初始化扫描游标。"""
+        r"""Validate source input and initialize the scanning cursor."""
 
         if not isinstance(source, str):
             raise TypeError("HCSP source must be a string")
@@ -137,7 +125,7 @@ class Lexer:
         self.column = 1
 
     def tokenize(self) -> tuple[Token, ...]:
-        """扫描全部输入并在末尾追加唯一 EOF token。"""
+        r"""Scan all input and append one EOF token."""
 
         tokens: list[Token] = []
         while self.offset < len(self.source):
@@ -183,7 +171,7 @@ class Lexer:
         return tuple(tokens)
 
     def _skip_layout(self) -> bool:
-        """跳过一段空白或注释，并报告是否消费了输入。"""
+        r"""Consume whitespace or comments and report whether the cursor advanced."""
 
         if self.offset >= len(self.source):
             return False
@@ -217,7 +205,7 @@ class Lexer:
         return False
 
     def _scan_identifier(self, position: SourcePosition) -> Token:
-        """扫描 ASCII 标识符，并识别关键字和大小写布尔字面量。"""
+        r"""Scan ASCII identifiers, keywords, and Boolean literals."""
 
         start = self.offset
         while self.offset < len(self.source) and self._is_identifier_continue(
@@ -237,7 +225,7 @@ class Lexer:
         return Token(text if text in KEYWORDS else "IDENT", text, position)
 
     def _scan_number(self, position: SourcePosition) -> Token:
-        """扫描规范十进制整数或实数，并拒绝粘连的非法后缀。"""
+        r"""Scan decimal numbers and reject attached invalid suffixes."""
 
         match = _NUMBER_PATTERN.match(self.source, self.offset)
         if match is None:
@@ -261,7 +249,7 @@ class Lexer:
         text: str,
         position: SourcePosition,
     ) -> None:
-        """拒绝会导致宿主数值转换产生异常资源开销的极端字面量。"""
+        r"""Reject extreme numeric literals before costly host conversion."""
 
         parts = re.split(r"[eE]", text, maxsplit=1)
         significand_digits = sum(character.isdigit() for character in parts[0])
@@ -288,7 +276,7 @@ class Lexer:
             )
 
     def _advance_text(self, text: str) -> None:
-        """消费已知文本并正确更新 CRLF/换行位置。"""
+        r"""Consume text while tracking CRLF and newline positions."""
 
         index = 0
         while index < len(text):
@@ -308,7 +296,7 @@ class Lexer:
             index += 1
 
     def _position(self) -> SourcePosition:
-        """返回当前游标位置的不可变快照。"""
+        r"""Snapshot the current source position."""
 
         return SourcePosition(self.offset, self.line, self.column)
 
@@ -319,7 +307,7 @@ class Lexer:
         *,
         found: str | None = None,
     ) -> HCSPInputError:
-        """构造统一的词法阶段异常。"""
+        r"""Create a lexical-phase diagnostic."""
 
         return HCSPInputError(
             message,
@@ -332,18 +320,18 @@ class Lexer:
 
     @staticmethod
     def _is_identifier_start(character: str) -> bool:
-        """判断字符能否开始规范 ASCII 标识符。"""
+        r"""Check an ASCII identifier's first character."""
 
         return is_hcsp_identifier_start(character)
 
     @staticmethod
     def _is_identifier_continue(character: str) -> bool:
-        """判断字符能否继续规范 ASCII 标识符。"""
+        r"""Check an ASCII identifier's subsequent character."""
 
         return is_hcsp_identifier_continue(character)
 
 
 def tokenize(source: str, *, source_name: str = "<input>") -> tuple[Token, ...]:
-    """使用项目规范词法规则扫描一段 HCSP 用户输入。"""
+    r"""Tokenize HCSP input using the project lexical rules."""
 
     return Lexer(source, source_name).tokenize()

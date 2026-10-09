@@ -1,4 +1,4 @@
-"""锁自由、Bottom 错误与综合行为正确性报告的只读展示。"""
+r"""Read-only presentation of lock freedom and Bottom-error reports."""
 
 from .serializer import format_lock_freedom_full, format_lock_freedom_result
 

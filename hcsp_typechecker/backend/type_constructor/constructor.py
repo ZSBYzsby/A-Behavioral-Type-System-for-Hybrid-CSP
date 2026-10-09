@@ -1,9 +1,4 @@
-"""HCSP 行为类型构造器的业务入口。
-
-本模块只负责“从 Process AST 构造 Type AST”这一项业务。Table 2 的规则展开、
-符号状态和证明基础设施位于 :mod:`hcsp_typechecker.backend.common`；已经实现的
-TypeChecker 复用同一套规则，但不依赖 TypeConstructor 本身。
-"""
+r"""Behavioral type construction using the shared Table 2 engine."""
 
 from __future__ import annotations
 
@@ -23,22 +18,13 @@ from .model import TypeConstructionReport, TypeConstructionRequest
 
 
 class TypeConstructor(Table2RuleEngine):
-    """按项目采用的 Table 2 规则主动构造 HCSP 行为 Type。
-
-    构造器组合每个子 judgment 的结论得到 Type AST，并沿途调用共享证明后端
-    判定规则前提。公式 ``FALSE`` 会终止当前推导；``UNKNOWN`` 会留下证据并继续，
-    因而完整候选是否可信必须结合最终报告的 ``verdict`` 判断。
-    """
+    r"""Construct HCSP behavioral Types using the implemented Table 2 rules."""
 
     def construct(
         self,
         request: TypeConstructionRequest,
     ) -> TypeConstructionReport:
-        """执行一个构造请求并返回类型、三值结论及全部审计证据。
-
-        本方法不打印，也不把失败改写为公共异常；这些展示和异常策略只由
-        :func:`hcsp_typechecker.construct_hcsp_type` 的门面层负责。
-        """
+        r"""Execute a request and return the type, verdict, and evidence."""
 
         return self._construct_type(request)
 
@@ -47,7 +33,7 @@ class TypeConstructor(Table2RuleEngine):
         constructed: ConfigurationType | None,
         constructed_component_types: tuple[ConfigurationType | None, ...],
     ) -> TypeConstructionReport:
-        """把共享引擎证据收束成 TypeConstructor 专属报告。"""
+        r"""Convert shared engine evidence into a construction report."""
 
         verdict = Verdict.combine(
             [item.verdict for item in self.obligations if item.active]
@@ -66,15 +52,8 @@ class TypeConstructor(Table2RuleEngine):
         self,
         request: TypeConstructionRequest,
     ) -> TypeConstructionReport:
-        """执行一次完整类型构造并返回含全部证据的三值报告。
-
-        普通建模/类型错误会转换为 ``Diagnostic(FALSE)``。``FALSE`` 前提会
-        否证当前规则并停止相应推导分支；``UNKNOWN`` 证明结果会被完整记录，
-        但不会阻止后续规则继续构造类型。因而报告可能同时包含非空
-        ``constructed_type`` 和 ``UNKNOWN`` verdict：这表示“推导完成，但至少一条
-        必要公式尚未证明”，该类型不能作为可信结论使用。
-        """
-        # 同一规则引擎实例可复用，但报告和新鲜名计数必须按请求隔离。
+        r"""Run complete construction and retain all proof evidence."""
+        # Reset reports and fresh-name counters for each request on a reused engine.
         self.obligations = []
         self.diagnostics = []
         self.steps = []
@@ -103,7 +82,7 @@ class TypeConstructor(Table2RuleEngine):
             )
             return self._report(None, ())
 
-        # 即使只有一个配置也经 T-|| 入口处理，以保持共享 Gamma 和 T-sigma 一致。
+        # Use T-|| even for one configuration to preserve common Gamma and T-sigma checks.
         parallel_expansion = self.rule_t_parallel(
             request.configurations,
             gamma,
@@ -117,7 +96,8 @@ class TypeConstructor(Table2RuleEngine):
         raw_constructed_component_types = self._solve_rule_expansion(
             parallel_expansion
         )
-        # 内部失败状态绝不暴露为行为类型；公开报告用 None 保留失败分量的位置。
+        # Expose failed components as None, never as an internal failure sentinel or fabricated
+        # Type.
         constructed_component_types: tuple[ConfigurationType | None, ...] = tuple(
             None if isinstance(item, _ConstructionFailure) else item
             for item in raw_constructed_component_types
@@ -149,13 +129,7 @@ def construct_type(
     keymaerax_config: KeYmaeraXConfig | None = None,
     z3_timeout_ms: int = 5_000,
 ) -> TypeConstructionReport:
-    """从低层 AST、运行上下文和配置构造行为 Type 并返回报告。
-
-    这是供内部实现、规则测试和论文审计使用的低层入口。它接受已经构造好的
-    Process AST，不解析用户 source，也不打印或抛公共业务异常；调用者必须检查
-    报告的 ``verdict`` 与 ``constructed_type``。普通用户应调用包根的
-    :func:`hcsp_typechecker.construct_hcsp_type`。
-    """
+    r"""Construct a type from internal ASTs, contexts, and configurations."""
 
     request = TypeConstructionRequest(
         gamma=gamma,

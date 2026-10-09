@@ -1,23 +1,21 @@
-r"""用几个小程序演示项目的单一公共 TypeConstructor 接口。
+r"""Construct behavioral types for six HCSP examples, from skip to timed ODEs.
 
-每个示例都把包含 Parameters、Gamma、Theta 和 Process 的完整用户输入直接交给
-``construct_hcsp_type``；接口在内部完成解析、类型构造和必要公式证明，成功时
-返回正式 Type AST。
-
-前四个示例是离散 HCSP；第五个示例使用空 flow、隐式时钟边界 ``t < 1`` 和恒真
-安全性质展示有限 delay；第六个示例则包含二阶微分方程、隐式时钟、非线性 safety、多标量
-通信中断和自然超时后继，会实际调用 KeYmaera X。请在项目根目录执行：
-
-    python -B demo.py
-
-默认使用简洁的 ``result`` 输出。若要查看原始输入、规则轨迹和证明义务，把
-下面的 ``OUTPUT_MODE`` 改成 ``"full"`` 即可。
+From the repository root: python examples/demo_type_construction.py
+Examples 1-4 need Python/Z3; examples 5-6 need KeYmaera X for ODE proofs.
+Exit code 0 allows explicitly reported unverified candidates, but no failures.
+Lock-freedom analysis is a separate stage.
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from textwrap import dedent
+
+# Resolve the checkout package when this file is run directly.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from hcsp_typechecker import (
     HCSPInputError,
@@ -27,14 +25,14 @@ from hcsp_typechecker import (
 )
 
 
-# 可选值为 "result" 或 "full"；两种模式只改变显示内容，不改变类型构造结果。
+# Use "result" or "full" to select display verbosity.
 OUTPUT_MODE = "result"
 
-# 第六个示例需要真实 dL 证明；该值只覆盖本次接口调用的证明器超时。
+# Examples 5-6 require dL proofs; set the timeout for each external obligation.
 KEYMAERAX_TIMEOUT_SECONDS = 180.0
 
 
-# 第六个示例的完整输入同时供 type_demo.py 做 Constructor -> Checker 往返演示。
+# Share example 6 with the Constructor-to-Checker round-trip demo.
 COMPLEX_ODE_SOURCE = r"""
 gamma(
     p: Real,
@@ -77,11 +75,10 @@ process {{
 """
 
 
-# 每项依次为：标题、希望展示的功能、完整用户输入。
 EXAMPLES = (
     (
-        "1. 最小程序：skip",
-        "展示空环境以及不执行任何动作的进程；预期 Type AST 为 0。",
+        '1. Minimal program: skip',
+        'Empty environments and a process with no actions; the expected Type is empty.',
         """
         gamma()
         theta()
@@ -89,8 +86,8 @@ EXAMPLES = (
         """,
     ),
     (
-        "2. 通信顺序：ch?(x); ch!(x)",
-        "展示输入绑定、顺序后继和同一通道上的单值输出。",
+        '2. Sequential communication: ch?(x); ch!(x)',
+        'Input binding followed by a scalar output on the same channel.',
         """
         gamma(x: Int)
         theta(ch: channel(value: Int))
@@ -98,8 +95,8 @@ EXAMPLES = (
         """,
     ),
     (
-        "3. 参数、赋值、条件与 refinement",
-        "展示只读参数约束如何用于赋值、分支和输出 refinement 的证明。",
+        '3. Parameters, assignment, conditionals, and refinement',
+        'Read-only parameter constraints support assignment, branching, and output refinement proofs.',
         """
         gamma(x: Int)
         parameters(limit: Int) where(limit >= 0)
@@ -115,8 +112,8 @@ EXAMPLES = (
         """,
     ),
     (
-        "4. 两个独立分量并行执行",
-        "展示 Gamma 的状态分区以及两个分量类型组成的并行 Type AST。",
+        '4. Two independent parallel components',
+        'Partition Gamma state ownership and combine two component types into a parallel Type AST.',
         """
         gamma(left_state: Int, right_state: Int)
         theta(
@@ -130,8 +127,8 @@ EXAMPLES = (
         """,
     ),
     (
-        "5. 有限 delay 与通信中断",
-        "展示在 1 个时间单位内等待输入；t < 1 使 ODE 恰在时限到达时停止。",
+        '5. Finite delay with a communication interrupt',
+        'Wait for input for one time unit; t < 1 stops the ODE exactly at the deadline.',
         """
         gamma(x: Int)
         theta(ch: channel(value: Int))
@@ -152,15 +149,15 @@ EXAMPLES = (
         """,
     ),
     (
-        "6. 二阶微分方程、多标量中断与自然超时后继",
-        "展示 p'=v、v'=2、隐式 t、非线性 safety、delay(3/2) 和 timed choice。",
+        '6. Second-order ODE, multiple payloads, and a timeout continuation',
+        "Combine p'=v, v'=2, an implicit clock t, nonlinear safety, delay(3/2), and timed choice.",
         COMPLEX_ODE_SOURCE,
     ),
 )
 
 
 def _run_example(index: int, title: str, purpose: str, source: str) -> str:
-    """运行单个示例，返回 ``trusted``、``untrusted`` 或 ``failed``。"""
+    r"""Run one example and classify it as trusted, untrusted, or failed."""
 
     source = dedent(source).strip()
     separator = "=" * 76
@@ -168,10 +165,10 @@ def _run_example(index: int, title: str, purpose: str, source: str) -> str:
     print(title)
     print(purpose)
     print("-" * 76)
-    print("用户输入：")
+    print('User input:')
     print(source)
 
-    print("\n[类型构造] 用户输入 -> Type AST")
+    print('\n[Type construction] User input -> Type AST')
     try:
         construct_hcsp_type(
             source,
@@ -180,47 +177,47 @@ def _run_example(index: int, title: str, purpose: str, source: str) -> str:
             keymaerax_timeout_seconds=KEYMAERAX_TIMEOUT_SECONDS,
         )
     except HCSPInputError as error:
-        # result/full 已打印带插入符的诊断；这里只给出脚本层的结构化结论。
+
         print(
-            "脚本结论：输入无效 "
-            f"[{error.kind}]，位置 {error.source_name}:{error.line}:{error.column}。"
+            'Script outcome: invalid input '
+            f"[{error.kind}], at {error.source_name}:{error.line}:{error.column}."
         )
         return "failed"
     except HCSPUntrustedTypeConstructionError as error:
-        # 不解析日志文本，直接读取新版异常的机器可读分类和首要规则位置。
+        # Read structured error fields instead of parsing rendered logs.
         print(
-            "脚本结论：类型结构已完成，但证明尚未确定 "
-            f"[{error.kind.value}]，{_error_site(error.rule, error.location)}。"
+            'Script outcome: type structure is complete but proofs are unresolved '
+            f"[{error.kind.value}], {_error_site(error.rule, error.location)}."
         )
         return "untrusted"
     except HCSPTypeConstructionError as error:
         print(
-            "脚本结论：类型构造失败 "
-            f"[{error.kind.value}/{error.phase}]，"
-            f"{_error_site(error.rule, error.location)}。"
+            'Script outcome: type construction failed '
+            f"[{error.kind.value}/{error.phase}], "
+            f"{_error_site(error.rule, error.location)}."
         )
         return "failed"
     return "trusted"
 
 
 def _error_site(rule: str, location: str) -> str:
-    """把结构化异常中的规则和判断位置压缩成一段脚本结论。"""
+    r"""Summarize the rule and judgment location from structured error fields."""
 
-    return f"规则 {rule or '-'}，判断位置 {location or '-'}"
+    return f"rule {rule or '-'}, judgment location {location or '-'}"
 
 
 def main() -> int:
-    """运行全部示例；只有输入错误或无法构造类型时返回非零退出码。"""
+    r"""Run all examples; invalid input or construction failure gives a nonzero exit code."""
 
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
 
     if OUTPUT_MODE not in {"result", "full"}:
-        print('OUTPUT_MODE 只能设为 "result" 或 "full"。')
+        print('OUTPUT_MODE must be "result" or "full".')
         return 2
 
-    print("HCSP TypeConstructor 公共接口演示")
-    print(f"输出模式：{OUTPUT_MODE!r}（改为 'full' 可查看完整构造日志）")
+    print('HCSP TypeConstructor public API demo')
+    print(f"Output mode: {OUTPUT_MODE!r} (set to 'full' for the complete construction log)")
 
     outcomes = {"trusted": 0, "untrusted": 0, "failed": 0}
     for index, (title, purpose, source) in enumerate(EXAMPLES, start=1):
@@ -228,10 +225,15 @@ def main() -> int:
         outcomes[outcome] += 1
 
     print(
-        "\n演示结束："
-        f"可信类型 {outcomes['trusted']} 个，"
-        f"完整但未验证的候选 {outcomes['untrusted']} 个，"
-        f"构造失败 {outcomes['failed']} 个。"
+        (
+            '\nDemo complete: trusted types: '
+            f"{outcomes['trusted']}"
+            ', complete unverified candidates: '
+            f"{outcomes['untrusted']}"
+            ', construction failures: '
+            f"{outcomes['failed']}"
+            '.'
+        )
     )
     return 0 if outcomes["failed"] == 0 else 1
 

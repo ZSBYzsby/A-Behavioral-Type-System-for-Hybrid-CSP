@@ -1,9 +1,4 @@
-"""类型状态迁移图上的锁自由、Bottom 错误自由与综合分析结果。
-
-本文件只定义数据，不执行图搜索。反例被保存为真正的迁移对象序列，而不是
-容易失效的状态编号字符串。这样，展示层可以同时输出迁移标签和 Table 3
-推导证据，调用者也可以用程序检查路径是否连续。
-"""
+r"""Immutable graph analysis results and finite counterexample witnesses."""
 
 from __future__ import annotations
 
@@ -19,14 +14,14 @@ from ..type_transition_graph import (
 
 @dataclass(frozen=True, slots=True)
 class TransitionPath:
-    """一条首尾相接的有限图路径；空路径表示起点与终点相同。"""
+    r"""A connected finite path; an empty path has identical endpoints."""
 
     start_state: int
     transitions: tuple[TypeTransition, ...]
     end_state: int
 
     def __post_init__(self) -> None:
-        """检查边序列确实从 ``start_state`` 连续到达 ``end_state``。"""
+        r"""Validate that the edge sequence connects the path endpoints."""
 
         if not isinstance(self.start_state, int) or self.start_state < 0:
             raise ValueError("TransitionPath.start_state must be a non-negative integer")
@@ -53,7 +48,7 @@ class TransitionPath:
 
     @property
     def state_ids(self) -> tuple[int, ...]:
-        """按访问顺序返回路径上的状态编号。"""
+        r"""Return visited state identifiers in path order."""
 
         return (self.start_state,) + tuple(
             transition.target for transition in self.transitions
@@ -62,13 +57,13 @@ class TransitionPath:
 
 @dataclass(frozen=True, slots=True)
 class DeadlockWitness:
-    """可达死锁状态及其带非空 ready 集的无限时间迁移。"""
+    r"""A reachable deadlock with an infinite-time edge and nonempty ready set."""
 
     prefix: TransitionPath
     infinite_wait: TypeTransition
 
     def __post_init__(self) -> None:
-        """检查见证满足论文定义中的 ``infinity`` 与非空 ready 条件。"""
+        r"""Require an infinite-time edge with a nonempty ready set."""
 
         transition = self.infinite_wait
         if transition.source != self.prefix.end_state:
@@ -84,13 +79,13 @@ class DeadlockWitness:
 
 @dataclass(frozen=True, slots=True)
 class LivelockWitness:
-    """通向一个纯静默迁移环的可达前缀及非空环。"""
+    r"""A reachable prefix followed by a nonempty silent cycle."""
 
     prefix: TransitionPath
     cycle: TransitionPath
 
     def __post_init__(self) -> None:
-        """检查前缀到达环入口，且环非空、闭合并只含静默边。"""
+        r"""Require a prefix reaching a nonempty, closed, silent cycle."""
 
         if self.prefix.end_state != self.cycle.start_state:
             raise ValueError("Livelock witness prefix does not reach the cycle entry")
@@ -107,13 +102,13 @@ class LivelockWitness:
 
 @dataclass(frozen=True, slots=True)
 class BottomErrorWitness:
-    """到达含一个或多个 Bottom 并行根的错误终止状态的最短前缀。"""
+    r"""A shortest prefix to a state containing parallel Bottom roots."""
 
     prefix: TransitionPath
     component_indices: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        """规范并检查展示状态中指向 Bottom 根的分量编号。"""
+        r"""Validate component indices identifying displayed Bottom roots."""
 
         indices = tuple(self.component_indices)
         object.__setattr__(self, "component_indices", indices)
@@ -130,7 +125,7 @@ class BottomErrorWitness:
 
 @dataclass(frozen=True, slots=True)
 class LockFreedomReport:
-    """完整图上的锁自由、Bottom 错误自由结论和可复查见证。"""
+    r"""Lock and Bottom-error conclusions with inspectable witnesses."""
 
     reachable_state_count: int
     transition_count: int
@@ -139,7 +134,7 @@ class LockFreedomReport:
     bottom_error_witness: BottomErrorWitness | None = None
 
     def __post_init__(self) -> None:
-        """防止报告计数与见证结构出现明显不一致。"""
+        r"""Reject inconsistent graph counts and witness structures."""
 
         if self.reachable_state_count < 1:
             raise ValueError("Lock-freedom analysis requires at least one reachable state")
@@ -148,30 +143,30 @@ class LockFreedomReport:
 
     @property
     def deadlock_free(self) -> bool:
-        """不存在论文 Definition 4.5 所定义的可达死锁状态。"""
+        r"""No reachable deadlock exists under Definition 4.5."""
 
         return self.deadlock_witness is None
 
     @property
     def livelock_free(self) -> bool:
-        """不存在论文 Definition 4.6 所定义的可达无限静默推导。"""
+        r"""No reachable infinite silent derivation exists under Definition 4.6."""
 
         return self.livelock_witness is None
 
     @property
     def lock_free(self) -> bool:
-        """同时满足死锁自由与活锁自由。"""
+        r"""Require both deadlock freedom and livelock freedom."""
 
         return self.deadlock_free and self.livelock_free
 
     @property
     def error_free(self) -> bool:
-        """不存在任何可达的含 Bottom 并行根的错误终止状态。"""
+        r"""No reachable state contains a parallel Bottom error root."""
 
         return self.bottom_error_witness is None
 
     @property
     def behavior_correct(self) -> bool:
-        """同时满足论文锁自由和项目补充的 Bottom 错误自由。"""
+        r"""Require paper-defined lock freedom and the additional Bottom-error check."""
 
         return self.lock_free and self.error_free

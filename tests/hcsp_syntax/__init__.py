@@ -1,1 +1,1 @@
-"""论文 Section 2.1 HCSP 语法树一致性测试。"""
+r"""Regression tests for HCSP syntax. Paper reference: Section 2.1."""

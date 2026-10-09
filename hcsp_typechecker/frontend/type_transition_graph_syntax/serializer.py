@@ -1,9 +1,4 @@
-"""把 Table 3 状态转移图渲染为稳定、带缩进的只读文本。
-
-输出包含初态、全部规范状态、全部去重边以及每条边保存的所有规则证据。状态内容
-委托 ``normalized_type_syntax`` 渲染；本模块不解析图文本，也不参与状态判重或
-Table 3 推导。
-"""
+r"""Render transition graphs as stable, indented text."""
 
 from __future__ import annotations
 
@@ -23,7 +18,7 @@ from ..normalized_type_syntax import format_normalized_type_ast
 
 
 def format_type_transition_graph(value: TypeTransitionGraph) -> str:
-    """输出初态、规范状态、转移标签和全部规则证据的完整图文本。"""
+    r"""Render initial state, normalized states, edge labels, and all rule evidence."""
 
     if not isinstance(value, TypeTransitionGraph):
         raise TypeError("transition graph output requires a TypeTransitionGraph")
@@ -36,7 +31,7 @@ def format_type_transition_graph(value: TypeTransitionGraph) -> str:
 
 
 def _render_states(states: tuple[TypeState, ...], level: int) -> list[str]:
-    """渲染按稳定编号排列的全部规范状态。"""
+    r"""Render normalized states in identifier order."""
 
     lines = [_line(level, "states {")]
     for state in states:
@@ -50,7 +45,7 @@ def _render_transitions(
     transitions: tuple[TypeTransition, ...],
     level: int,
 ) -> list[str]:
-    """渲染全部有向边，并在每条边下保留所有合并后的推导证据。"""
+    r"""Render all edges with their merged derivation evidence."""
 
     if not transitions:
         return [_line(level, "transitions {}")]
@@ -62,7 +57,7 @@ def _render_transitions(
 
 
 def _render_transition(value: TypeTransition, level: int) -> list[str]:
-    """输出一条边的端点、标签和一个非空 derivations 块。"""
+    r"""Render one edge with endpoints, label, and nonempty derivations."""
 
     label = _format_label(value.label)
     lines = [
@@ -81,7 +76,7 @@ def _render_derivation(
     value: TransitionDerivation,
     level: int,
 ) -> list[str]:
-    """用显式任务栈输出 Table 3 规则实例及其嵌套前提证据。"""
+    r"""Render nested Table 3 rule premises with an explicit task stack."""
 
     lines: list[str] = []
     pending: list[tuple[str, TransitionDerivation | None, int]] = [
@@ -120,7 +115,7 @@ def _render_derivation(
 def _format_label(
     value: SilentTransitionLabel | TimedTransitionLabel,
 ) -> str:
-    """把无时转移写为 tau，把时间转移写为 time(duration, ready={...})。"""
+    r"""Render tau or time(duration, ready={...}) labels."""
 
     if isinstance(value, SilentTransitionLabel):
         return "tau"
@@ -140,13 +135,13 @@ def _format_label(
 
 
 def _format_ready_action(value: ReadyAction) -> str:
-    """用用户熟悉的 ``channel?`` 或 ``channel!`` 输出 ready action。"""
+    r"""Render ready actions as channel? or channel!."""
 
     return value.channel + value.direction.value
 
 
 def _format_time(value: Fraction | InfiniteTime) -> str:
-    """输出最简有理数或独立的 infinity 时间字面量。"""
+    r"""Render exact rational or infinity durations."""
 
     if isinstance(value, InfiniteTime):
         return "infinity"
@@ -156,13 +151,13 @@ def _format_time(value: Fraction | InfiniteTime) -> str:
 
 
 def _format_indices(values: tuple[int, ...]) -> str:
-    """用方括号输出有序的分量或分支索引。"""
+    r"""Render ordered component or branch indices in brackets."""
 
     return "[" + ", ".join(str(value) for value in values) + "]"
 
 
 def _prepend_to_first_line(prefix: str, rendered: str) -> str:
-    """把状态编号前缀插入已有规范 Type 文档首行的缩进之后。"""
+    r"""Insert a state prefix after the first line's indentation."""
 
     lines = rendered.splitlines()
     indentation = lines[0][: len(lines[0]) - len(lines[0].lstrip())]
@@ -171,20 +166,20 @@ def _prepend_to_first_line(prefix: str, rendered: str) -> str:
 
 
 def _indent_text(rendered: str, level: int) -> str:
-    """给多行文档统一增加指定层数的四空格缩进。"""
+    r"""Add four-space indentation levels to a multiline document."""
 
     prefix = _indent(level)
     return "\n".join(prefix + line for line in rendered.splitlines())
 
 
 def _line(level: int, value: str) -> str:
-    """构造带四空格层级缩进的一行。"""
+    r"""Create a line at the requested indentation level."""
 
     return _indent(level) + value
 
 
 def _indent(level: int) -> str:
-    """返回状态图输出使用的层级缩进。"""
+    r"""Return indentation for graph output."""
 
     return "    " * level
 

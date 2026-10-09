@@ -1,8 +1,4 @@
-"""TypeChecker 专属的失败分类规则。
-
-Checker 需要额外区分用户 Type 结构不匹配和普通规则静态错误；这两个类别在
-TypeConstructor 中没有对应物，因此不能复用 Constructor 的分类函数。
-"""
+r"""Failure classification for TypeChecker."""
 
 from __future__ import annotations
 
@@ -13,7 +9,7 @@ from .model import TypeCheckingReport
 
 
 class TypeCheckingErrorKind(str, Enum):
-    """TypeChecker 失败的稳定机器可读分类。"""
+    r"""Stable machine-readable TypeChecker error categories."""
 
     ENVIRONMENT = "environment"
     TYPE_MISMATCH = "type-mismatch"
@@ -25,7 +21,7 @@ class TypeCheckingErrorKind(str, Enum):
 def classify_checking_error(
     report: TypeCheckingReport,
 ) -> TypeCheckingErrorKind:
-    """根据最终报告判定 Checker 的首要失败阶段。"""
+    r"""Choose the primary checking failure phase from the final report."""
 
     if report.mismatch:
         return TypeCheckingErrorKind.TYPE_MISMATCH

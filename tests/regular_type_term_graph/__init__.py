@@ -1,2 +1,2 @@
-"""等递归正规项图、双模拟最小化和状态判重键测试。"""
+r"""Regression tests for regular type term graph."""
 
