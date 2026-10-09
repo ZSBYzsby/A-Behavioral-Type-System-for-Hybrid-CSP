@@ -29,6 +29,12 @@ tmp/
 C%3A/
 /gpt_need/
 
+# Maintainer-only validation files are retained locally, outside the paper artifact.
+/tests/
+/scripts/
+/.github/
+/document/BACKEND_CODE_STYLE.md
+
 # KeYmaera X is an optional external dependency.  Do not publish the jar,
 # per-user database/configuration, or generated proof evidence with the code.
 tools/keymaerax.jar

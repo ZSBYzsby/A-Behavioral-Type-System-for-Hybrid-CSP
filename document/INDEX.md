@@ -2,7 +2,7 @@
 
 The root [README](../README.md) covers dependencies, installation, running demos,
 and case studies. This directory contains detailed usage and implementation
-references for users, maintainers, and readers comparing the code with the paper.
+references for users and readers comparing the code with the paper.
 
 The [Public API guide](PUBLIC_API_GUIDE.md) defines the stable interface contract,
 including arguments, result objects, exceptions, and end-to-end examples.
@@ -38,12 +38,9 @@ engineering extensions, and explains the actual Table 2/3 algorithms.
 - [Read-only normalized Type output syntax](NORMALIZED_TYPE_OUTPUT_SYNTAX.md)
 - [Read-only Table 3 graph output syntax](TYPE_TRANSITION_GRAPH_OUTPUT_SYNTAX.md)
 - [Complete project reference](PROJECT_FUNCTION_REFERENCE.md)
-- [Backend code style](BACKEND_CODE_STYLE.md)
 
 ## Documentation scope
 
 - This directory documents the current source implementation.
-- `gpt_need/` contains local papers, slides, and historical review material; it is not
-  the source of current public documentation.
 - `examples/` contains the runnable demos, the paper's cases, and their English
   notes. Those files supplement the general syntax and interface documentation here.

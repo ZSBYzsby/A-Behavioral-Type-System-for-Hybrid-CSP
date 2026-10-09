@@ -518,9 +518,9 @@ unresolved mathematical obligations.
 - The implicit ODE clock `t` is outside Gamma and cannot be a `dot` left-hand side.
 - `wait(d)` is unsupported; use an explicit empty-flow ODE.
 - Construction/checking frontend and backend paths use explicit work stacks.
-  Tests cover 2000 sequential statements, 1500 nested Type continuations, 300
+  Validation before release covered 2000 sequential statements, 1500 nested Type continuations, 300
   parallel components, and a constructed 180-level communication Type passed
-  back to checking/graph construction. These are tested baselines, not hard limits.
+  back to checking/graph construction. These are validated baselines, not hard limits.
 - Graph state spaces can still grow combinatorially; set `max_states/max_transitions`
   to suit the application.
 

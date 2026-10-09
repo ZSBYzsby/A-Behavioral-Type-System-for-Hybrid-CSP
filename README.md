@@ -146,17 +146,6 @@ remain symbolic. The scripts contain the complete HCSP inputs.
   [HCSP and expressions](document/HCSP_INPUT_SYNTAX.md), and
   [supplied types](document/TYPE_INPUT_SYNTAX.md).
 - [Complete documentation index](document/INDEX.md): all usage, syntax,
-  algorithm, implementation, and development guides.
+  algorithm, and implementation guides.
 
 The links above are selected entry points. The complete index lists all topic guides.
-
-## Tests
-
-```sh
-python -m unittest discover -s tests -p "test_*.py"
-python scripts/check_repository.py
-```
-
-The regression suite uses controlled prover fixtures and can run without
-external KeYmaera X. The repository check also checks submission files for Chinese
-characters and private paths and runs environment diagnostics.

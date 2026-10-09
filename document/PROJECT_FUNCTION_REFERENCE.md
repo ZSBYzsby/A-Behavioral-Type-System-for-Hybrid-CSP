@@ -163,7 +163,7 @@ arguments and failure handling. Lexical, syntax, and source-structure errors
 raise `HCSPInputError` with source name, line, column, and diagnostic span.
 
 `parse_hcsp_source`, `parse_hcsp`, `parse_expression`, `construct_type`, and direct
-AST constructors are internal implementation/test/review interfaces, outside
+AST constructors are internal implementation and review interfaces, outside
 package-root compatibility guarantees. Users need not construct
 `TypeConstructionRequest`, internal judgments, or `TypeConstructionReport`.
 
@@ -337,48 +337,31 @@ ODEAnnotation(delay="sqrt(2)")  # Cannot be statically evaluated as a rational.
 ODE([("x", 1)], True)           # Missing ODEAnnotation.
 ```
 
-## Run examples and tests
+## Run the demos and paper cases
 
 After cloning and installing dependencies, run from the repository root:
 
 ```text
+python -m hcsp_typechecker
 python examples/demo_type_construction.py
-python -m unittest discover -s tests -p "test_*.py" -v
+python examples/demo_type_checking.py
+python examples/demo_type_transition_graph.py
 ```
 
-Before committing or pushing, run environment diagnostics, private-path scanning,
-and the full regression suite together:
+The checking demo should report `2/2` expected outcomes. Type construction
+can report complete but unverified ODE candidates when KeYmaera X is unavailable.
+Configure the external prover before running the ODE round trip and paper cases:
 
 ```text
-python scripts/check_repository.py
+python examples/demo_ode_type_round_trip.py
+python examples/case_study_original.py --d 1
+python examples/case_study_revised.py --d 1
 ```
 
-Tests are organized by responsibility. The test command reports the current count:
-
-```text
-tests/
-├── backend/          Backend boundaries, shared rules, and style
-├── expressions/      Expr ASTs, input boundaries, and exact parsing
-├── frontend/         Frontend boundaries
-├── hcsp_syntax/      Process ASTs and Assumptions 2.1/2.2
-├── input_frontend/   Complete source, contexts, Process/expression input
-├── annotations/      ODE/Mu annotations and automatic local clocks
-├── type_ast/         Formal Type construction and normalization
-├── type_constructor/ Table 2, parameter backgrounds, ODE candidates, communication
-├── type_checker/     Supplied Types, grouping, and round trips
-├── type_syntax/      Reversible Type text/AST conversion
-├── model/            Runtime contexts, proof evidence, and full reports
-├── logic/            Expression semantics, definedness, and state values
-├── dl/               dL formulas and KeYmaera X
-├── public_api/       Stable facade, output, exceptions, and case scripts
-└── quality/          Documentation and language consistency
-```
-
-Expression tests compare full Expr ASTs for supported syntax. Process-to-Type
-tests compare behavioral ASTs rather than only printed strings. Test documentation
-identifies relevant rules, obligations, and expected behavior. CI installs and
-runs tests on Windows/Linux and supported Python versions. Real KeYmaera X
-proof is an explicitly configured full-mode smoke test, not a core-suite dependency.
+The original case intentionally reproduces an unverified candidate. The revised
+case should return a trusted Type, build a complete graph, and report all five
+behavioral properties as true. Each script documents its expected outcome in
+its header; the two case-note files explain the paper inputs and assumptions.
 
 The paper's Section 4.3 recursion example can use complete user syntax:
 
